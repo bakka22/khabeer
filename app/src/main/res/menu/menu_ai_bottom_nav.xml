@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:id="@+id/nav_home" android:title="Home" android:icon="@drawable/ic_ai_folder" />
+    <item android:id="@+id/nav_sessions" android:title="Sessions" android:icon="@drawable/ic_ai_storage" />
+    <item android:id="@+id/nav_shell" android:title="Shell" android:icon="@drawable/ic_ai_terminal" />
+    <item android:id="@+id/nav_providers" android:title="Providers" android:icon="@drawable/ic_ai_package" />
+    <item android:id="@+id/nav_settings" android:title="Settings" android:icon="@drawable/ic_ai_menu" />
+</menu>

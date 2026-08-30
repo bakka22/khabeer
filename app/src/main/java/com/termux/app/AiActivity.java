@@ -296,10 +296,24 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
 
     private void setupChrome() {
         mChatTitle.setText("Mobile Hermes");
-        mMenuButton.setOnClickListener(view -> mDrawer.open());
-        mSettingsButton.setOnClickListener(view -> startNewSession());
-        mStopButton.setVisibility(View.GONE);
-        mTerminalCard.setVisibility(View.GONE);
+        if (mMenuButton != null) mMenuButton.setOnClickListener(view -> { if (mDrawer != null) mDrawer.openDrawer(findViewById(R.id.ai_drawer_panel)); });
+        if (mSettingsButton != null) mSettingsButton.setOnClickListener(view -> startNewSession());
+        if (mStopButton != null) mStopButton.setVisibility(View.GONE);
+        if (mTerminalCard != null) mTerminalCard.setVisibility(View.GONE);
+        com.google.android.material.bottomnavigation.BottomNavigationView nav = findViewById(R.id.ai_bottom_nav);
+        if (nav != null) {
+            nav.setOnItemSelectedListener(item -> {
+                int id = item.getItemId();
+                if (id == R.id.nav_home) { showFeaturedProviders(); return true; }
+                if (id == R.id.nav_sessions) { if (mDrawer != null) mDrawer.openDrawer(findViewById(R.id.ai_drawer_panel)); return true; }
+                if (id == R.id.nav_shell) { openShell(); return true; }
+                if (id == R.id.nav_providers) { showProviderDirectory(); return true; }
+                if (id == R.id.nav_settings) { startActivity(new android.content.Intent(this, com.termux.app.activities.SettingsActivity.class)); return true; }
+                return false;
+            });
+        }
+        View back = findViewById(R.id.ai_chat_back);
+        if (back != null) back.setOnClickListener(v -> onBackPressed());
     }
 
     private void setupActions() {
@@ -374,76 +388,119 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         card.setCardBackgroundColor(color(R.color.ai_surface));
         card.setStrokeColor(color(R.color.ai_border));
         card.setStrokeWidth(dp(1));
-        card.setRadius(dp(24));
+        card.setRadius(dp(16));
         card.setClickable(true);
         card.setFocusable(true);
         card.setOnClickListener(view -> selectProvider(profile, true));
-        LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        cardParams.setMargins(0, 0, 0, dp(12));
-        card.setLayoutParams(cardParams);
+        int span = profile.id.equals("more") ? 2 : 1;
+        try {
+            android.widget.GridLayout.LayoutParams gp = new android.widget.GridLayout.LayoutParams();
+            gp.width = 0;
+            gp.height = ViewGroup.LayoutParams.WRAP_CONTENT;
+            gp.columnSpec = android.widget.GridLayout.spec(android.widget.GridLayout.UNDEFINED, span, 1f);
+            gp.setMargins(dp(6), dp(6), dp(6), dp(6));
+            card.setLayoutParams(gp);
+        } catch (Exception e) {
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.setMargins(0, 0, 0, dp(12));
+            card.setLayoutParams(lp);
+        }
 
         LinearLayout content = new LinearLayout(this);
-        content.setGravity(Gravity.CENTER_VERTICAL);
-        content.setPadding(dp(16), dp(14), dp(16), dp(14));
-        content.setOrientation(LinearLayout.HORIZONTAL);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(14), dp(14), dp(14), dp(14));
         card.addView(content);
 
-        TextView mark = badge(profile.mark, 52);
-        content.addView(mark);
-
-        LinearLayout text = new LinearLayout(this);
-        text.setOrientation(LinearLayout.VERTICAL);
-        LinearLayout.LayoutParams textParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
-        textParams.setMargins(dp(14), 0, 0, 0);
-        text.setLayoutParams(textParams);
-        content.addView(text);
+        android.widget.ImageView icon = new android.widget.ImageView(this);
+        icon.setImageResource(iconForProvider(profile.id));
+        icon.setBackgroundResource(R.drawable.bg_ai_harness_badge);
+        icon.setPadding(dp(8), dp(8), dp(8), dp(8));
+        LinearLayout.LayoutParams ip = new LinearLayout.LayoutParams(dp(48), dp(48));
+        content.addView(icon, ip);
 
         TextView title = new TextView(this);
         title.setText(profile.name);
         title.setTextColor(color(R.color.ai_text));
-        title.setTextSize(17);
+        title.setTextSize(13);
         title.setTypeface(Typeface.DEFAULT_BOLD);
-        text.addView(title);
+        title.setMaxLines(1);
+        LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        tp.setMargins(0, dp(10), 0, 0);
+        content.addView(title, tp);
 
         TextView body = new TextView(this);
-        body.setText(profile.description);
+        String shortDesc = shortProviderDesc(profile);
+        body.setText(shortDesc);
         body.setTextColor(color(R.color.ai_text_muted));
-        body.setTextSize(13);
+        body.setTextSize(11);
         body.setMaxLines(2);
-        text.addView(body);
+        body.setLineSpacing(dp(2), 1f);
+        content.addView(body);
 
         if (!profile.implemented) {
             TextView state = new TextView(this);
-            state.setText("Adapter coming next");
+            state.setText("Coming next");
             state.setTextColor(color(R.color.ai_warning));
-            state.setTextSize(12);
+            state.setTextSize(10);
             state.setPadding(0, dp(6), 0, 0);
-            text.addView(state);
+            content.addView(state);
         }
         return card;
+    }
+
+    private int iconForProvider(String id) {
+        if ("openai".equals(id)) return R.drawable.ic_provider_openai;
+        if ("anthropic".equals(id)) return R.drawable.ic_provider_anthropic;
+        if ("opencode".equals(id)) return R.drawable.ic_provider_opencode;
+        if ("gemini".equals(id) || "vertex".equals(id)) return R.drawable.ic_provider_gemini;
+        if ("deepseek".equals(id)) return R.drawable.ic_provider_deepseek;
+        if ("kimi-coding".equals(id) || "kimi".equals(id)) return R.drawable.ic_provider_kimi;
+        if ("openrouter".equals(id)) return R.drawable.ic_provider_opencode;
+        return R.drawable.ic_provider_more;
+    }
+
+    private String shortProviderDesc(AiProviderProfile p) {
+        if ("openai".equals(p.id)) return "GPT 4o, 4.1 & more";
+        if ("anthropic".equals(p.id)) return "Claude 3.5, Opus, Sonnet";
+        if ("opencode".equals(p.id)) return "OpenCode LLMs & tools";
+        if ("gemini".equals(p.id)) return "Gemini 1.5 Pro & Flash";
+        if ("deepseek".equals(p.id)) return "DeepSeek Coder V2, V3";
+        if ("kimi-coding".equals(p.id)) return "Kimi K2, K2 Instruct";
+        return p.description.length() > 32 ? p.description.substring(0, 32) : p.description;
     }
 
     private MaterialCardView createMoreProvidersTile() {
         MaterialCardView card = new MaterialCardView(this);
         card.setCardBackgroundColor(color(R.color.ai_surface));
-        card.setStrokeColor(color(R.color.ai_border));
+        card.setStrokeColor(color(R.color.ai_accent));
         card.setStrokeWidth(dp(1));
-        card.setRadius(dp(24));
+        card.setRadius(dp(16));
         card.setClickable(true);
         card.setFocusable(true);
         card.setOnClickListener(view -> showProviderDirectory());
-        LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        cardParams.setMargins(0, 0, 0, dp(12));
-        card.setLayoutParams(cardParams);
+        try {
+            android.widget.GridLayout.LayoutParams gp = new android.widget.GridLayout.LayoutParams();
+            gp.width = ViewGroup.LayoutParams.MATCH_PARENT;
+            gp.height = ViewGroup.LayoutParams.WRAP_CONTENT;
+            gp.columnSpec = android.widget.GridLayout.spec(android.widget.GridLayout.UNDEFINED, 2, 1f);
+            gp.setMargins(dp(6), dp(6), dp(6), dp(6));
+            card.setLayoutParams(gp);
+        } catch (Exception e) {
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.setMargins(0, 0, 0, dp(12));
+            card.setLayoutParams(lp);
+        }
 
         LinearLayout content = new LinearLayout(this);
         content.setGravity(Gravity.CENTER_VERTICAL);
-        content.setPadding(dp(16), dp(14), dp(16), dp(14));
+        content.setPadding(dp(14), dp(14), dp(14), dp(14));
         content.setOrientation(LinearLayout.HORIZONTAL);
         card.addView(content);
-        content.addView(badge("…", 52));
+        android.widget.ImageView icon = new android.widget.ImageView(this);
+        icon.setImageResource(R.drawable.ic_provider_more);
+        icon.setBackgroundResource(R.drawable.bg_ai_harness_badge);
+        icon.setPadding(dp(10), dp(10), dp(10), dp(10));
+        content.addView(icon, new LinearLayout.LayoutParams(dp(48), dp(48)));
 
         LinearLayout text = new LinearLayout(this);
         text.setOrientation(LinearLayout.VERTICAL);
@@ -454,14 +511,14 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         TextView title = new TextView(this);
         title.setText("More providers");
         title.setTextColor(color(R.color.ai_text));
-        title.setTextSize(17);
+        title.setTextSize(13);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         text.addView(title);
 
         TextView body = new TextView(this);
-        body.setText("Browse every provider registered from Hermes Agent.");
+        body.setText("Explore 30+ providers and custom endpoints");
         body.setTextColor(color(R.color.ai_text_muted));
-        body.setTextSize(13);
+        body.setTextSize(11);
         text.addView(body);
         return card;
     }
