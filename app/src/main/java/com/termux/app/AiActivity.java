@@ -505,13 +505,22 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     }
 
     private int iconForProvider(String id) {
-        if ("openai".equals(id)) return R.drawable.ic_provider_openai;
+        if ("openai".equals(id) || "openai-codex".equals(id)) return R.drawable.ic_provider_openai;
         if ("anthropic".equals(id)) return R.drawable.ic_provider_anthropic;
         if ("opencode".equals(id)) return R.drawable.ic_provider_opencode;
+        if ("openrouter".equals(id)) return R.drawable.ic_provider_openrouter;
+        if ("github-copilot".equals(id)) return R.drawable.ic_provider_copilot;
         if ("gemini".equals(id) || "vertex".equals(id)) return R.drawable.ic_provider_gemini;
         if ("deepseek".equals(id)) return R.drawable.ic_provider_deepseek;
         if ("kimi-coding".equals(id) || "kimi".equals(id)) return R.drawable.ic_provider_kimi;
-        if ("openrouter".equals(id)) return R.drawable.ic_provider_opencode;
+        if ("azure-foundry".equals(id)) return R.drawable.ic_provider_azure;
+        if ("bedrock".equals(id)) return R.drawable.ic_provider_aws;
+        if ("nvidia".equals(id)) return R.drawable.ic_provider_nvidia;
+        if ("alibaba".equals(id) || "qwen-oauth".equals(id)) return R.drawable.ic_provider_qwen;
+        if ("ollama-cloud".equals(id)) return R.drawable.ic_provider_ollama;
+        if ("huggingface".equals(id)) return R.drawable.ic_provider_huggingface;
+        if ("minimax".equals(id)) return R.drawable.ic_provider_minimax;
+        if ("lmstudio".equals(id)) return R.drawable.ic_provider_lmstudio;
         return R.drawable.ic_provider_more;
     }
 
@@ -571,12 +580,31 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     }
 
     private View createProviderRow(AiProviderProfile profile) {
-        TextView row = new TextView(this);
-        row.setText(profile.mark + "  " + profile.name);
-        row.setTextColor(color(R.color.ai_text));
-        row.setTextSize(14);
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(dp(10), dp(12), dp(10), dp(12));
+        row.setPadding(dp(10), dp(10), dp(10), dp(10));
+        row.setClickable(true);
+        row.setFocusable(true);
+        row.setBackgroundResource(R.drawable.bg_provider_card);
+        LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        rowLp.setMargins(0, 0, 0, dp(6));
+        row.setLayoutParams(rowLp);
+
+        android.widget.ImageView icon = new android.widget.ImageView(this);
+        icon.setImageResource(iconForProvider(profile.id));
+        LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(dp(26), dp(26));
+        iconLp.setMargins(0, 0, dp(10), 0);
+        icon.setLayoutParams(iconLp);
+        row.addView(icon);
+
+        TextView label = new TextView(this);
+        label.setText(profile.name);
+        label.setTextColor(color(R.color.ai_text));
+        label.setTextSize(14);
+        row.addView(label);
+
         row.setOnClickListener(view -> {
             selectProvider(profile, true);
             if (mDrawer != null) mDrawer.closeDrawer(findViewById(R.id.ai_drawer_panel));
