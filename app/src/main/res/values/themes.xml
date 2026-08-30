@@ -46,4 +46,15 @@
         <item name="extraKeysButtonActiveBackgroundColor">@color/grey_500</item>
     </style>
 
+    <style name="Theme.AiWorkspace" parent="Theme.TermuxApp.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/ai_accent</item>
+        <item name="colorPrimaryVariant">@color/ai_accent_dark</item>
+        <item name="colorSecondary">@color/ai_accent</item>
+        <item name="android:windowBackground">@color/ai_background</item>
+        <item name="android:statusBarColor">@color/ai_background</item>
+        <item name="android:navigationBarColor">@color/ai_background</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:fontFamily">sans</item>
+    </style>
+
 </resources>

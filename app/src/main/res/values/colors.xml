@@ -1,3 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <color name="ai_background">#F4F6F1</color>
+    <color name="ai_surface">#FFFFFF</color>
+    <color name="ai_surface_muted">#E9EEE7</color>
+    <color name="ai_border">#D9E1D6</color>
+    <color name="ai_text">#18231F</color>
+    <color name="ai_text_muted">#64736D</color>
+    <color name="ai_accent">#0C8F7B</color>
+    <color name="ai_accent_dark">#086A5C</color>
+    <color name="ai_success">#147B54</color>
+    <color name="ai_warning">#B2572B</color>
+    <color name="ai_terminal">#111614</color>
+    <color name="ai_terminal_text">#E9F1ED</color>
+    <color name="ai_drawer_background">#FFFFFF</color>
+    <color name="ai_bubble_user">#0C8F7B</color>
+    <color name="ai_bubble_agent">#FFFFFF</color>
+    <color name="ai_chip">#E9EEE7</color>
 </resources>

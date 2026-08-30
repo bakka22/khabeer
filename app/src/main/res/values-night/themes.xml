@@ -1,5 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <style name="Theme.AiWorkspace" parent="Theme.TermuxApp.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/ai_accent</item>
+        <item name="colorPrimaryVariant">@color/ai_accent_dark</item>
+        <item name="colorSecondary">@color/ai_accent</item>
+        <item name="android:windowBackground">@color/ai_background</item>
+        <item name="android:statusBarColor">@color/ai_background</item>
+        <item name="android:navigationBarColor">@color/ai_background</item>
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+
     <!--
      https://material.io/develop/android/theming/dark
     -->

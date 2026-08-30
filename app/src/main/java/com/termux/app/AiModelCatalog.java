@@ -1,0 +1,84 @@
+package com.termux.app;
+
+import android.text.TextUtils;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.io.BufferedReader;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+
+/** Fetches live model catalogs from provider APIs instead of relying on fake fixed lists. */
+public final class AiModelCatalog {
+
+    private AiModelCatalog() {
+    }
+
+    public static List<String> fetch(AiProviderProfile profile, String baseUrl, String apiKey) throws Exception {
+        String url = modelsUrl(baseUrl);
+        if (TextUtils.isEmpty(url)) throw new IllegalArgumentException("Provider has no model catalog URL.");
+
+        HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
+        connection.setRequestMethod("GET");
+        connection.setConnectTimeout(15000);
+        connection.setReadTimeout(45000);
+        connection.setRequestProperty("Accept", "application/json");
+        if (!TextUtils.isEmpty(apiKey)) connection.setRequestProperty("Authorization", "Bearer " + apiKey);
+        if (profile != null && "anthropic".equals(profile.id))
+            connection.setRequestProperty("anthropic-version", "2023-06-01");
+
+        int code = connection.getResponseCode();
+        InputStream stream = code >= 200 && code < 300 ? connection.getInputStream() : connection.getErrorStream();
+        String text = readFully(stream);
+        if (code < 200 || code >= 300)
+            throw new IllegalStateException("Model catalog request failed with HTTP " + code + ": " + text);
+        return parseModels(text);
+    }
+
+    public static String modelsUrl(String baseUrl) {
+        String clean = baseUrl == null ? "" : baseUrl.trim();
+        if (clean.isEmpty()) return "";
+        if (clean.endsWith("/models")) return clean;
+        String[] suffixes = new String[]{"/chat/completions", "/responses", "/messages"};
+        for (String suffix : suffixes) {
+            if (clean.endsWith(suffix)) clean = clean.substring(0, clean.length() - suffix.length());
+        }
+        if (clean.endsWith("/")) clean = clean.substring(0, clean.length() - 1);
+        return clean + "/models";
+    }
+
+    private static List<String> parseModels(String json) throws Exception {
+        JSONObject root = new JSONObject(json);
+        JSONArray data = root.optJSONArray("data");
+        if (data == null) data = root.optJSONArray("models");
+        List<String> models = new ArrayList<>();
+        if (data != null) {
+            for (int i = 0; i < data.length(); i++) {
+                Object item = data.opt(i);
+                String id = null;
+                if (item instanceof JSONObject) id = ((JSONObject) item).optString("id", null);
+                else if (item instanceof String) id = (String) item;
+                if (!TextUtils.isEmpty(id)) models.add(id);
+            }
+        }
+        Collections.sort(models, String.CASE_INSENSITIVE_ORDER);
+        return models;
+    }
+
+    private static String readFully(InputStream stream) throws Exception {
+        if (stream == null) return "";
+        StringBuilder builder = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) builder.append(line).append('\n');
+        }
+        return builder.toString();
+    }
+}

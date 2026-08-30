@@ -30,6 +30,11 @@ import java.util.UUID;
  */
 public final class TerminalSession extends TerminalOutput {
 
+    /** Receives raw bytes read from the PTY before terminal emulation consumes them. */
+    public interface RawOutputListener {
+        void onOutput(byte[] data, int offset, int count);
+    }
+
     private static final int MSG_NEW_INPUT = 1;
     private static final int MSG_PROCESS_EXITED = 4;
 
@@ -52,6 +57,8 @@ public final class TerminalSession extends TerminalOutput {
 
     /** Callback which gets notified when a session finishes or changes title. */
     TerminalSessionClient mClient;
+
+    private volatile RawOutputListener mRawOutputListener;
 
     /** The pid of the shell process. 0 if not started and -1 if finished running. */
     int mShellPid;
@@ -99,6 +106,11 @@ public final class TerminalSession extends TerminalOutput {
             mEmulator.updateTerminalSessionClient(client);
     }
 
+    /** Set a listener for raw PTY output. The byte array is only valid during the callback. */
+    public void setRawOutputListener(RawOutputListener listener) {
+        mRawOutputListener = listener;
+    }
+
     /** Inform the attached pty of the new size and reflow or initialize the emulator. */
     public void updateSize(int columns, int rows, int cellWidthPixels, int cellHeightPixels) {
         if (mEmulator == null) {
@@ -138,6 +150,14 @@ public final class TerminalSession extends TerminalOutput {
                     while (true) {
                         int read = termIn.read(buffer);
                         if (read == -1) return;
+                        RawOutputListener rawOutputListener = mRawOutputListener;
+                        if (rawOutputListener != null) {
+                            try {
+                                rawOutputListener.onOutput(buffer, 0, read);
+                            } catch (RuntimeException ignored) {
+                                // A protocol observer must not stop terminal I/O.
+                            }
+                        }
                         if (!mProcessToTerminalIOQueue.write(buffer, 0, read)) return;
                         mMainThreadHandler.sendEmptyMessage(MSG_NEW_INPUT);
                     }

@@ -1,0 +1,18 @@
+<resources>
+    <color name="ai_background">#101411</color>
+    <color name="ai_surface">#171D19</color>
+    <color name="ai_surface_muted">#202820</color>
+    <color name="ai_border">#334038</color>
+    <color name="ai_text">#F1F6F2</color>
+    <color name="ai_text_muted">#A7B5AD</color>
+    <color name="ai_accent">#39C6AE</color>
+    <color name="ai_accent_dark">#22A58F</color>
+    <color name="ai_success">#57C79A</color>
+    <color name="ai_warning">#E68B56</color>
+    <color name="ai_terminal">#090D0B</color>
+    <color name="ai_terminal_text">#E8F2EC</color>
+    <color name="ai_drawer_background">#171D19</color>
+    <color name="ai_bubble_user">#1F8F7D</color>
+    <color name="ai_bubble_agent">#202820</color>
+    <color name="ai_chip">#202820</color>
+</resources>
