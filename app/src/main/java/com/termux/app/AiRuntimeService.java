@@ -84,6 +84,7 @@ public final class AiRuntimeService extends Service {
     private BusyInputMode mBusyMode = BusyInputMode.INTERRUPT;
     private final Object mQueueLock = new Object();
     private String mSteerText;
+    private volatile boolean mLastTurnInterrupted;
 
     private HermesSessionState sessionState(String key) {
         HermesSessionState s = mSessions.get(key);
@@ -105,12 +106,29 @@ public final class AiRuntimeService extends Service {
     private void restoreLatestActiveRun() {
         try {
             AiDatabase.RunRecord r = mDatabase.getLatestActiveRun();
-            if (r != null && r.sessionKey != null) {
-                mActiveRun = r;
-                mStateMachine = new AiRunStateMachine();
-                try { mStateMachine.transition(AiRunStateMachine.State.STARTING); mStateMachine.transition(AiRunStateMachine.State.CONNECTING); mStateMachine.transition(AiRunStateMachine.State.RUNNING); } catch (Exception ignored) {}
-                mPreviousResponseId = r.previousResponseId;
-                if (r.chatMessagesJson != null) mChatCompletionMessages = new JSONArray(r.chatMessagesJson);
+            if (r == null) {
+                java.util.List<AiDatabase.RunRecord> recent = mDatabase.getRecentRuns(1);
+                if (!recent.isEmpty()) r = recent.get(0);
+            }
+            if (r != null) {
+                long age = System.currentTimeMillis() - r.updatedAt;
+                boolean fresh = age < AUTO_CONTINUE_FRESHNESS_MS;
+                boolean isFailed = r.state == AiRunStateMachine.State.FAILED;
+                if (!isFailed && r.chatMessagesJson != null) {
+                    mActiveRun = r;
+                    mStateMachine = new AiRunStateMachine();
+                    try { mStateMachine.transition(AiRunStateMachine.State.STARTING); mStateMachine.transition(AiRunStateMachine.State.CONNECTING); } catch (Exception ignored) {}
+                    if (r.state == AiRunStateMachine.State.CANCELED || r.state == AiRunStateMachine.State.COMPLETED) {
+                        try { mStateMachine.transition(AiRunStateMachine.State.RUNNING); } catch (Exception ignored) { try { mStateMachine.transition(AiRunStateMachine.State.STARTING); } catch (Exception ignored2) {} }
+                    } else {
+                        try { mStateMachine.transition(AiRunStateMachine.State.RUNNING); } catch (Exception ignored) {}
+                    }
+                    mPreviousResponseId = r.previousResponseId;
+                    try { mChatCompletionMessages = new JSONArray(r.chatMessagesJson); } catch (Exception ignored) {}
+                    if (fresh && r.activeTurnToken != null) {
+                        mDatabase.setResumePending(r.id, true);
+                    }
+                }
             }
         } catch (Exception ignored) {}
     }
@@ -280,9 +298,32 @@ public final class AiRuntimeService extends Service {
             }
             HermesInterruptManager.setInterrupt(true, mWorker.getId(), "steer");
         }
+        // Let the interrupted worker unwind so it can persist its partial reply
+        // before we build the next turn (mirrors Hermes' orderly interrupt drain).
+        if (mWorker != null && mWorker.isAlive()) {
+            try { mWorker.join(3000); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+        }
         mStopRequested = false;
         mSteerText = null;
+        prompt = applyInterruptScaffold(prompt);
         runTurn(providerId, baseUrl, apiKey, mActiveRun.workspace, prompt, model, effort, approvalPolicy);
+    }
+
+    /**
+     * Hermes-style interrupt checkpoint: when the previous turn was cut off
+     * mid-response, wrap the user's follow-up in a scaffold that tells the
+     * model its own reply was interrupted and shows the visible text it had
+     * produced, so "continue" has full context.
+     */
+    private String applyInterruptScaffold(String prompt) {
+        if (!mLastTurnInterrupted) return prompt;
+        mLastTurnInterrupted = false;
+        StringBuilder sb = new StringBuilder();
+        sb.append("[Context from the interrupted assistant response]\n");
+        sb.append("[This response was interrupted by a user correction.]\n");
+        sb.append("The previous turn was cut off mid-task. The task is NOT finished.\n\n");
+        sb.append(prompt == null ? "" : prompt);
+        return sb.toString();
     }
 
     public void stopActiveRun() {
@@ -368,6 +409,12 @@ public final class AiRuntimeService extends Service {
         if (mActiveRun == null) return;
         HermesInterruptManager.clearCurrentThread();
         HermesInterruptManager.setInterrupt(false, Thread.currentThread().getId(), null);
+        // A continuation after CANCELED needs a fresh machine (FSM has no CANCELED->RUNNING).
+        if (mStateMachine == null || mStateMachine.getState() == AiRunStateMachine.State.CANCELED) {
+            mStateMachine = new AiRunStateMachine();
+            try { mStateMachine.transition(AiRunStateMachine.State.STARTING); mStateMachine.transition(AiRunStateMachine.State.CONNECTING); } catch (Exception ignored) {}
+            mActiveRun.state = AiRunStateMachine.State.STARTING;
+        }
         if (mSteerText != null) prompt = "[steered] " + mSteerText + "\n\n" + prompt;
         mSteerText = null;
         emit("turn/started", new JSONObject());
@@ -375,8 +422,19 @@ public final class AiRuntimeService extends Service {
         emit("item/agentMessage/delta", json("text", "Thinking…"));
         if (mActiveRun != null) mDatabase.appendMessage(mActiveRun.id, "user", prompt);
 
-        JSONArray input = new JSONArray();
-        input.put(json("role", "user", "content", prompt));
+        JSONArray input;
+        try {
+            if (mChatCompletionMessages == null)
+                mChatCompletionMessages = new JSONArray().put(json("role", "system", "content", systemInstructions()));
+            sanitizeReplayHistory();
+            mChatCompletionMessages.put(json("role", "user", "content", prompt));
+            if (mActiveRun != null) { mActiveRun.chatMessagesJson = mChatCompletionMessages.toString(); persistRun(); }
+            input = toResponsesInput(mChatCompletionMessages);
+        } catch (Exception e) {
+            input = new JSONArray();
+            input.put(json("role", "user", "content", prompt));
+        }
+        mPreviousResponseId = null;
 
         try {
             if (usesChatCompletions(providerId)) {
@@ -385,11 +443,8 @@ public final class AiRuntimeService extends Service {
             }
             for (int step = 0; step < MAX_MODEL_STEPS && !mStopRequested && !HermesInterruptManager.isInterrupted(); step++) {
                 JSONObject response = callResponsesApiWithRetry(providerId, baseUrl, apiKey, model, effort, input);
-                mPreviousResponseId = response.optString("id", mPreviousResponseId);
-                if (mActiveRun != null) { mActiveRun.previousResponseId = mPreviousResponseId; persistRun(); }
                 JSONArray outputs = response.optJSONArray("output");
                 boolean hasToolCall = false;
-                JSONArray nextInput = new JSONArray();
 
                 if (outputs != null) {
                     for (int i = 0; i < outputs.length(); i++) {
@@ -398,12 +453,36 @@ public final class AiRuntimeService extends Service {
                         String type = item.optString("type");
                         if ("message".equals(type)) {
                             emitMessage(item);
+                            String text = extractMessageText(item);
+                            if (!TextUtils.isEmpty(text)) {
+                                try { mChatCompletionMessages.put(new JSONObject().put("role", "assistant").put("content", text)); } catch (Exception ignored) {}
+                            }
                         } else if (isReasoningType(type)) {
                             emitReasoningItem(item);
                         } else if ("function_call".equals(type)) {
                             hasToolCall = true;
+                            try {
+                                JSONObject fn = new JSONObject()
+                                    .put("role", "assistant")
+                                    .put("tool_calls", new JSONArray().put(new JSONObject()
+                                        .put("id", item.optString("call_id", item.optString("id")))
+                                        .put("type", "function")
+                                        .put("function", new JSONObject()
+                                            .put("name", item.optString("name"))
+                                            .put("arguments", item.optString("arguments", "{}")))));
+                                mChatCompletionMessages.put(fn);
+                                if (mActiveRun != null) { mActiveRun.chatMessagesJson = mChatCompletionMessages.toString(); persistRun(); }
+                            } catch (Exception ignored) {}
                             JSONObject toolResult = executeToolCall(item, workspace, approvalPolicy);
-                            nextInput.put(toolResult);
+                            String output = toolResult.optString("output", "");
+                            try {
+                                mChatCompletionMessages.put(new JSONObject()
+                                    .put("role", "tool")
+                                    .put("tool_call_id", item.optString("call_id", item.optString("id")))
+                                    .put("content", output));
+                                if (mActiveRun != null) { mActiveRun.chatMessagesJson = mChatCompletionMessages.toString(); persistRun(); }
+                            } catch (Exception ignored) {}
+                            input.put(toolResult);
                         }
                     }
                 } else {
@@ -415,19 +494,69 @@ public final class AiRuntimeService extends Service {
                     completeRun();
                     return;
                 }
-                input = nextInput;
             }
 
-            if (!mStopRequested && !HermesInterruptManager.isInterrupted()) failRun("The native agent reached its tool-step limit before finishing.");
-            else if (HermesInterruptManager.isInterrupted()) { emit("turn/interrupted", json("reason", HermesInterruptManager.getReason())); clearActiveTurn(); }
-            else clearActiveTurn();
+        if (!mStopRequested && !HermesInterruptManager.isInterrupted()) failRun("The native agent reached its tool-step limit before finishing.");
+            else if (HermesInterruptManager.isInterrupted()) { emit("turn/interrupted", json("reason", HermesInterruptManager.getReason())); mLastTurnInterrupted = true; clearActiveTurn(); }
+            else { mLastTurnInterrupted = true; clearActiveTurn(); }
             drainQueueIfNeeded();
         } catch (Exception e) {
             if (!mStopRequested && !HermesInterruptManager.isInterrupted()) {
                 if (isNetworkError(e)) { transitionWithFallback(AiRunStateMachine.State.DISCONNECTED); failRun(e.getMessage() == null ? e.toString() : e.getMessage()); }
                 else failRun(e.getMessage() == null ? e.toString() : e.getMessage());
-            } else { emit("turn/interrupted", json("reason", "cancel")); clearActiveTurn(); }
+            } else { emit("turn/interrupted", json("reason", "cancel")); mLastTurnInterrupted = true; clearActiveTurn(); }
         } finally { HermesInterruptManager.clearCurrentThread(); }
+    }
+
+    private String extractMessageText(JSONObject item) {
+        JSONArray content = item.optJSONArray("content");
+        if (content == null) return "";
+        StringBuilder builder = new StringBuilder();
+        for (int i = 0; i < content.length(); i++) {
+            JSONObject part = content.optJSONObject(i);
+            if (part == null) continue;
+            String type = part.optString("type");
+            if ("output_text".equals(type) || "text".equals(type)) builder.append(part.optString("text"));
+        }
+        return builder.toString();
+    }
+
+    /** Convert the chat-format history into Responses-API input items (full replay, Hermes-style). */
+    private JSONArray toResponsesInput(JSONArray messages) throws Exception {
+        JSONArray input = new JSONArray();
+        for (int i = 0; i < messages.length(); i++) {
+            JSONObject m = messages.optJSONObject(i);
+            if (m == null) continue;
+            String role = m.optString("role");
+            if ("system".equals(role)) continue;
+            if ("user".equals(role)) {
+                input.put(new JSONObject().put("role", "user").put("content", m.optString("content", "")));
+            } else if ("assistant".equals(role)) {
+                JSONArray tcs = m.optJSONArray("tool_calls");
+                if (tcs != null && tcs.length() > 0) {
+                    String c = m.optString("content", "");
+                    if (!TextUtils.isEmpty(c)) input.put(new JSONObject().put("role", "assistant").put("content", c));
+                    for (int k = 0; k < tcs.length(); k++) {
+                        JSONObject tc = tcs.optJSONObject(k);
+                        JSONObject fn = tc == null ? null : tc.optJSONObject("function");
+                        if (fn == null) continue;
+                        input.put(new JSONObject()
+                            .put("type", "function_call")
+                            .put("call_id", tc.optString("id"))
+                            .put("name", fn.optString("name"))
+                            .put("arguments", fn.optString("arguments", "{}")));
+                    }
+                } else {
+                    input.put(new JSONObject().put("role", "assistant").put("content", m.optString("content", "")));
+                }
+            } else if ("tool".equals(role)) {
+                input.put(new JSONObject()
+                    .put("type", "function_call_output")
+                    .put("call_id", m.optString("tool_call_id"))
+                    .put("output", m.optString("content", "")));
+            }
+        }
+        return input;
     }
 
     private boolean isNetworkError(Exception e) {
@@ -461,6 +590,7 @@ public final class AiRuntimeService extends Service {
                                             String prompt, String model, @Nullable String approvalPolicy) throws Exception {
         if (mChatCompletionMessages == null)
             mChatCompletionMessages = new JSONArray().put(json("role", "system", "content", systemInstructions()));
+        sanitizeReplayHistory();
         mChatCompletionMessages.put(json("role", "user", "content", prompt));
         if (mActiveRun != null) { mActiveRun.chatMessagesJson = mChatCompletionMessages.toString(); persistRun(); }
 
@@ -503,8 +633,51 @@ public final class AiRuntimeService extends Service {
         }
 
         if (!mStopRequested && !HermesInterruptManager.isInterrupted()) failRun("The chat-completions agent reached its tool-step limit before finishing.");
-        else clearActiveTurn();
+        else { mLastTurnInterrupted = true; clearActiveTurn(); }
         drainQueueIfNeeded();
+    }
+
+    /**
+     * Hermes-style replay cleanup (agent/replay_cleanup.py): a turn killed
+     * mid-tool-loop can leave a trailing assistant(tool_calls) with NO tool
+     * answers. Replaying that dangling tail makes the model re-issue the call
+     * or lose the plot. Synthesize orphan-recovery tool results so the model
+     * knows the tool "may have executed; effect UNKNOWN".
+     */
+    private void sanitizeReplayHistory() {
+        if (mChatCompletionMessages == null) return;
+        JSONArray cleaned = new JSONArray();
+        int n = mChatCompletionMessages.length();
+        for (int i = 0; i < n; i++) {
+            JSONObject msg = mChatCompletionMessages.optJSONObject(i);
+            if (msg == null) continue;
+            String role = msg.optString("role", "");
+            if ("assistant".equals(role) && msg.optJSONArray("tool_calls") != null) {
+                cleaned.put(msg);
+                JSONArray toolCalls = msg.optJSONArray("tool_calls");
+                boolean anyAnswer = false;
+                for (int j = i + 1; j < n; j++) {
+                    JSONObject nxt = mChatCompletionMessages.optJSONObject(j);
+                    if (nxt == null || !"tool".equals(nxt.optString("role"))) break;
+                    anyAnswer = true;
+                }
+                if (!anyAnswer && toolCalls != null) {
+                    for (int k = 0; k < toolCalls.length(); k++) {
+                        JSONObject tc = toolCalls.optJSONObject(k);
+                        if (tc == null) continue;
+                        try {
+                            cleaned.put(new JSONObject()
+                                .put("role", "tool")
+                                .put("tool_call_id", tc.optString("id"))
+                                .put("content", "[Orphan recovery: this tool may have executed before the interruption; its effect is UNKNOWN. Inspect current state before retrying.]"));
+                        } catch (Exception ignored) {}
+                    }
+                }
+                continue;
+            }
+            cleaned.put(msg);
+        }
+        mChatCompletionMessages = cleaned;
     }
 
     private JSONObject callChatCompletionsApi(String providerId, String baseUrl, String apiKey, String model,
@@ -728,7 +901,6 @@ public final class AiRuntimeService extends Service {
             .put("input", input)
             .put("tools", new JSONArray().put(terminalTool()))
             .put("tool_choice", "auto");
-        if (!TextUtils.isEmpty(mPreviousResponseId)) body.put("previous_response_id", mPreviousResponseId);
         if (!TextUtils.isEmpty(effort)) body.put("reasoning", new JSONObject().put("effort", effort));
 
         HttpURLConnection connection = (HttpURLConnection) new URL(baseUrl).openConnection();

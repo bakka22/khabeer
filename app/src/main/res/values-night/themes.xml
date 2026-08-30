@@ -4,11 +4,21 @@
         <item name="colorPrimary">@color/ai_accent</item>
         <item name="colorPrimaryVariant">@color/ai_accent_dark</item>
         <item name="colorSecondary">@color/ai_accent</item>
+        <item name="colorSurface">@color/ai_surface</item>
+        <item name="colorOnSurface">@color/ai_text</item>
+        <item name="colorOnPrimary">@color/ai_text</item>
+        <item name="android:textColorPrimary">@color/ai_text</item>
+        <item name="android:textColorSecondary">@color/ai_text_muted</item>
+        <item name="android:textColorTertiary">@color/ai_text_muted</item>
+        <item name="android:colorBackground">@color/ai_background</item>
         <item name="android:windowBackground">@color/ai_background</item>
         <item name="android:statusBarColor">@color/ai_background</item>
         <item name="android:navigationBarColor">@color/ai_background</item>
         <item name="android:fontFamily">sans</item>
         <item name="android:windowLightStatusBar">false</item>
+        <item name="materialAlertDialogTheme">@style/AiMaterialAlertDialog</item>
+        <item name="bottomSheetDialogTheme">@style/AiBottomSheetDialog</item>
+        <item name="actionBarTheme">@style/AiActionBarTheme</item>
     </style>
 
     <!--

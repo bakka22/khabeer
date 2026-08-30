@@ -981,8 +981,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
 
     @Override
     public void onRunChanged(AiDatabase.RunRecord run) {
-        mHasNativeSession = run != null && run.state != AiRunStateMachine.State.FAILED
-            && run.state != AiRunStateMachine.State.CANCELED;
+        mHasNativeSession = run != null && run.state != AiRunStateMachine.State.FAILED;
         mRunActive = run != null && run.state != AiRunStateMachine.State.COMPLETED
             && run.state != AiRunStateMachine.State.FAILED
             && run.state != AiRunStateMachine.State.CANCELED;
