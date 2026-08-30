@@ -64,6 +64,7 @@ public final class AiRuntimeService extends Service {
     private static final int MODEL_READ_TIMEOUT_MS = 10 * 60 * 1000;
     private static final int DEFAULT_TOOL_TIMEOUT_SECONDS = 300;
     private static final int BUSY_QUEUE_MAX_PENDING = 8;
+    private static final long APPROVAL_AUTO_DENY_MS = 120_000;
     private static final long AUTO_CONTINUE_FRESHNESS_MS = 3600_000L;
 
     private final IBinder mBinder = new LocalBinder();
@@ -224,6 +225,24 @@ public final class AiRuntimeService extends Service {
         persistRun();
         emit("session/resumed", json("sessionId", runId));
         for (Listener listener : new ArrayList<>(mListeners)) listener.onRunChanged(copyRun(mActiveRun));
+    }
+
+    /** Starts a true session boundary: stops any turn and drops the current
+     * run entirely so the next prompt creates a fresh session (Hermes
+     * session_reset). stopActiveRun alone keeps the run as current. */
+    public void newSession() {
+        stopActiveRun();
+        mActiveRun = null;
+        mChatCompletionMessages = null;
+        mPreviousResponseId = null;
+        mStateMachine = new AiRunStateMachine();
+        // stopActiveRun() may have already queued a run-changed post with the
+        // old run; enqueue ours after it so the UI lands on the null (no
+        // current session) state, not on the stale run.
+        mHandler.post(() -> {
+            for (Listener listener : new ArrayList<>(mListeners)) listener.onRunChanged(null);
+        });
+        emit("session/new", json("at", String.valueOf(System.currentTimeMillis())));
     }
 
     public void setBusyMode(BusyInputMode mode) { if (mode != null) mBusyMode = mode; }
@@ -428,10 +447,7 @@ public final class AiRuntimeService extends Service {
 
     public void respondToRequest(long id, JSONObject result) {
         PendingApproval approval = mPendingApprovals.remove(id);
-        if (approval == null) {
-            notifyError(mActiveRun == null ? null : mActiveRun.id, "This approval request is no longer active.");
-            return;
-        }
+        if (approval == null) return; // already answered or auto-denied by timeout
         approval.answer(result != null && result.optBoolean("approved", false));
         if (mStateMachine != null && mStateMachine.getState() == AiRunStateMachine.State.WAITING_APPROVAL)
             transition(AiRunStateMachine.State.RUNNING);
@@ -1342,7 +1358,9 @@ public final class AiRuntimeService extends Service {
         private volatile boolean approved;
 
         boolean await() throws InterruptedException {
-            latch.await(10, TimeUnit.MINUTES);
+            // Auto-deny backstop: if nobody answers (e.g. the UI died), the
+            // turn resumes with approved=false instead of wedging forever.
+            latch.await(APPROVAL_AUTO_DENY_MS, TimeUnit.MILLISECONDS);
             return approved;
         }
 

@@ -150,7 +150,11 @@ public final class AiTheme {
         return new com.google.android.material.dialog.MaterialAlertDialogBuilder(context) {
             @Override
             public androidx.appcompat.app.AlertDialog show() {
-                return showThemed(this, context);
+                // super.show(), NOT showThemed(): this instance overrides
+                // show(), so a virtual call would recurse forever.
+                androidx.appcompat.app.AlertDialog dialog = super.show();
+                tintDialogButtons(dialog, context);
+                return dialog;
             }
         };
     }
@@ -158,6 +162,11 @@ public final class AiTheme {
     public static androidx.appcompat.app.AlertDialog showThemed(
         com.google.android.material.dialog.MaterialAlertDialogBuilder builder, Context context) {
         androidx.appcompat.app.AlertDialog dialog = builder.show();
+        tintDialogButtons(dialog, context);
+        return dialog;
+    }
+
+    private static void tintDialogButtons(androidx.appcompat.app.AlertDialog dialog, Context context) {
         Integer accent = state(context).overrides.get(Role.ACCENT);
         if (accent != null) {
             android.widget.Button positive = dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE);
@@ -168,7 +177,6 @@ public final class AiTheme {
             android.widget.Button negative = dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEGATIVE);
             if (negative != null) negative.setTextColor(muted);
         }
-        return dialog;
     }
 
     public static Integer override(Context context, Role role) {
@@ -331,20 +339,35 @@ public final class AiTheme {
         Integer bg = state.overrides.get(Role.BACKGROUND);
         if (bg != null) activity.getWindow().setBackgroundDrawable(new ColorDrawable(bg));
 
-        final LayoutInflater.Factory2 delegate = activity.getLayoutInflater().getFactory2();
-        activity.getLayoutInflater().setFactory2(new LayoutInflater.Factory2() {
-            @Override
-            public View onCreateView(View parent, String name, Context context, AttributeSet attrs) {
-                View view = delegate.onCreateView(parent, name, context, attrs);
-                applyTheme(view, context, attrs);
-                return view;
-            }
+        final LayoutInflater inflater = activity.getLayoutInflater();
+        // AppCompat already installed its factory in super.onCreate(); swap it
+        // for ours while keeping it as the delegate. setFactory2 throws when a
+        // factory is set, so clear the guard flag via reflection first.
+        final LayoutInflater.Factory2 delegate = inflater.getFactory2();
+        if (delegate == null) return;
+        try {
+            java.lang.reflect.Field flag = LayoutInflater.class.getDeclaredField("mFactorySet");
+            flag.setAccessible(true);
+            flag.setBoolean(inflater, false);
+        } catch (Exception ignored) {
+        }
+        try {
+            inflater.setFactory2(new LayoutInflater.Factory2() {
+                @Override
+                public View onCreateView(View parent, String name, Context context, AttributeSet attrs) {
+                    View view = delegate.onCreateView(parent, name, context, attrs);
+                    applyTheme(view, context, attrs);
+                    return view;
+                }
 
-            @Override
-            public View onCreateView(String name, Context context, AttributeSet attrs) {
-                return delegate.onCreateView(null, name, context, attrs);
-            }
-        });
+                @Override
+                public View onCreateView(String name, Context context, AttributeSet attrs) {
+                    return delegate.onCreateView(null, name, context, attrs);
+                }
+            });
+        } catch (IllegalStateException e) {
+            // Factory swap refused by this ROM — stock palette stays, no crash.
+        }
     }
 
     private static void applyTheme(View view, Context context, AttributeSet attrs) {

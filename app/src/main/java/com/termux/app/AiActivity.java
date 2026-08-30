@@ -62,6 +62,10 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     private static final int MAX_VISIBLE_REASONING_CHARS = 12000;
 
     private final Set<Long> mDisplayedRequestIds = new HashSet<>();
+    private androidx.appcompat.app.AlertDialog mApprovalDialog;
+    private Runnable mApprovalCountdown;
+    private long mApprovalDeadline;
+    private static final long APPROVAL_AUTO_DENY_MS = 120_000;
     private final List<String> mAttachedPaths = new ArrayList<>();
 
     private DrawerLayout mDrawer;
@@ -678,7 +682,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     }
 
     private void startNewSession() {
-        if (mRuntimeService != null) mRuntimeService.stopActiveRun();
+        if (mRuntimeService != null) mRuntimeService.newSession();
         mCurrentRunId = null;
         mRunActive = false;
         mHasNativeSession = false;
@@ -1370,12 +1374,52 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         if (id < 0 || mDisplayedRequestIds.contains(id)) return;
         mDisplayedRequestIds.add(id);
         String command = payload.optString("command", payload.optString("cwd", ""));
-        AiTheme.themedBuilder(this)
+        // The dialog must never be dismissible from outside taps or the back
+        // button — a dismissed dialog would leave the turn wedged in
+        // WAITING_APPROVAL. A visible countdown auto-denies on inactivity.
+        mApprovalDialog = AiTheme.themedBuilder(this)
             .setTitle(R.string.ai_approval_title)
-            .setMessage(command)
-            .setNegativeButton(R.string.ai_deny, (dialog, which) -> answerApproval(id, false))
-            .setPositiveButton(R.string.ai_allow_once, (dialog, which) -> answerApproval(id, true))
+            .setMessage(approvalMessage(command, APPROVAL_AUTO_DENY_MS))
+            .setCancelable(false)
+            .setNegativeButton(R.string.ai_deny, (dialog, which) -> {
+                closeApprovalDialog();
+                answerApproval(id, false);
+            })
+            .setPositiveButton(R.string.ai_allow_once, (dialog, which) -> {
+                closeApprovalDialog();
+                answerApproval(id, true);
+            })
             .show();
+        mApprovalDeadline = System.currentTimeMillis() + APPROVAL_AUTO_DENY_MS;
+        mApprovalCountdown = new Runnable() {
+            @Override
+            public void run() {
+                if (mApprovalDialog == null || !mApprovalDialog.isShowing()) return;
+                long remaining = mApprovalDeadline - System.currentTimeMillis();
+                if (remaining <= 0) {
+                    closeApprovalDialog();
+                    answerApproval(id, false);
+                    return;
+                }
+                mApprovalDialog.setMessage(approvalMessage(command, remaining));
+                mUiHandler.postDelayed(this, 1000);
+            }
+        };
+        mUiHandler.post(mApprovalCountdown);
+    }
+
+    private String approvalMessage(String command, long remainingMs) {
+        long seconds = (remainingMs + 999) / 1000;
+        return command + "\n\nAuto-denies in " + seconds + "s if there is no response.";
+    }
+
+    private void closeApprovalDialog() {
+        if (mApprovalCountdown != null) mUiHandler.removeCallbacks(mApprovalCountdown);
+        mApprovalCountdown = null;
+        if (mApprovalDialog != null) {
+            try { mApprovalDialog.dismiss(); } catch (Exception ignored) {}
+            mApprovalDialog = null;
+        }
     }
 
     private void answerApproval(long requestId, boolean approved) {
