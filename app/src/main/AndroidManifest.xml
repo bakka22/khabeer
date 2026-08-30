@@ -102,6 +102,12 @@
             android:theme="@style/Theme.AiWorkspace" />
 
         <activity
+            android:name=".app.activities.AiThemeSettingsActivity"
+            android:exported="false"
+            android:label="@string/theme_customization_title"
+            android:theme="@style/Theme.AiWorkspace" />
+
+        <activity
             android:name=".shared.activities.ReportActivity"
             android:theme="@style/Theme.MarkdownViewActivity.DayNight"
             android:documentLaunchMode="intoExisting" />

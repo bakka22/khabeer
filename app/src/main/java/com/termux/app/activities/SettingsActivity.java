@@ -25,6 +25,7 @@ import com.termux.shared.termux.TermuxConstants;
 import com.termux.shared.termux.TermuxUtils;
 import com.termux.shared.activity.media.AppCompatActivityUtils;
 import com.termux.shared.theme.NightMode;
+import com.termux.app.AiTheme;
 
 public class SettingsActivity extends AppCompatActivity {
 
@@ -34,6 +35,7 @@ public class SettingsActivity extends AppCompatActivity {
 
         AppCompatActivityUtils.setNightMode(this, NightMode.getAppNightMode().getName(), true);
 
+        AiTheme.install(this);
         setContentView(R.layout.activity_settings);
         if (savedInstanceState == null) {
             getSupportFragmentManager()
@@ -44,6 +46,12 @@ public class SettingsActivity extends AppCompatActivity {
 
         AppCompatActivityUtils.setToolbar(this, com.termux.shared.R.id.toolbar);
         AppCompatActivityUtils.setShowBackButtonInActionBar(this, true);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        AiTheme.checkRecreate(this);
     }
 
     @Override

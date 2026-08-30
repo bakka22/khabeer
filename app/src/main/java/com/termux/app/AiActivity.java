@@ -202,6 +202,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        AiTheme.install(this);
         setContentView(R.layout.activity_ai_workspace);
         mProviderConfig = new AiProviderConfig(this);
         bindViews();
@@ -213,6 +214,12 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mChatTitle.setText("Mobile Hermes");
         bindRuntime();
         bindTermux();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        AiTheme.checkRecreate(this);
     }
 
     @Override
@@ -706,7 +713,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         apiKey.setHint("API key");
         box.addView(baseUrl);
         box.addView(apiKey);
-        new MaterialAlertDialogBuilder(this)
+        AiTheme.themedBuilder(this)
             .setTitle(mSelectedProfile.name + " configuration")
             .setMessage("This screen configures credentials before chat. API keys are used by the native mobile agent runtime.")
             .setView(box)
@@ -737,7 +744,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             "x-preview",
             "glm-5"
         };
-        new MaterialAlertDialogBuilder(this)
+        AiTheme.themedBuilder(this)
             .setTitle("OpenCode route")
             .setItems(labels, (dialog, which) -> configureOpenCodeRoute(labels[which], baseUrls[which], models[which], which != 0))
             .show();
@@ -769,7 +776,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         box.addView(model);
         box.addView(apiKey);
 
-        new MaterialAlertDialogBuilder(this)
+        AiTheme.themedBuilder(this)
             .setTitle(label)
             .setMessage("The native OpenCode adapter will send Chat Completions tool calls through " + baseUrlValue + ".")
             .setView(box)
@@ -795,7 +802,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         AiProviderProfile profile = mSelectedProfile;
         String baseUrl = mProviderConfig.getBaseUrl(profile);
         String apiKey = mProviderConfig.getApiKey(profile);
-        MaterialAlertDialogBuilder loadingBuilder = new MaterialAlertDialogBuilder(this)
+        MaterialAlertDialogBuilder loadingBuilder = AiTheme.themedBuilder(this)
             .setTitle("Loading models")
             .setMessage("Fetching " + profile.name + " models from " + AiModelCatalog.modelsUrl(baseUrl) + "…")
             .setNegativeButton(android.R.string.cancel, null);
@@ -823,7 +830,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         items.add("Default (" + profile.defaultModel + ")");
         items.add("Enter model ID manually…");
         items.addAll(models);
-        new MaterialAlertDialogBuilder(this)
+        AiTheme.themedBuilder(this)
             .setTitle(profile.name + " models")
             .setItems(items.toArray(new String[0]), (dialog, which) -> {
                 if (which == 0) setSelectedModel(profile, profile.defaultModel);
@@ -834,7 +841,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     }
 
     private void showModelLoadFailedDialog(AiProviderProfile profile, String message) {
-        new MaterialAlertDialogBuilder(this)
+        AiTheme.themedBuilder(this)
             .setTitle("Couldn’t load live models")
             .setMessage(message)
             .setNegativeButton(android.R.string.cancel, null)
@@ -847,7 +854,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         model.setSingleLine(true);
         model.setHint("Model ID");
         model.setText(TextUtils.isEmpty(mSelectedModel) ? profile.defaultModel : mSelectedModel);
-        new MaterialAlertDialogBuilder(this)
+        AiTheme.themedBuilder(this)
             .setTitle("Model ID")
             .setView(model)
             .setNegativeButton(android.R.string.cancel, null)
@@ -868,7 +875,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     private void showReasoningDialog() {
         final String[] labels = new String[]{"Auto", "Low", "Medium", "High", "XHigh", "Ultra"};
         final String[] values = new String[]{"", "low", "medium", "high", "xhigh", "ultra"};
-        new MaterialAlertDialogBuilder(this)
+        AiTheme.themedBuilder(this)
             .setTitle(R.string.ai_select_reasoning_title)
             .setItems(labels, (dialog, which) -> {
                 mSelectedEffort = values[which];
@@ -880,7 +887,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     private void showApprovalDialog() {
         final String[] labels = new String[]{"Ask before terminal commands", "Run without asking"};
         final String[] values = new String[]{APPROVAL_ON_REQUEST, APPROVAL_NEVER};
-        new MaterialAlertDialogBuilder(this)
+        AiTheme.themedBuilder(this)
             .setTitle(R.string.ai_select_approval_title)
             .setItems(labels, (dialog, which) -> {
                 mSelectedApproval = values[which];
@@ -893,7 +900,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         EditText pathInput = new EditText(this);
         pathInput.setSingleLine(true);
         pathInput.setHint(R.string.ai_attach_file_hint);
-        new MaterialAlertDialogBuilder(this)
+        AiTheme.themedBuilder(this)
             .setTitle(R.string.ai_attach_file)
             .setView(pathInput)
             .setNegativeButton(android.R.string.cancel, null)
@@ -1288,7 +1295,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         if (id < 0 || mDisplayedRequestIds.contains(id)) return;
         mDisplayedRequestIds.add(id);
         String command = payload.optString("command", payload.optString("cwd", ""));
-        new MaterialAlertDialogBuilder(this)
+        AiTheme.themedBuilder(this)
             .setTitle(R.string.ai_approval_title)
             .setMessage(command)
             .setNegativeButton(R.string.ai_deny, (dialog, which) -> answerApproval(id, false))
@@ -1391,7 +1398,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             return;
         }
         if (archived) {
-            new MaterialAlertDialogBuilder(this)
+            AiTheme.themedBuilder(this)
                 .setTitle("Restore session")
                 .setMessage("Move this archived session back into Sessions and open it?")
                 .setNegativeButton(android.R.string.cancel, null)
@@ -1425,7 +1432,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     private void confirmArchive(AiDatabase.RunRecord run) {
         if (mRuntimeService == null) return;
         boolean isActive = run.id != null && run.id.equals(mCurrentRunId);
-        new MaterialAlertDialogBuilder(this)
+        AiTheme.themedBuilder(this)
             .setTitle("Archive session")
             .setMessage(isActive
                 ? "This stops the current task and hides the session. Its full history stays in Archived."
@@ -1510,7 +1517,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     }
 
     private int color(int resId) {
-        return ContextCompat.getColor(this, resId);
+        return AiTheme.resolve(this, resId);
     }
 
     private int dp(int value) {

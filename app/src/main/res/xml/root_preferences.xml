@@ -1,4 +1,13 @@
-<PreferenceScreen xmlns:app="http://schemas.android.com/apk/res-auto">
+<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <Preference
+        app:key="theme_customization"
+        app:title="@string/theme_customization_title"
+        app:summary="@string/theme_customization_summary">
+        <intent android:targetPackage="com.termux"
+            android:targetClass="com.termux.app.activities.AiThemeSettingsActivity"/>
+    </Preference>
 
     <Preference
         app:key="termux"
