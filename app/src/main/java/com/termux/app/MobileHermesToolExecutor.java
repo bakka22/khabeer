@@ -45,13 +45,20 @@ public final class MobileHermesToolExecutor {
 
         try {
             File directory = new File(path).getCanonicalFile();
-            if (!directory.isDirectory() || !directory.canRead()) return null;
             String canonicalPath = directory.getAbsolutePath();
             String home = new File(TermuxConstants.TERMUX_HOME_DIR_PATH).getCanonicalPath();
             boolean underHome = canonicalPath.equals(home) || canonicalPath.startsWith(home + "/");
             boolean underSharedStorage = canonicalPath.equals("/storage/emulated/0")
                 || canonicalPath.startsWith("/storage/emulated/0/");
             if (!underHome && !underSharedStorage) return null;
+            if (!directory.exists()) {
+                try { directory.mkdirs(); } catch (Exception ignored) {}
+            }
+            if (!directory.isDirectory() || !directory.canRead()) {
+                File parent = directory.getParentFile();
+                if (parent != null && parent.isDirectory() && parent.canRead()) return canonicalPath;
+                return null;
+            }
             return canonicalPath;
         } catch (Exception e) {
             return null;

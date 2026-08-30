@@ -71,7 +71,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     private View mChatPage;
     private View mSuggestionStrip;
     private View mTerminalCard;
-    private android.widget.GridLayout mProviderGrid;
+    private LinearLayout mProviderGrid;
     private LinearLayout mDrawerProviderList;
     private LinearLayout mChatMessages;
     private LinearLayout mAttachmentList;
@@ -109,6 +109,11 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     private TextView mEmptyChatHint;
     private FrameLayout mTerminalContainer;
     private TerminalView mTerminalView;
+    private TextView mSetupTitle;
+    private TextView mSetupModelDisplay;
+    private android.widget.ImageView mChatProviderIcon;
+    private TextView mChatProviderName;
+    private TextView mChatProviderModel;
 
     private AiProviderConfig mProviderConfig;
     private AiProviderProfile mSelectedProfile;
@@ -211,8 +216,8 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
 
     @Override
     public void onBackPressed() {
-        if (mDrawer != null && mDrawer.isOpen()) {
-            mDrawer.close();
+        if (mDrawer != null && mDrawer.isDrawerOpen(findViewById(R.id.ai_drawer_panel))) {
+            mDrawer.closeDrawer(findViewById(R.id.ai_drawer_panel));
             return;
         }
         if (mShowingProviderDirectory) {
@@ -246,7 +251,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mChatPage = findViewById(R.id.ai_chat_page);
         mSuggestionStrip = findViewById(R.id.ai_suggestion_strip);
         mTerminalCard = findViewById(R.id.ai_terminal_card);
-        mProviderGrid = (android.widget.GridLayout) findViewById(R.id.ai_harness_grid);
+        mProviderGrid = findViewById(R.id.ai_harness_grid);
         mDrawerProviderList = findViewById(R.id.ai_drawer_harness_list);
         mChatMessages = findViewById(R.id.ai_chat_messages);
         mAttachmentList = findViewById(R.id.ai_attachment_list);
@@ -284,6 +289,11 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mEmptyChatHint = findViewById(R.id.ai_empty_chat_hint);
         mTerminalContainer = findViewById(R.id.ai_terminal_container);
         mTerminalView = findViewById(R.id.ai_terminal_view);
+        mSetupTitle = findViewById(R.id.ai_setup_title);
+        mSetupModelDisplay = findViewById(R.id.ai_model_display);
+        mChatProviderIcon = findViewById(R.id.ai_chat_provider_icon);
+        mChatProviderName = findViewById(R.id.ai_chat_provider_name);
+        mChatProviderModel = findViewById(R.id.ai_chat_provider_model);
         mWorkspaceInput.setText(TermuxConstants.TERMUX_HOME_DIR_PATH);
     }
 
@@ -312,6 +322,8 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         if (navSettings != null) navSettings.setOnClickListener(v -> startActivity(new android.content.Intent(this, com.termux.app.activities.SettingsActivity.class)));
         View back = findViewById(R.id.ai_chat_back);
         if (back != null) back.setOnClickListener(v -> onBackPressed());
+        View setupBack = findViewById(R.id.ai_setup_back);
+        if (setupBack != null) setupBack.setOnClickListener(v -> { showFeaturedProviders(); });
     }
 
     private void setupActions() {
@@ -324,7 +336,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mStorageButton.setOnClickListener(view -> ensureStorageAccess());
         mOpenShellButton.setOnClickListener(view -> {
             openShell();
-            mDrawer.close();
+            if (mDrawer != null) mDrawer.closeDrawer(findViewById(R.id.ai_drawer_panel));
         });
         mTerminalButton.setOnClickListener(view -> mTerminalCard.setVisibility(View.GONE));
         mLoginButton.setOnClickListener(view -> showApiKeyDialog());
@@ -335,7 +347,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mAttachButton.setOnClickListener(view -> showAttachDialog());
         mNewSessionButton.setOnClickListener(view -> {
             startNewSession();
-            mDrawer.close();
+            if (mDrawer != null) mDrawer.closeDrawer(findViewById(R.id.ai_drawer_panel));
         });
         findViewById(R.id.ai_suggestion_project_plan).setOnClickListener(view ->
             mPromptInput.setText("Create a concise project plan for this folder. Inspect files first."));
@@ -390,58 +402,48 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         card.setClickable(true);
         card.setFocusable(true);
         card.setOnClickListener(view -> selectProvider(profile, true));
-        int span = profile.id.equals("more") ? 2 : 1;
-        try {
-            android.widget.GridLayout.LayoutParams gp = new android.widget.GridLayout.LayoutParams();
-            gp.width = 0;
-            gp.height = ViewGroup.LayoutParams.WRAP_CONTENT;
-            gp.columnSpec = android.widget.GridLayout.spec(android.widget.GridLayout.UNDEFINED, span, 1f);
-            gp.setMargins(dp(6), dp(6), dp(6), dp(6));
-            card.setLayoutParams(gp);
-        } catch (Exception e) {
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            lp.setMargins(0, 0, 0, dp(12));
-            card.setLayoutParams(lp);
-        }
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.setMargins(0, 0, 0, dp(10));
+        card.setLayoutParams(lp);
 
         LinearLayout content = new LinearLayout(this);
-        content.setOrientation(LinearLayout.VERTICAL);
+        content.setOrientation(LinearLayout.HORIZONTAL);
+        content.setGravity(Gravity.CENTER_VERTICAL);
         content.setPadding(dp(14), dp(14), dp(14), dp(14));
         card.addView(content);
 
         android.widget.ImageView icon = new android.widget.ImageView(this);
         icon.setImageResource(iconForProvider(profile.id));
-        icon.setBackgroundResource(R.drawable.bg_ai_harness_badge);
-        icon.setPadding(dp(8), dp(8), dp(8), dp(8));
+        icon.setPadding(dp(6), dp(6), dp(6), dp(6));
         LinearLayout.LayoutParams ip = new LinearLayout.LayoutParams(dp(48), dp(48));
         content.addView(icon, ip);
+
+        LinearLayout text = new LinearLayout(this);
+        text.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        tp.setMargins(dp(12), 0, 0, 0);
+        content.addView(text, tp);
 
         TextView title = new TextView(this);
         title.setText(profile.name);
         title.setTextColor(color(R.color.ai_text));
-        title.setTextSize(13);
+        title.setTextSize(14);
         title.setTypeface(Typeface.DEFAULT_BOLD);
-        title.setMaxLines(1);
-        LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        tp.setMargins(0, dp(10), 0, 0);
-        content.addView(title, tp);
+        text.addView(title);
 
         TextView body = new TextView(this);
-        String shortDesc = shortProviderDesc(profile);
-        body.setText(shortDesc);
+        body.setText(shortProviderDesc(profile));
         body.setTextColor(color(R.color.ai_text_muted));
         body.setTextSize(11);
         body.setMaxLines(2);
-        body.setLineSpacing(dp(2), 1f);
-        content.addView(body);
+        text.addView(body);
 
         if (!profile.implemented) {
             TextView state = new TextView(this);
             state.setText("Coming next");
             state.setTextColor(color(R.color.ai_warning));
             state.setTextSize(10);
-            state.setPadding(0, dp(6), 0, 0);
-            content.addView(state);
+            text.addView(state);
         }
         return card;
     }
@@ -476,18 +478,9 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         card.setClickable(true);
         card.setFocusable(true);
         card.setOnClickListener(view -> showProviderDirectory());
-        try {
-            android.widget.GridLayout.LayoutParams gp = new android.widget.GridLayout.LayoutParams();
-            gp.width = ViewGroup.LayoutParams.MATCH_PARENT;
-            gp.height = ViewGroup.LayoutParams.WRAP_CONTENT;
-            gp.columnSpec = android.widget.GridLayout.spec(android.widget.GridLayout.UNDEFINED, 2, 1f);
-            gp.setMargins(dp(6), dp(6), dp(6), dp(6));
-            card.setLayoutParams(gp);
-        } catch (Exception e) {
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            lp.setMargins(0, 0, 0, dp(12));
-            card.setLayoutParams(lp);
-        }
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.setMargins(0, 0, 0, dp(10));
+        card.setLayoutParams(lp);
 
         LinearLayout content = new LinearLayout(this);
         content.setGravity(Gravity.CENTER_VERTICAL);
@@ -530,7 +523,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         row.setPadding(dp(10), dp(12), dp(10), dp(12));
         row.setOnClickListener(view -> {
             selectProvider(profile, true);
-            mDrawer.close();
+            if (mDrawer != null) mDrawer.closeDrawer(findViewById(R.id.ai_drawer_panel));
         });
         return row;
     }
@@ -539,7 +532,9 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mSelectedProfile = profile == null ? AiProviderProfile.firstAgentProfile() : profile;
         mProviderConfig.setSelectedProviderId(mSelectedProfile.id);
         mSelectedModel = mProviderConfig.getModel(mSelectedProfile);
+        if ("opencode".equals(mSelectedProfile.id) && (mSelectedModel == null || mSelectedModel.equals("gpt-4o") || mSelectedModel.isEmpty())) mSelectedModel = "big-pickle";
         syncControlLabels();
+        android.util.Log.d("AiActivity", "selectProvider " + mSelectedProfile.id + " model=" + mSelectedModel + " store=" + mProviderConfig.getModel(mSelectedProfile));
         mSelectedProviderIcon.setImageResource(iconForProvider(mSelectedProfile.id));
         mSelectedProviderTitle.setText(mSelectedProfile.name);
         mSelectedProviderBody.setText(mSelectedProfile.description);
@@ -866,10 +861,15 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     private void syncControlLabels() {
         if (mSelectedProfile == null) return;
         String model = TextUtils.isEmpty(mSelectedModel) ? mSelectedProfile.defaultModel : mSelectedModel;
-        mModelButton.setText(model);
-        mReasoningButton.setText(TextUtils.isEmpty(mSelectedEffort) ? "Reasoning auto" : "Reasoning " + mSelectedEffort);
-        mApprovalButton.setText(APPROVAL_NEVER.equals(mSelectedApproval) ? "No approvals" : "Ask approvals");
-        mThinkingButton.setText(mShowThinkingDetails ? "Thinking details" : "Thinking compact");
+        if (mModelButton != null) mModelButton.setText(model);
+        if (mSetupModelDisplay != null) mSetupModelDisplay.setText(model);
+        if (mChatProviderModel != null) mChatProviderModel.setText(model);
+        if (mChatProviderName != null) mChatProviderName.setText(mSelectedProfile.name);
+        if (mChatProviderIcon != null) mChatProviderIcon.setImageResource(iconForProvider(mSelectedProfile.id));
+        if (mSetupTitle != null) mSetupTitle.setText("Setup " + mSelectedProfile.name);
+        if (mReasoningButton != null) mReasoningButton.setText(TextUtils.isEmpty(mSelectedEffort) ? "Reasoning auto" : "Reasoning " + mSelectedEffort);
+        if (mApprovalButton != null) mApprovalButton.setText(APPROVAL_NEVER.equals(mSelectedApproval) ? "No approvals" : "Ask approvals");
+        if (mThinkingButton != null) mThinkingButton.setText(mShowThinkingDetails ? "Thinking details" : "Thinking compact");
     }
 
     private void refreshAttachments() {
