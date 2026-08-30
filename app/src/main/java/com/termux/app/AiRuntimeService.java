@@ -55,17 +55,22 @@ public final class AiRuntimeService extends Service {
         }
     }
 
+    public enum BusyInputMode { QUEUE, STEER, INTERRUPT }
+
     private static final int NOTIFICATION_ID = 2401;
     private static final String CHANNEL_ID = "termux_ai_runtime";
     private static final int MAX_MODEL_STEPS = 80;
     private static final int MODEL_CONNECT_TIMEOUT_MS = 30000;
     private static final int MODEL_READ_TIMEOUT_MS = 10 * 60 * 1000;
     private static final int DEFAULT_TOOL_TIMEOUT_SECONDS = 300;
+    private static final int BUSY_QUEUE_MAX_PENDING = 8;
+    private static final long AUTO_CONTINUE_FRESHNESS_MS = 3600_000L;
 
     private final IBinder mBinder = new LocalBinder();
     private final Handler mHandler = new Handler(Looper.getMainLooper());
     private final List<Listener> mListeners = new ArrayList<>();
     private final Map<Long, PendingApproval> mPendingApprovals = new HashMap<>();
+    private final Map<String, HermesSessionState> mSessions = new HashMap<>();
 
     private AiDatabase mDatabase;
     private MobileHermesToolExecutor mToolExecutor;
@@ -76,6 +81,15 @@ public final class AiRuntimeService extends Service {
     private long mNextRequestId = 1;
     private String mPreviousResponseId;
     private JSONArray mChatCompletionMessages;
+    private BusyInputMode mBusyMode = BusyInputMode.INTERRUPT;
+    private final Object mQueueLock = new Object();
+    private String mSteerText;
+
+    private HermesSessionState sessionState(String key) {
+        HermesSessionState s = mSessions.get(key);
+        if (s == null) { s = new HermesSessionState(); mSessions.put(key, s); }
+        return s;
+    }
 
     @Override
     public void onCreate() {
@@ -84,6 +98,21 @@ public final class AiRuntimeService extends Service {
         mToolExecutor = new MobileHermesToolExecutor(this);
         createNotificationChannel();
         startForeground(NOTIFICATION_ID, buildNotification());
+        try { mDatabase.recoverInterruptedTurns(); } catch (Exception ignored) {}
+        restoreLatestActiveRun();
+    }
+
+    private void restoreLatestActiveRun() {
+        try {
+            AiDatabase.RunRecord r = mDatabase.getLatestActiveRun();
+            if (r != null && r.sessionKey != null) {
+                mActiveRun = r;
+                mStateMachine = new AiRunStateMachine();
+                try { mStateMachine.transition(AiRunStateMachine.State.STARTING); mStateMachine.transition(AiRunStateMachine.State.CONNECTING); mStateMachine.transition(AiRunStateMachine.State.RUNNING); } catch (Exception ignored) {}
+                mPreviousResponseId = r.previousResponseId;
+                if (r.chatMessagesJson != null) mChatCompletionMessages = new JSONArray(r.chatMessagesJson);
+            }
+        } catch (Exception ignored) {}
     }
 
     @Override
@@ -118,7 +147,30 @@ public final class AiRuntimeService extends Service {
     }
 
     public void resumeRun(String runId) {
-        notifyError(runId, "Session restore for native mobile agent sessions is coming next. Start a new session for now.");
+        AiDatabase.RunRecord r = mDatabase.getRun(runId);
+        if (r == null) { notifyError(runId, "Session not found: " + runId); return; }
+        mActiveRun = r;
+        mStateMachine = new AiRunStateMachine();
+        try { mStateMachine.transition(AiRunStateMachine.State.STARTING); mStateMachine.transition(AiRunStateMachine.State.CONNECTING); mStateMachine.transition(AiRunStateMachine.State.RUNNING); } catch (Exception ignored) {}
+        mPreviousResponseId = r.previousResponseId;
+        try { mChatCompletionMessages = r.chatMessagesJson == null ? null : new JSONArray(r.chatMessagesJson); } catch (Exception ignored) {}
+        mDatabase.setResumePending(runId, false);
+        mActiveRun.state = AiRunStateMachine.State.RUNNING;
+        persistRun();
+        emit("session/resumed", json("sessionId", runId));
+    }
+
+    public void setBusyMode(BusyInputMode mode) { if (mode != null) mBusyMode = mode; }
+    public BusyInputMode getBusyMode() { return mBusyMode; }
+
+    public boolean steerActiveTurn(String text) {
+        if (mActiveRun == null || mWorker == null || !mWorker.isAlive()) return false;
+        HermesSessionState s = sessionState(mActiveRun.sessionKey == null ? mActiveRun.id : mActiveRun.sessionKey);
+        if (mStateMachine != null && mStateMachine.getState() == AiRunStateMachine.State.WAITING_APPROVAL) return false;
+        s.conversation.sidecarNotes.add(text);
+        mSteerText = text;
+        emit("turn/steered", json("text", text));
+        return true;
     }
 
     public void startAgent(String providerId, String baseUrl, String apiKey, String workspace, String prompt,
@@ -138,15 +190,80 @@ public final class AiRuntimeService extends Service {
             return;
         }
 
+        if (mActiveRun != null && mStateMachine != null && !isTerminalState()) {
+            if (handleBusyInput(prompt, providerId, baseUrl, apiKey, model, effort, approvalPolicy)) return;
+        }
         stopActiveRun();
         mStopRequested = false;
         mPreviousResponseId = null;
         mChatCompletionMessages = null;
-        mActiveRun = mDatabase.createRun(providerId == null ? "native-agent" : providerId, normalizedWorkspace);
+        String sessionKey = AiDatabase.buildSessionKey(providerId == null ? "native-agent" : providerId, normalizedWorkspace);
+        mActiveRun = mDatabase.createRun(providerId == null ? "native-agent" : providerId, normalizedWorkspace, sessionKey);
+        mActiveRun.modelOverride = model;
+        mActiveRun.lastResolvedModel = model;
         mStateMachine = new AiRunStateMachine();
+        HermesSessionState ss = sessionState(sessionKey);
+        ss.persistent.bumpGeneration();
         transition(AiRunStateMachine.State.STARTING);
         transition(AiRunStateMachine.State.CONNECTING);
+        markActiveTurn();
         runTurn(providerId, baseUrl, apiKey, normalizedWorkspace, prompt, model, effort, approvalPolicy);
+    }
+
+    private boolean handleBusyInput(String prompt, String providerId, String baseUrl, String apiKey, String model, String effort, String approvalPolicy) {
+        if (mBusyMode == BusyInputMode.QUEUE) {
+            HermesSessionState ss = sessionState(mActiveRun.sessionKey == null ? mActiveRun.id : mActiveRun.sessionKey);
+            synchronized (mQueueLock) {
+                if (ss.conversation.queuedEvents.size() >= BUSY_QUEUE_MAX_PENDING) {
+                    notifyError(mActiveRun.id, "Queue full (" + BUSY_QUEUE_MAX_PENDING + "). Wait for current turn to finish.");
+                    return true;
+                }
+                ss.conversation.queuedEvents.add(prompt);
+            }
+            emit("turn/queued", json("text", prompt));
+            return true;
+        } else if (mBusyMode == BusyInputMode.STEER) {
+            if (steerActiveTurn(prompt)) return true;
+        }
+        return false;
+    }
+
+    private void drainQueueIfNeeded() {
+        if (mActiveRun == null) return;
+        HermesSessionState ss = sessionState(mActiveRun.sessionKey == null ? mActiveRun.id : mActiveRun.sessionKey);
+        String next = null;
+        synchronized (mQueueLock) {
+            if (!ss.conversation.queuedEvents.isEmpty()) next = ss.conversation.queuedEvents.remove(0);
+        }
+        if (next != null) {
+            String p = next;
+            mHandler.postDelayed(() -> {
+                if (mActiveRun != null) runTurn(mActiveRun.harnessId, null, null, mActiveRun.workspace, p, mActiveRun.modelOverride, null, null);
+            }, 200);
+        }
+    }
+
+    private void markActiveTurn() {
+        if (mActiveRun == null) return;
+        try {
+            String token = UUID.randomUUID().toString();
+            mActiveRun.activeTurnToken = token;
+            mActiveRun.activeTurnStartedAt = System.currentTimeMillis();
+            mActiveRun.resumePending = false;
+            HermesSessionState ss = sessionState(mActiveRun.sessionKey == null ? mActiveRun.id : mActiveRun.sessionKey);
+            mDatabase.markTurnLease(mActiveRun.sessionKey, token, ss.persistent.runGeneration);
+            persistRun();
+        } catch (Exception ignored) {}
+    }
+
+    private void clearActiveTurn() {
+        if (mActiveRun == null) return;
+        try {
+            HermesSessionState ss = sessionState(mActiveRun.sessionKey == null ? mActiveRun.id : mActiveRun.sessionKey);
+            mDatabase.clearTurnLease(mActiveRun.sessionKey, ss.persistent.runGeneration);
+            mActiveRun.activeTurnToken = null;
+            persistRun();
+        } catch (Exception ignored) {}
     }
 
     public void sendPrompt(String prompt, String providerId, String baseUrl, String apiKey, String model,
@@ -155,27 +272,49 @@ public final class AiRuntimeService extends Service {
             notifyError(null, "No active native agent session.");
             return;
         }
+        if (!isTerminalState() && mWorker != null && mWorker.isAlive()) {
+            if (handleBusyInput(prompt, providerId, baseUrl, apiKey, model, effort, approvalPolicy)) return;
+            mStopRequested = true;
+            if (mStateMachine != null) {
+                try { mStateMachine.transition(AiRunStateMachine.State.INTERRUPTING); mActiveRun.state = AiRunStateMachine.State.INTERRUPTING; persistRun(); } catch (Exception ignored) {}
+            }
+            HermesInterruptManager.setInterrupt(true, mWorker.getId(), "steer");
+        }
         mStopRequested = false;
+        mSteerText = null;
         runTurn(providerId, baseUrl, apiKey, mActiveRun.workspace, prompt, model, effort, approvalPolicy);
     }
 
     public void stopActiveRun() {
         mStopRequested = true;
+        if (mWorker != null) HermesInterruptManager.setInterrupt(true, mWorker.getId(), "stop");
         for (PendingApproval approval : new ArrayList<>(mPendingApprovals.values())) approval.cancel();
         mPendingApprovals.clear();
         if (mWorker != null) mWorker.interrupt();
         if (mActiveRun != null && mStateMachine != null && !isTerminalState()) {
             try {
+                if (mStateMachine.getState() == AiRunStateMachine.State.RUNNING || mStateMachine.getState() == AiRunStateMachine.State.WAITING_APPROVAL)
+                    mStateMachine.transition(AiRunStateMachine.State.INTERRUPTING);
                 mStateMachine.transition(AiRunStateMachine.State.CANCELED);
             } catch (IllegalStateException ignored) {
+                try { mStateMachine.transition(AiRunStateMachine.State.CANCELED); } catch (Exception ignored2) {}
             }
             mActiveRun.state = AiRunStateMachine.State.CANCELED;
+            clearActiveTurn();
             persistRun();
+            if (mActiveRun.sessionKey != null) sessionState(mActiveRun.sessionKey).clearTurn();
+        }
+        synchronized (mQueueLock) {
+            if (mActiveRun != null && mActiveRun.sessionKey != null) sessionState(mActiveRun.sessionKey).conversation.queuedEvents.clear();
         }
     }
 
     public void interruptActiveRun() {
-        stopActiveRun();
+        if (mActiveRun == null || mWorker == null) { stopActiveRun(); return; }
+        mStopRequested = true;
+        HermesInterruptManager.setInterrupt(true, mWorker.getId(), "interrupt");
+        try { mStateMachine.transition(AiRunStateMachine.State.INTERRUPTING); mActiveRun.state = AiRunStateMachine.State.INTERRUPTING; persistRun(); } catch (Exception ignored) {}
+        emit("turn/interrupted", json("reason", "user"));
     }
 
     public void loginWithChatGpt() {
@@ -227,9 +366,14 @@ public final class AiRuntimeService extends Service {
     private void executeTurn(String providerId, String baseUrl, String apiKey, String workspace, String prompt,
                              String model, @Nullable String effort, @Nullable String approvalPolicy) {
         if (mActiveRun == null) return;
+        HermesInterruptManager.clearCurrentThread();
+        HermesInterruptManager.setInterrupt(false, Thread.currentThread().getId(), null);
+        if (mSteerText != null) prompt = "[steered] " + mSteerText + "\n\n" + prompt;
+        mSteerText = null;
         emit("turn/started", new JSONObject());
         transition(AiRunStateMachine.State.RUNNING);
         emit("item/agentMessage/delta", json("text", "Thinking…"));
+        if (mActiveRun != null) mDatabase.appendMessage(mActiveRun.id, "user", prompt);
 
         JSONArray input = new JSONArray();
         input.put(json("role", "user", "content", prompt));
@@ -239,9 +383,10 @@ public final class AiRuntimeService extends Service {
                 executeChatCompletionsTurn(providerId, baseUrl, apiKey, workspace, prompt, model, approvalPolicy);
                 return;
             }
-            for (int step = 0; step < MAX_MODEL_STEPS && !mStopRequested; step++) {
-                JSONObject response = callResponsesApi(providerId, baseUrl, apiKey, model, effort, input);
+            for (int step = 0; step < MAX_MODEL_STEPS && !mStopRequested && !HermesInterruptManager.isInterrupted(); step++) {
+                JSONObject response = callResponsesApiWithRetry(providerId, baseUrl, apiKey, model, effort, input);
                 mPreviousResponseId = response.optString("id", mPreviousResponseId);
+                if (mActiveRun != null) { mActiveRun.previousResponseId = mPreviousResponseId; persistRun(); }
                 JSONArray outputs = response.optJSONArray("output");
                 boolean hasToolCall = false;
                 JSONArray nextInput = new JSONArray();
@@ -273,10 +418,43 @@ public final class AiRuntimeService extends Service {
                 input = nextInput;
             }
 
-            if (!mStopRequested) failRun("The native agent reached its tool-step limit before finishing.");
+            if (!mStopRequested && !HermesInterruptManager.isInterrupted()) failRun("The native agent reached its tool-step limit before finishing.");
+            else if (HermesInterruptManager.isInterrupted()) { emit("turn/interrupted", json("reason", HermesInterruptManager.getReason())); clearActiveTurn(); }
+            else clearActiveTurn();
+            drainQueueIfNeeded();
         } catch (Exception e) {
-            if (!mStopRequested) failRun(e.getMessage() == null ? e.toString() : e.getMessage());
+            if (!mStopRequested && !HermesInterruptManager.isInterrupted()) {
+                if (isNetworkError(e)) { transitionWithFallback(AiRunStateMachine.State.DISCONNECTED); failRun(e.getMessage() == null ? e.toString() : e.getMessage()); }
+                else failRun(e.getMessage() == null ? e.toString() : e.getMessage());
+            } else { emit("turn/interrupted", json("reason", "cancel")); clearActiveTurn(); }
+        } finally { HermesInterruptManager.clearCurrentThread(); }
+    }
+
+    private boolean isNetworkError(Exception e) {
+        String m = e.getMessage() == null ? "" : e.getMessage().toLowerCase(Locale.US);
+        return m.contains("timeout") || m.contains("unable to resolve") || m.contains("failed to connect") || m.contains("network");
+    }
+
+    private void transitionWithFallback(AiRunStateMachine.State target) {
+        try { transition(target); } catch (Exception ignored) {}
+    }
+
+    private JSONObject callResponsesApiWithRetry(String providerId, String baseUrl, String apiKey, String model, @Nullable String effort, JSONArray input) throws Exception {
+        int maxRetries = 3;
+        for (int attempt = 0; attempt <= maxRetries; attempt++) {
+            try { return callResponsesApi(providerId, baseUrl, apiKey, model, effort, input); }
+            catch (Exception e) {
+                String msg = e.getMessage() == null ? "" : e.getMessage();
+                boolean retryable = msg.contains("HTTP 429") || msg.contains("HTTP 5");
+                if (attempt < maxRetries && retryable && !mStopRequested) {
+                    long backoff = HermesRetry.jitteredBackoff(attempt, 1000, 8000);
+                    try { Thread.sleep(backoff); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); throw ie; }
+                    continue;
+                }
+                throw e;
+            }
         }
+        throw new IllegalStateException("retry exhausted");
     }
 
     private void executeChatCompletionsTurn(String providerId, String baseUrl, String apiKey, String workspace,
@@ -284,8 +462,9 @@ public final class AiRuntimeService extends Service {
         if (mChatCompletionMessages == null)
             mChatCompletionMessages = new JSONArray().put(json("role", "system", "content", systemInstructions()));
         mChatCompletionMessages.put(json("role", "user", "content", prompt));
+        if (mActiveRun != null) { mActiveRun.chatMessagesJson = mChatCompletionMessages.toString(); persistRun(); }
 
-        for (int step = 0; step < MAX_MODEL_STEPS && !mStopRequested; step++) {
+        for (int step = 0; step < MAX_MODEL_STEPS && !mStopRequested && !HermesInterruptManager.isInterrupted(); step++) {
             JSONObject response = callChatCompletionsApi(providerId, baseUrl, apiKey, model, mChatCompletionMessages);
             JSONArray choices = response.optJSONArray("choices");
             JSONObject choice = choices == null ? null : choices.optJSONObject(0);
@@ -304,9 +483,13 @@ public final class AiRuntimeService extends Service {
                 else emit("item/agentMessage/delta", json("text", content));
             }
             mChatCompletionMessages.put(message);
+            if (mActiveRun != null) { mActiveRun.chatMessagesJson = mChatCompletionMessages.toString(); persistRun(); }
 
             if (!hasToolCalls) {
+                if (mActiveRun != null) mDatabase.appendMessage(mActiveRun.id, "assistant", content);
                 completeRun();
+                clearActiveTurn();
+                drainQueueIfNeeded();
                 return;
             }
 
@@ -315,10 +498,13 @@ public final class AiRuntimeService extends Service {
                 if (toolCall == null) continue;
                 JSONObject toolResult = executeChatToolCall(toolCall, workspace, approvalPolicy);
                 mChatCompletionMessages.put(toolResult);
+                if (mActiveRun != null) { mActiveRun.chatMessagesJson = mChatCompletionMessages.toString(); persistRun(); }
             }
         }
 
-        if (!mStopRequested) failRun("The chat-completions agent reached its tool-step limit before finishing.");
+        if (!mStopRequested && !HermesInterruptManager.isInterrupted()) failRun("The chat-completions agent reached its tool-step limit before finishing.");
+        else clearActiveTurn();
+        drainQueueIfNeeded();
     }
 
     private JSONObject callChatCompletionsApi(String providerId, String baseUrl, String apiKey, String model,
@@ -662,9 +848,12 @@ public final class AiRuntimeService extends Service {
 
     private boolean requestApproval(String command, String workspace) throws InterruptedException {
         if (mActiveRun == null) return false;
+        HermesInterruptManager.clearCurrentThread();
         long id = mNextRequestId++;
         PendingApproval approval = new PendingApproval();
         mPendingApprovals.put(id, approval);
+        HermesSessionState ss = sessionState(mActiveRun.sessionKey == null ? mActiveRun.id : mActiveRun.sessionKey);
+        ss.persistent.pendingApproval = command;
         transition(AiRunStateMachine.State.WAITING_APPROVAL);
         JSONObject payload = new JSONObject();
         try {
@@ -676,7 +865,9 @@ public final class AiRuntimeService extends Service {
         } catch (Exception ignored) {
         }
         emit("terminal/requestApproval", payload);
-        return approval.await();
+        boolean ans = approval.await();
+        ss.persistent.pendingApproval = null;
+        return ans;
     }
 
     private JSONObject functionOutput(String callId, String output) throws Exception {
@@ -834,7 +1025,10 @@ public final class AiRuntimeService extends Service {
         } catch (Exception ignored) {
         }
         mActiveRun.state = AiRunStateMachine.State.COMPLETED;
+        mActiveRun.hygieneFailureStreak = 0;
+        clearActiveTurn();
         persistRun();
+        if (mActiveRun.sessionKey != null) sessionState(mActiveRun.sessionKey).clearTurn();
     }
 
     private void persistRun() {
@@ -866,6 +1060,9 @@ public final class AiRuntimeService extends Service {
         mHandler.post(() -> {
             for (Listener listener : new ArrayList<>(mListeners)) listener.onProtocolEvent(runId, method, payload);
         });
+        if (method.equals("item/agentMessage/delta") && mActiveRun != null) {
+            try { mDatabase.appendMessage(mActiveRun.id, "assistant", payload.optString("text")); } catch (Exception ignored) {}
+        }
     }
 
     private void notifyError(@Nullable String runId, String message) {
