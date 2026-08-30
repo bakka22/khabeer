@@ -341,6 +341,9 @@
     <string name="ai_new_session">New session</string>
     <string name="ai_harnesses">Providers</string>
     <string name="ai_projects">Projects</string>
+    <string name="ai_section_providers">PROVIDERS</string>
+    <string name="ai_section_sessions">SESSIONS</string>
+    <string name="ai_section_archived">ARCHIVED</string>
     <string name="ai_projects_body">Use the folder picker or type a Termux path. Recent native sessions stay below.</string>
     <string name="ai_harness_config_title">Configure %1$s</string>
     <string name="ai_select_model_title">Model</string>

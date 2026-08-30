@@ -107,7 +107,10 @@ public final class AiRuntimeService extends Service {
         try {
             AiDatabase.RunRecord r = mDatabase.getLatestActiveRun();
             if (r == null) {
-                java.util.List<AiDatabase.RunRecord> recent = mDatabase.getRecentRuns(1);
+                // Fallback: freshest non-archived row even if terminal, so the
+                // transcript can be shown again after an app restart.
+                java.util.List<AiDatabase.RunRecord> recent = mDatabase.getSessions(1);
+                if (recent.isEmpty()) recent = mDatabase.getArchivedSessions(1);
                 if (!recent.isEmpty()) r = recent.get(0);
             }
             if (r != null) {
@@ -164,10 +167,54 @@ public final class AiRuntimeService extends Service {
         return result;
     }
 
+    /** Drawer listing: live sessions only (archived + empty ghosts filtered out). */
+    public List<AiDatabase.RunRecord> getSessions() {
+        List<AiDatabase.RunRecord> result = new ArrayList<>();
+        for (AiDatabase.RunRecord record : mDatabase.getSessions(10)) result.add(copyRun(record));
+        return result;
+    }
+
+    public List<AiDatabase.RunRecord> getArchivedSessions() {
+        List<AiDatabase.RunRecord> result = new ArrayList<>();
+        for (AiDatabase.RunRecord record : mDatabase.getArchivedSessions(10)) result.add(copyRun(record));
+        return result;
+    }
+
+    public JSONArray getTranscript(String runId) {
+        return mDatabase.getTranscript(runId, 500);
+    }
+
+    /** Archive a session (soft hide, Hermes-style). Archiving the active run
+     * stops its turn first and drops it as the current session. */
+    public void archiveRun(String runId, boolean archived) {
+        AiDatabase.RunRecord target = mDatabase.getRun(runId);
+        if (target == null) return;
+        if (archived && mActiveRun != null && runId.equals(mActiveRun.id)) {
+            stopActiveRun();
+            mActiveRun = null;
+            mChatCompletionMessages = null;
+            mStateMachine = new AiRunStateMachine();
+            for (Listener listener : new ArrayList<>(mListeners)) listener.onRunChanged(null);
+        }
+        mDatabase.setRunArchived(runId, archived);
+        emit("session/archived", json("sessionId", runId, "archived", archived ? "1" : "0"));
+    }
+
+    /** Resume a persisted session: restore its transcript into the runtime so
+     * the next prompt continues that conversation. Busy turns must be stopped
+     * first — switching mid-turn would scramble history (Hermes claims the
+     * active session before any switch). */
     public void resumeRun(String runId) {
         AiDatabase.RunRecord r = mDatabase.getRun(runId);
         if (r == null) { notifyError(runId, "Session not found: " + runId); return; }
+        boolean busy = mWorker != null && mWorker.isAlive() && !isTerminalState();
+        if (busy) {
+            notifyError(runId, "Stop the current task before switching sessions.");
+            return;
+        }
+        if (r.archived) mDatabase.setRunArchived(runId, false);
         mActiveRun = r;
+        mActiveRun.archived = false;
         mStateMachine = new AiRunStateMachine();
         try { mStateMachine.transition(AiRunStateMachine.State.STARTING); mStateMachine.transition(AiRunStateMachine.State.CONNECTING); mStateMachine.transition(AiRunStateMachine.State.RUNNING); } catch (Exception ignored) {}
         mPreviousResponseId = r.previousResponseId;
@@ -176,6 +223,7 @@ public final class AiRuntimeService extends Service {
         mActiveRun.state = AiRunStateMachine.State.RUNNING;
         persistRun();
         emit("session/resumed", json("sessionId", runId));
+        for (Listener listener : new ArrayList<>(mListeners)) listener.onRunChanged(copyRun(mActiveRun));
     }
 
     public void setBusyMode(BusyInputMode mode) { if (mode != null) mBusyMode = mode; }

@@ -8,6 +8,9 @@ import android.database.sqlite.SQLiteOpenHelper;
 
 import androidx.annotation.Nullable;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
 import java.util.UUID;
 import java.util.ArrayList;
 import java.util.List;
@@ -16,7 +19,7 @@ import java.util.List;
 public final class AiDatabase extends SQLiteOpenHelper {
 
     private static final String DATABASE_NAME = "termux_ai_runtime.db";
-    private static final int DATABASE_VERSION = 4;
+    private static final int DATABASE_VERSION = 5;
 
     public static final class RunRecord {
         public String id;
@@ -39,6 +42,8 @@ public final class AiDatabase extends SQLiteOpenHelper {
         public long compressionCooldownUntil;
         public String modelOverride;
         public String lastResolvedModel;
+        public boolean archived;
+        public String title;
     }
 
     public AiDatabase(Context context) {
@@ -71,7 +76,9 @@ public final class AiDatabase extends SQLiteOpenHelper {
             "hygiene_failure_streak INTEGER DEFAULT 0," +
             "compression_cooldown_until INTEGER DEFAULT 0," +
             "model_override TEXT," +
-            "last_resolved_model TEXT)");
+            "last_resolved_model TEXT," +
+            "archived INTEGER DEFAULT 0," +
+            "title TEXT)");
         db.execSQL("CREATE TABLE IF NOT EXISTS events (" +
             "id INTEGER PRIMARY KEY AUTOINCREMENT," +
             "run_id TEXT NOT NULL," +
@@ -151,6 +158,32 @@ public final class AiDatabase extends SQLiteOpenHelper {
             db.execSQL("CREATE INDEX IF NOT EXISTS runs_resume_pending ON runs(resume_pending)");
             try { db.execSQL("PRAGMA journal_mode=WAL"); } catch (Exception ignored) {}
         }
+        if (oldVersion < 5) {
+            try { db.execSQL("ALTER TABLE runs ADD COLUMN archived INTEGER DEFAULT 0"); } catch (Exception ignored) {}
+            try { db.execSQL("ALTER TABLE runs ADD COLUMN title TEXT"); } catch (Exception ignored) {}
+            db.execSQL("CREATE INDEX IF NOT EXISTS runs_archived ON runs(archived, updated_at)");
+            backfillSessionTitles(db);
+        }
+    }
+
+    /** Pre-v5 sessions have history but no title; without a backfill the
+     * drawer filter (title IS NOT NULL) would hide them forever. Derive each
+     * title from the session's first active user message. Sessions that never
+     * got a user message stay untitled and stay hidden (ghost rule). */
+    private void backfillSessionTitles(SQLiteDatabase db) {
+        List<String> untitled = new ArrayList<>();
+        Cursor c = db.query("runs", new String[]{"id"}, "title IS NULL", null, null, null, null);
+        try { while (c.moveToNext()) untitled.add(c.getString(0)); } finally { c.close(); }
+        for (String runId : untitled) {
+            Cursor m = db.query("messages", new String[]{"content"},
+                "session_id=? AND role='user' AND active=1", new String[]{runId}, null, null, "id ASC", "1");
+            String title = null;
+            try { if (m.moveToFirst()) title = boundTitle(m.getString(0)); } finally { m.close(); }
+            if (title == null) continue;
+            ContentValues v = new ContentValues();
+            v.put("title", title);
+            db.update("runs", v, "id=?", new String[]{runId});
+        }
     }
 
     public synchronized RunRecord createRun(String harnessId, String workspace) {
@@ -201,6 +234,8 @@ public final class AiDatabase extends SQLiteOpenHelper {
         values.put("compression_cooldown_until", record.compressionCooldownUntil);
         values.put("model_override", record.modelOverride);
         values.put("last_resolved_model", record.lastResolvedModel);
+        values.put("archived", record.archived ? 1 : 0);
+        values.put("title", record.title);
 
         SQLiteDatabase db = getWritableDatabase();
         if (db.update("runs", values, "id = ?", new String[]{record.id}) == 0) {
@@ -231,6 +266,25 @@ public final class AiDatabase extends SQLiteOpenHelper {
         v.put("active", 1);
         v.put("created_at", System.currentTimeMillis());
         getWritableDatabase().insertOrThrow("messages", null, v);
+        // Session listing mirrors Hermes: last_active ordering (fresh message
+        // bumps recency) and preview = first user message, bounded to 60 chars.
+        ContentValues runUpdate = new ContentValues();
+        runUpdate.put("updated_at", System.currentTimeMillis());
+        if ("user".equals(role)) {
+            Cursor c = getReadableDatabase().query("runs", new String[]{"title"}, "id=?", new String[]{sessionId}, null, null, null);
+            boolean untitled = true;
+            try { if (c.moveToFirst()) untitled = c.isNull(0); } finally { c.close(); }
+            if (untitled) runUpdate.put("title", boundTitle(content));
+        }
+        getWritableDatabase().update("runs", runUpdate, "id=?", new String[]{sessionId});
+    }
+
+    private static String boundTitle(String content) {
+        if (content == null) return null;
+        String clean = content.replace('\n', ' ').replace('\r', ' ').trim();
+        while (clean.contains("  ")) clean = clean.replace("  ", " ");
+        if (clean.length() <= 60) return clean.isEmpty() ? null : clean;
+        return clean.substring(0, 59) + "…";
     }
 
     public synchronized List<String> getActiveMessages(String sessionId, int limit) {
@@ -284,7 +338,7 @@ public final class AiDatabase extends SQLiteOpenHelper {
     @Nullable
     public synchronized RunRecord getLatestActiveRun() {
         Cursor cursor = getReadableDatabase().query("runs", null,
-            "state NOT IN (?, ?, ?)",
+            "state NOT IN (?, ?, ?) AND COALESCE(archived, 0) = 0",
             new String[]{AiRunStateMachine.State.COMPLETED.name(), AiRunStateMachine.State.FAILED.name(), AiRunStateMachine.State.CANCELED.name()},
             null, null, "updated_at DESC", "1");
         try {
@@ -304,6 +358,61 @@ public final class AiDatabase extends SQLiteOpenHelper {
             cursor.close();
         }
         return records;
+    }
+
+    /** Live sessions for the drawer: hidden/archived rows and Hermes-style
+     * empty ghost sessions (never got a user message -> no title) stay out. */
+    public synchronized List<RunRecord> getSessions(int limit) {
+        List<RunRecord> records = new ArrayList<>();
+        Cursor cursor = getReadableDatabase().query("runs", null,
+            "COALESCE(archived, 0) = 0 AND title IS NOT NULL", null, null, null,
+            "updated_at DESC", String.valueOf(limit));
+        try {
+            while (cursor.moveToNext()) records.add(readRun(cursor));
+        } finally {
+            cursor.close();
+        }
+        return records;
+    }
+
+    public synchronized List<RunRecord> getArchivedSessions(int limit) {
+        List<RunRecord> records = new ArrayList<>();
+        Cursor cursor = getReadableDatabase().query("runs", null,
+            "archived = 1", null, null, null,
+            "updated_at DESC", String.valueOf(limit));
+        try {
+            while (cursor.moveToNext()) records.add(readRun(cursor));
+        } finally {
+            cursor.close();
+        }
+        return records;
+    }
+
+    /** Archive = soft hide (Hermes set_session_archived): rows keep every
+     * message and can be un-archived later. Never deletes anything. */
+    public synchronized void setRunArchived(String runId, boolean archived) {
+        ContentValues v = new ContentValues();
+        v.put("archived", archived ? 1 : 0);
+        v.put("updated_at", System.currentTimeMillis());
+        getWritableDatabase().update("runs", v, "id=?", new String[]{runId});
+    }
+
+    public synchronized JSONArray getTranscript(String sessionId, int limit) {
+        JSONArray out = new JSONArray();
+        Cursor c = getReadableDatabase().query("messages",
+            new String[]{"role", "content"}, "session_id=? AND active=1",
+            new String[]{sessionId}, null, null, "id ASC", String.valueOf(limit));
+        try {
+            while (c.moveToNext()) {
+                try {
+                    JSONObject row = new JSONObject();
+                    row.put("role", c.getString(0));
+                    row.put("content", c.getString(1));
+                    out.put(row);
+                } catch (Exception ignored) {}
+            }
+        } finally { c.close(); }
+        return out;
     }
 
     private RunRecord readRun(Cursor cursor) {
@@ -328,6 +437,8 @@ public final class AiDatabase extends SQLiteOpenHelper {
         try { record.compressionCooldownUntil = cursor.getLong(cursor.getColumnIndexOrThrow("compression_cooldown_until")); } catch (Exception ignored) {}
         try { record.modelOverride = cursor.getString(cursor.getColumnIndexOrThrow("model_override")); } catch (Exception ignored) {}
         try { record.lastResolvedModel = cursor.getString(cursor.getColumnIndexOrThrow("last_resolved_model")); } catch (Exception ignored) {}
+        try { record.archived = cursor.getInt(cursor.getColumnIndexOrThrow("archived")) == 1; } catch (Exception ignored) {}
+        try { record.title = cursor.getString(cursor.getColumnIndexOrThrow("title")); } catch (Exception ignored) {}
         return record;
     }
 
@@ -335,7 +446,7 @@ public final class AiDatabase extends SQLiteOpenHelper {
         long now = System.currentTimeMillis();
         long freshnessWindowMs = 3600_000L;
         List<RunRecord> actives = new ArrayList<>();
-        Cursor c = getReadableDatabase().query("runs", null, "state NOT IN (?,?,?) AND active_turn_token IS NOT NULL",
+        Cursor c = getReadableDatabase().query("runs", null, "state NOT IN (?,?,?) AND active_turn_token IS NOT NULL AND COALESCE(archived, 0) = 0",
             new String[]{AiRunStateMachine.State.COMPLETED.name(), AiRunStateMachine.State.FAILED.name(), AiRunStateMachine.State.CANCELED.name()},
             null, null, null);
         try { while (c.moveToNext()) actives.add(readRun(c)); } finally { c.close(); }

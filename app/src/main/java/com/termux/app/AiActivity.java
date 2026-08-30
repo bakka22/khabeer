@@ -105,6 +105,17 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     private TextView mProviderStatus;
     private TextView mActivityStatus;
     private LinearLayout mRecentRuns;
+    private LinearLayout mArchivedRuns;
+    private View mProvidersHeader;
+    private View mSessionsHeader;
+    private View mArchivedHeader;
+    private TextView mProvidersChevron;
+    private TextView mSessionsChevron;
+    private TextView mArchivedChevron;
+    private boolean mProvidersExpanded;
+    private boolean mSessionsExpanded;
+    private boolean mArchivedExpanded;
+    private String mCurrentRunId;
     private TextView mTerminalTitle;
     private TextView mEmptyChatHint;
     private FrameLayout mTerminalContainer;
@@ -285,6 +296,13 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mProviderStatus = findViewById(R.id.ai_harness_status);
         mActivityStatus = findViewById(R.id.ai_activity_status);
         mRecentRuns = findViewById(R.id.ai_recent_runs);
+        mArchivedRuns = findViewById(R.id.ai_archived_runs);
+        mProvidersHeader = findViewById(R.id.ai_providers_header);
+        mSessionsHeader = findViewById(R.id.ai_sessions_header);
+        mArchivedHeader = findViewById(R.id.ai_archived_header);
+        mProvidersChevron = findViewById(R.id.ai_providers_chevron);
+        mSessionsChevron = findViewById(R.id.ai_sessions_chevron);
+        mArchivedChevron = findViewById(R.id.ai_archived_chevron);
         mTerminalTitle = findViewById(R.id.ai_terminal_title);
         mEmptyChatHint = findViewById(R.id.ai_empty_chat_hint);
         mTerminalContainer = findViewById(R.id.ai_terminal_container);
@@ -324,6 +342,37 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         if (back != null) back.setOnClickListener(v -> onBackPressed());
         View setupBack = findViewById(R.id.ai_setup_back);
         if (setupBack != null) setupBack.setOnClickListener(v -> { showFeaturedProviders(); });
+        setupDrawerSections();
+    }
+
+    private void setupDrawerSections() {
+        if (mProvidersHeader != null) mProvidersHeader.setOnClickListener(v -> {
+            mProvidersExpanded = !mProvidersExpanded;
+            applySectionState();
+        });
+        if (mSessionsHeader != null) mSessionsHeader.setOnClickListener(v -> {
+            mSessionsExpanded = !mSessionsExpanded;
+            applySectionState();
+        });
+        if (mArchivedHeader != null) mArchivedHeader.setOnClickListener(v -> {
+            mArchivedExpanded = !mArchivedExpanded;
+            applySectionState();
+        });
+        applySectionState();
+    }
+
+    private void applySectionState() {
+        setSectionExpanded(mDrawerProviderList, mProvidersChevron, mProvidersExpanded);
+        setSectionExpanded(mRecentRuns, mSessionsChevron, mSessionsExpanded);
+        boolean hasArchived = mArchivedRuns != null && mArchivedRuns.getChildCount() > 0;
+        if (mArchivedHeader != null) mArchivedHeader.setVisibility(hasArchived ? View.VISIBLE : View.GONE);
+        setSectionExpanded(mArchivedRuns, mArchivedChevron, mArchivedExpanded && hasArchived);
+    }
+
+    private void setSectionExpanded(View list, TextView chevron, boolean expanded) {
+        if (list == null) return;
+        list.setVisibility(expanded ? View.VISIBLE : View.GONE);
+        if (chevron != null) chevron.setRotation(expanded ? 180f : 0f);
     }
 
     private void setupActions() {
@@ -534,7 +583,6 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mSelectedModel = mProviderConfig.getModel(mSelectedProfile);
         if ("opencode".equals(mSelectedProfile.id) && (mSelectedModel == null || mSelectedModel.equals("gpt-4o") || mSelectedModel.isEmpty())) mSelectedModel = "big-pickle";
         syncControlLabels();
-        android.util.Log.d("AiActivity", "selectProvider " + mSelectedProfile.id + " model=" + mSelectedModel + " store=" + mProviderConfig.getModel(mSelectedProfile));
         mSelectedProviderIcon.setImageResource(iconForProvider(mSelectedProfile.id));
         mSelectedProviderTitle.setText(mSelectedProfile.name);
         mSelectedProviderBody.setText(mSelectedProfile.description);
@@ -589,6 +637,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
 
     private void startNewSession() {
         if (mRuntimeService != null) mRuntimeService.stopActiveRun();
+        mCurrentRunId = null;
         mRunActive = false;
         mHasNativeSession = false;
         mChatMessages.removeAllViews();
@@ -992,6 +1041,13 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             mCurrentToolBubble = null;
         }
         if (run != null) setStatus(run.state.name().toLowerCase(), run.state == AiRunStateMachine.State.FAILED);
+        boolean runSwitched = run != null && !run.id.equals(mCurrentRunId);
+        mCurrentRunId = run == null ? null : run.id;
+        if (runSwitched && mChatMessages != null && mChatMessages.getChildCount() == 0 && mRuntimeService != null) {
+            // Runtime restored a session the UI has never shown (app restart,
+            // service reconnect): bring its persisted transcript back on screen.
+            rebuildTranscript(run.id);
+        }
         refreshRecentRuns();
     }
 
@@ -1252,14 +1308,166 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
 
     private void refreshRecentRuns() {
         if (mRuntimeService == null || mRecentRuns == null) return;
-        while (mRecentRuns.getChildCount() > 1) mRecentRuns.removeViewAt(1);
-        for (AiDatabase.RunRecord run : mRuntimeService.getRecentRuns()) {
-            TextView item = new TextView(this);
-            item.setText(run.harnessId + " · " + run.state.name().toLowerCase());
-            item.setTextColor(color(R.color.ai_text_muted));
-            item.setTextSize(12);
-            item.setPadding(0, dp(8), 0, dp(8));
-            mRecentRuns.addView(item);
+        mRecentRuns.removeAllViews();
+        for (AiDatabase.RunRecord run : mRuntimeService.getSessions()) {
+            mRecentRuns.addView(createSessionRow(run, false));
+        }
+        if (mArchivedRuns != null) {
+            mArchivedRuns.removeAllViews();
+            for (AiDatabase.RunRecord run : mRuntimeService.getArchivedSessions()) {
+                mArchivedRuns.addView(createSessionRow(run, true));
+            }
+        }
+        applySectionState();
+    }
+
+    private View createSessionRow(AiDatabase.RunRecord run, boolean archived) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.VERTICAL);
+        row.setPadding(dp(12), dp(10), dp(12), dp(10));
+        row.setBackgroundResource(R.drawable.bg_provider_card);
+        row.setClickable(true);
+        row.setFocusable(true);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.setMargins(0, 0, 0, dp(8));
+        row.setLayoutParams(lp);
+
+        TextView title = new TextView(this);
+        String titleText = TextUtils.isEmpty(run.title) ? "Untitled session" : run.title;
+        if (run.id != null && run.id.equals(mCurrentRunId)) titleText = "● " + titleText;
+        title.setText(titleText);
+        title.setTextColor(color(R.color.ai_text));
+        title.setTextSize(13);
+        title.setMaxLines(1);
+        row.addView(title);
+
+        TextView meta = new TextView(this);
+        meta.setText(sessionMeta(run, archived));
+        meta.setTextColor(color(R.color.ai_text_muted));
+        meta.setTextSize(11);
+        meta.setMaxLines(1);
+        LinearLayout.LayoutParams mp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        mp.setMargins(0, dp(2), 0, 0);
+        meta.setLayoutParams(mp);
+        row.addView(meta);
+
+        row.setOnClickListener(v -> resumeSession(run, archived));
+        if (!archived) row.setOnLongClickListener(v -> { confirmArchive(run); return true; });
+        return row;
+    }
+
+    private String sessionMeta(AiDatabase.RunRecord run, boolean archived) {
+        StringBuilder sub = new StringBuilder();
+        AiProviderProfile profile = AiProviderProfile.find(run.harnessId);
+        sub.append(profile != null ? profile.name
+            : (TextUtils.isEmpty(run.harnessId) ? "Agent" : run.harnessId));
+        if (!TextUtils.isEmpty(run.lastResolvedModel)) sub.append(" · ").append(run.lastResolvedModel);
+        sub.append(" · ").append(relativeTime(run.updatedAt));
+        if (archived) sub.append(" · archived");
+        else if (run.state == AiRunStateMachine.State.FAILED) sub.append(" · failed");
+        else if (run.state == AiRunStateMachine.State.CANCELED) sub.append(" · interrupted");
+        else if (run.state == AiRunStateMachine.State.RUNNING
+            || run.state == AiRunStateMachine.State.WAITING_APPROVAL
+            || run.state == AiRunStateMachine.State.CONNECTING
+            || run.state == AiRunStateMachine.State.STARTING) sub.append(" · active");
+        return sub.toString();
+    }
+
+    private String relativeTime(long when) {
+        if (when <= 0) return "just now";
+        long minutes = (System.currentTimeMillis() - when) / 60000;
+        if (minutes < 1) return "just now";
+        if (minutes < 60) return minutes + "m ago";
+        long hours = minutes / 60;
+        if (hours < 24) return hours + "h ago";
+        return (hours / 24) + "d ago";
+    }
+
+    private void resumeSession(AiDatabase.RunRecord run, boolean archived) {
+        if (mRuntimeService == null || !mRuntimeBound) {
+            showError("Native runtime is still starting.");
+            return;
+        }
+        if (archived) {
+            new MaterialAlertDialogBuilder(this)
+                .setTitle("Restore session")
+                .setMessage("Move this archived session back into Sessions and open it?")
+                .setNegativeButton(android.R.string.cancel, null)
+                .setPositiveButton("Restore", (dialog, which) -> {
+                    mRuntimeService.archiveRun(run.id, false);
+                    openResumedSession(run.id);
+                })
+                .show();
+            return;
+        }
+        openResumedSession(run.id);
+    }
+
+    private void openResumedSession(String runId) {
+        AiDatabase.RunRecord resumed = mRuntimeService.getActiveRun();
+        if (resumed != null && runId.equals(resumed.id)) {
+            AiProviderProfile runProfile = AiProviderProfile.find(resumed.harnessId);
+            if (runProfile != null) selectProvider(runProfile, false);
+            if (!TextUtils.isEmpty(resumed.lastResolvedModel)) mSelectedModel = resumed.lastResolvedModel;
+        }
+        mRuntimeService.resumeRun(runId);
+        AiDatabase.RunRecord after = mRuntimeService.getActiveRun();
+        if (after == null || !runId.equals(after.id)) return;
+        mCurrentRunId = after.id;
+        rebuildTranscript(after.id);
+        syncControlLabels();
+        if (mDrawer != null) mDrawer.closeDrawer(findViewById(R.id.ai_drawer_panel));
+        showChatPage();
+    }
+
+    private void confirmArchive(AiDatabase.RunRecord run) {
+        if (mRuntimeService == null) return;
+        boolean isActive = run.id != null && run.id.equals(mCurrentRunId);
+        new MaterialAlertDialogBuilder(this)
+            .setTitle("Archive session")
+            .setMessage(isActive
+                ? "This stops the current task and hides the session. Its full history stays in Archived."
+                : "Hide this session from the list? Its history stays in Archived.")
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton("Archive", (dialog, which) -> {
+                mRuntimeService.archiveRun(run.id, true);
+                if (isActive) startNewSession();
+            })
+            .show();
+    }
+
+    private void rebuildTranscript(String runId) {
+        if (mChatMessages == null || mRuntimeService == null) return;
+        mChatMessages.removeAllViews();
+        mStreamingAgentBubble = null;
+        hideThinkingBubble();
+        clearReasoningBuffer();
+        mReasoningBubble = null;
+        mCurrentToolBubble = null;
+        org.json.JSONArray transcript = mRuntimeService.getTranscript(runId);
+        int rendered = 0;
+        for (int i = 0; i < transcript.length(); i++) {
+            org.json.JSONObject row = transcript.optJSONObject(i);
+            if (row == null) continue;
+            String role = row.optString("role");
+            String content = row.optString("content");
+            if (TextUtils.isEmpty(content) || content.trim().isEmpty()) continue;
+            if ("user".equals(role)) {
+                addUserMessage(content);
+                rendered++;
+            } else if ("assistant".equals(role)) {
+                addBubble("Agent", content, false, R.drawable.bg_ai_agent_bubble, R.color.ai_text);
+                rendered++;
+            }
+        }
+        if (rendered == 0) {
+            mEmptyChatHint.setVisibility(View.VISIBLE);
+        } else {
+            mEmptyChatHint.setVisibility(View.GONE);
+            mSuggestionStrip.setVisibility(View.GONE);
+            scrollConversation();
         }
     }
 

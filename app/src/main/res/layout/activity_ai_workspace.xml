@@ -282,10 +282,25 @@
         <TextView android:id="@+id/ai_shell_status" android:layout_width="match_parent" android:layout_height="wrap_content" android:textColor="@color/ai_text_muted" android:textSize="11sp" />
         <TextView android:id="@+id/ai_activity_status" android:layout_width="match_parent" android:layout_height="wrap_content" android:textColor="@color/ai_text_muted" android:textSize="11sp" />
         <View android:layout_width="match_parent" android:layout_height="1dp" android:background="@color/ai_divider" android:layout_marginTop="12dp" android:layout_marginBottom="12dp" />
-        <TextView android:text="@string/ai_harnesses" android:textColor="@color/ai_text" android:textSize="12sp" android:textStyle="bold" android:layout_width="wrap_content" android:layout_height="wrap_content" />
-        <LinearLayout android:id="@+id/ai_drawer_harness_list" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:layout_marginTop="8dp" />
-        <TextView android:text="@string/ai_projects" android:textColor="@color/ai_text" android:textSize="12sp" android:textStyle="bold" android:layout_marginTop="16dp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
-        <ScrollView android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" android:layout_marginTop="8dp"><LinearLayout android:id="@+id/ai_recent_runs" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" /></ScrollView>
+        <ScrollView android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" android:scrollbars="none" android:overScrollMode="never">
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical">
+                <LinearLayout android:id="@+id/ai_providers_header" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:gravity="center_vertical" android:paddingTop="10dp" android:paddingBottom="10dp" android:background="?android:attr/selectableItemBackground">
+                    <TextView android:text="@string/ai_section_providers" android:textColor="@color/ai_text" android:textSize="12sp" android:textStyle="bold" android:letterSpacing="0.08" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" />
+                    <TextView android:id="@+id/ai_providers_chevron" android:text="▾" android:textColor="@color/ai_text_muted" android:textSize="12sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
+                </LinearLayout>
+                <LinearLayout android:id="@+id/ai_drawer_harness_list" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:layout_marginTop="4dp" android:visibility="gone" />
+                <LinearLayout android:id="@+id/ai_sessions_header" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:gravity="center_vertical" android:paddingTop="14dp" android:paddingBottom="10dp" android:background="?android:attr/selectableItemBackground">
+                    <TextView android:text="@string/ai_section_sessions" android:textColor="@color/ai_text" android:textSize="12sp" android:textStyle="bold" android:letterSpacing="0.08" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" />
+                    <TextView android:id="@+id/ai_sessions_chevron" android:text="▾" android:textColor="@color/ai_text_muted" android:textSize="12sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
+                </LinearLayout>
+                <LinearLayout android:id="@+id/ai_recent_runs" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:layout_marginTop="4dp" android:visibility="gone" />
+                <LinearLayout android:id="@+id/ai_archived_header" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:gravity="center_vertical" android:paddingTop="14dp" android:paddingBottom="10dp" android:visibility="gone" android:background="?android:attr/selectableItemBackground">
+                    <TextView android:text="@string/ai_section_archived" android:textColor="@color/ai_text_muted" android:textSize="12sp" android:textStyle="bold" android:letterSpacing="0.08" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" />
+                    <TextView android:id="@+id/ai_archived_chevron" android:text="▾" android:textColor="@color/ai_text_muted" android:textSize="12sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
+                </LinearLayout>
+                <LinearLayout android:id="@+id/ai_archived_runs" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:layout_marginTop="4dp" android:visibility="gone" />
+            </LinearLayout>
+        </ScrollView>
         <com.google.android.material.textfield.TextInputLayout style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox.ExposedDropdownMenu" android:layout_width="0dp" android:layout_height="0dp" android:visibility="gone"><AutoCompleteTextView android:id="@+id/ai_harness_picker" android:layout_width="match_parent" android:layout_height="wrap_content" /></com.google.android.material.textfield.TextInputLayout>
         <TextView android:id="@+id/ai_recent_card" android:layout_width="0dp" android:layout_height="0dp" android:visibility="gone" />
     </LinearLayout>
