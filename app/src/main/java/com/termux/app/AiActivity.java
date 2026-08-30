@@ -144,6 +144,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     private ToolBubble mCurrentToolBubble;
     private boolean mShowThinkingDetails;
     private int mThinkingFrame;
+    private boolean mUserScrolledUp;
     private final StringBuilder mPendingReasoning = new StringBuilder();
 
     private final Handler mUiHandler = new Handler(Looper.getMainLooper());
@@ -350,6 +351,12 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         View setupBack = findViewById(R.id.ai_setup_back);
         if (setupBack != null) setupBack.setOnClickListener(v -> { showFeaturedProviders(); });
         setupDrawerSections();
+        mConversationScroll.setOnScrollChangeListener((androidx.core.widget.NestedScrollView.OnScrollChangeListener) (v, scrollX, scrollY, oldX, oldY) -> {
+            View content = v.getChildAt(0);
+            if (content == null) return;
+            int range = content.getHeight() - v.getHeight();
+            mUserScrolledUp = range > 0 && scrollY < range - dp(56);
+        });
     }
 
     private void setupDrawerSections() {
@@ -707,6 +714,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         String workspace = validateWorkspace();
         if (profile == null || workspace == null) return;
         addUserMessage(prompt);
+        mUserScrolledUp = false;
         mPromptInput.setText("");
         mEmptyChatHint.setVisibility(View.GONE);
         mSuggestionStrip.setVisibility(View.GONE);
@@ -1072,6 +1080,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mStopButton.setVisibility(mRunActive ? View.VISIBLE : View.GONE);
         if (!mRunActive) {
             hideThinkingBubble();
+            clearReasoningBuffer();
             mReasoningBubble = null;
             mCurrentToolBubble = null;
         }
@@ -1095,7 +1104,10 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             mCurrentToolBubble = null;
             showThinkingBubble();
         } else if ("tool/callStarted".equals(method)) {
-            hideThinkingBubble();
+            // Reasoning segment ends here: flush any buffered thinking above
+            // the tool bubble, then retire it so the next reasoning delta
+            // starts a fresh bubble below the tool call.
+            endThinkingSegment();
             mStreamingAgentBubble = null;
             startToolBubble(payload);
         } else if ("item/reasoning/delta".equals(method)) {
@@ -1133,7 +1145,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
 
     private void appendAgentDelta(String text) {
         if (TextUtils.isEmpty(text) || "Thinking…".equals(text)) return;
-        hideThinkingBubble();
+        endThinkingSegment();
         mCurrentToolBubble = null;
         if (mStreamingAgentBubble == null)
             mStreamingAgentBubble = addBubble(mSelectedProfile == null ? "Agent" : mSelectedProfile.name,
@@ -1144,7 +1156,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
 
     private void appendToolOutput(String text) {
         if (TextUtils.isEmpty(text)) return;
-        hideThinkingBubble();
+        endThinkingSegment();
         mStreamingAgentBubble = null;
         if (mCurrentToolBubble == null) startToolBubble(new JSONObject());
         mCurrentToolBubble.details.append(text);
@@ -1194,8 +1206,20 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             mUiHandler.removeCallbacks(mReasoningFlusher);
             mUiHandler.postDelayed(mReasoningFlusher, REASONING_FLUSH_DELAY_MS);
         } else {
+            // Reasoning resumed after a tool call or message: start the next
+            // thinking segment bubble instead of staying silent.
+            if (mThinkingBubble == null) showThinkingBubble();
             appendEvent("reasoning", oneLine(text, 220));
         }
+    }
+
+    /** Ends the current thinking/reasoning segment: flushes buffered reasoning
+     * into its bubble (so it lands above whatever comes next), then retires
+     * both bubble states. The next reasoning delta starts a fresh segment. */
+    private void endThinkingSegment() {
+        flushReasoningUi();
+        mReasoningBubble = null;
+        hideThinkingBubble();
     }
 
     private void flushReasoningUi() {
@@ -1502,6 +1526,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         } else {
             mEmptyChatHint.setVisibility(View.GONE);
             mSuggestionStrip.setVisibility(View.GONE);
+            mUserScrolledUp = false;
             scrollConversation();
         }
     }
@@ -1541,6 +1566,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     }
 
     private void scrollConversation() {
+        if (mUserScrolledUp) return;
         mConversationScroll.post(() -> mConversationScroll.fullScroll(ScrollView.FOCUS_DOWN));
     }
 
