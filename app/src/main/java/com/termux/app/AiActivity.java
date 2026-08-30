@@ -1199,6 +1199,15 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mThinkingBubble = null;
     }
 
+    /** Retire the live reasoning bubble so the next thinking segment starts fresh. */
+    private void retireReasoningBubble() {
+        if (mReasoningBubble == null) return;
+        View wrapper = (View) mReasoningBubble.summary.getParent();
+        if (wrapper != null && wrapper.getParent() instanceof ViewGroup)
+            ((ViewGroup) wrapper.getParent()).removeView(wrapper);
+        mReasoningBubble = null;
+    }
+
     private void appendReasoningDelta(String text) {
         if (TextUtils.isEmpty(text)) return;
         if (mShowThinkingDetails) {
@@ -1218,6 +1227,12 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
      * both bubble states. The next reasoning delta starts a fresh segment. */
     private void endThinkingSegment() {
         flushReasoningUi();
+        // A segment that never received reasoning keeps only its "Waiting…"
+        // placeholder — remove that stub instead of leaving it in the transcript.
+        if (mReasoningBubble != null
+            && "Waiting for provider response…\n".contentEquals(mReasoningBubble.details)) {
+            retireReasoningBubble();
+        }
         mReasoningBubble = null;
         hideThinkingBubble();
     }
@@ -1234,6 +1249,8 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mPendingReasoning.setLength(0);
         trimVisibleReasoning(mReasoningBubble.details);
         mReasoningBubble.detail.setText(mReasoningBubble.details.toString());
+        // Respect a manually collapsed bubble — do not force it open again.
+        mReasoningBubble.detail.setVisibility(mReasoningBubble.expanded ? View.VISIBLE : View.GONE);
         scrollConversation();
     }
 
@@ -1303,11 +1320,17 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
 
         ToolBubble toolBubble = new ToolBubble(summary, detail);
         toolBubble.expanded = false;
-        summary.setOnClickListener(view -> {
+        View.OnClickListener toggle = view -> {
             toolBubble.expanded = !toolBubble.expanded;
             toolBubble.detail.setVisibility(toolBubble.expanded ? View.VISIBLE : View.GONE);
             scrollConversation();
-        });
+        };
+        // The whole bubble toggles: summary, detail text, and wrapper — so a
+        // tap anywhere on the expanded bubble collapses it again.
+        summary.setOnClickListener(toggle);
+        detail.setOnClickListener(toggle);
+        wrapper.setOnClickListener(toggle);
+        wrapper.setClickable(true);
         scrollConversation();
         return toolBubble;
     }
