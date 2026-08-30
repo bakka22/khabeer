@@ -16,6 +16,7 @@
         <item name="android:navigationBarColor">@color/ai_background</item>
         <item name="android:fontFamily">sans</item>
         <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
         <item name="materialAlertDialogTheme">@style/AiMaterialAlertDialog</item>
         <item name="bottomSheetDialogTheme">@style/AiBottomSheetDialog</item>
         <item name="actionBarTheme">@style/AiActionBarTheme</item>

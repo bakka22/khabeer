@@ -1,11 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="ai_background">#0B0C1E</color>
-    <color name="ai_background_gradient_start">#0B0C1E</color>
-    <color name="ai_background_gradient_end">#18102E</color>
-    <color name="ai_surface">#1A1C2E</color>
-    <color name="ai_surface_muted">#202240</color>
+    <color name="ai_background">#0F0F23</color>
+    <color name="ai_background_gradient_start">#0F0F23</color>
+    <color name="ai_background_gradient_end">#1A1230</color>
+    <color name="ai_surface">#1C1E33</color>
+    <color name="ai_surface_muted">#232540</color>
     <color name="ai_surface_elevated">#252847</color>
-    <color name="ai_border">#2D304A</color>
+    <color name="ai_border">#2E314D</color>
     <color name="ai_border_subtle">#262940</color>
     <color name="ai_divider">#1E2035</color>
     <color name="ai_text">#FFFFFF</color>
@@ -18,13 +19,13 @@
     <color name="ai_success">#2ECC71</color>
     <color name="ai_warning">#FF8A4C</color>
     <color name="ai_error">#FF4D6D</color>
-    <color name="ai_terminal">#090A14</color>
+    <color name="ai_terminal">#0F111A</color>
     <color name="ai_terminal_text">#E8EAF6</color>
-    <color name="ai_drawer_background">#11132A</color>
+    <color name="ai_drawer_background">#13152A</color>
     <color name="ai_bubble_user">#7B61FF</color>
     <color name="ai_bubble_agent">#1C1E33</color>
     <color name="ai_chip">#232540</color>
-    <color name="ai_nav_background">#0B0C1E</color>
+    <color name="ai_nav_background">#0F0F23</color>
     <color name="ai_nav_selected">#1E1B3A</color>
     <color name="ai_provider_openai">#10A37F</color>
     <color name="ai_provider_anthropic">#D4A574</color>

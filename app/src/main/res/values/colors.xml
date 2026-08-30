@@ -1,32 +1,34 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="ai_background">#0F0F23</color>
-    <color name="ai_background_gradient_start">#0F0F23</color>
-    <color name="ai_background_gradient_end">#1A1230</color>
-    <color name="ai_surface">#1C1E33</color>
-    <color name="ai_surface_muted">#232540</color>
-    <color name="ai_surface_elevated">#252847</color>
-    <color name="ai_border">#2E314D</color>
-    <color name="ai_border_subtle">#262940</color>
-    <color name="ai_divider">#1E2035</color>
-    <color name="ai_text">#FFFFFF</color>
-    <color name="ai_text_muted">#9AA0BE</color>
-    <color name="ai_text_dim">#6B7194</color>
+    <!-- Light palette (day). Dark variants live in values-night/colors.xml;
+     the switch is AppCompatDelegate night mode, toggled in Settings. -->
+    <color name="ai_background">#FFFFFF</color>
+    <color name="ai_background_gradient_start">#FFFFFF</color>
+    <color name="ai_background_gradient_end">#F3F2FC</color>
+    <color name="ai_surface">#FFFFFF</color>
+    <color name="ai_surface_muted">#F5F5FA</color>
+    <color name="ai_surface_elevated">#FFFFFF</color>
+    <color name="ai_border">#E3E5F0</color>
+    <color name="ai_border_subtle">#EBEDF5</color>
+    <color name="ai_divider">#ECEDF4</color>
+    <color name="ai_text">#191C2B</color>
+    <color name="ai_text_muted">#6B7194</color>
+    <color name="ai_text_dim">#9AA0BE</color>
     <color name="ai_accent">#7B61FF</color>
     <color name="ai_accent_dark">#5A3FFF</color>
-    <color name="ai_accent_muted">#2A2450</color>
-    <color name="ai_accent_glow">#3D2FA0</color>
-    <color name="ai_success">#2ECC71</color>
-    <color name="ai_warning">#FF8A4C</color>
-    <color name="ai_error">#FF4D6D</color>
+    <color name="ai_accent_muted">#EDEBFF</color>
+    <color name="ai_accent_glow">#DCD8FF</color>
+    <color name="ai_success">#27AE60</color>
+    <color name="ai_warning">#E8590C</color>
+    <color name="ai_error">#E03131</color>
     <color name="ai_terminal">#0F111A</color>
     <color name="ai_terminal_text">#E8EAF6</color>
-    <color name="ai_drawer_background">#13152A</color>
-    <color name="ai_bubble_user">#7B61FF</color>
-    <color name="ai_bubble_agent">#1C1E33</color>
-    <color name="ai_chip">#232540</color>
-    <color name="ai_nav_background">#0F0F23</color>
-    <color name="ai_nav_selected">#1E1B3A</color>
+    <color name="ai_drawer_background">#FFFFFF</color>
+    <color name="ai_bubble_user">#EDEBFF</color>
+    <color name="ai_bubble_agent">#FFFFFF</color>
+    <color name="ai_chip">#F1F2F8</color>
+    <color name="ai_nav_background">#FFFFFF</color>
+    <color name="ai_nav_selected">#EDEBFF</color>
     <color name="ai_provider_openai">#10A37F</color>
     <color name="ai_provider_anthropic">#D4A574</color>
     <color name="ai_provider_opencode">#3B82F6</color>

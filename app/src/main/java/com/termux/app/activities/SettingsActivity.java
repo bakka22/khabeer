@@ -25,17 +25,18 @@ import com.termux.shared.termux.TermuxConstants;
 import com.termux.shared.termux.TermuxUtils;
 import com.termux.shared.activity.media.AppCompatActivityUtils;
 import com.termux.shared.theme.NightMode;
-import com.termux.app.AiTheme;
 
 public class SettingsActivity extends AppCompatActivity {
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        com.termux.app.AiThemeMode.apply(this);
         super.onCreate(savedInstanceState);
 
         AppCompatActivityUtils.setNightMode(this, NightMode.getAppNightMode().getName(), true);
+        // The AI appearance switch wins over the termux night-mode preference.
+        com.termux.app.AiThemeMode.apply(this);
 
-        AiTheme.install(this);
         setContentView(R.layout.activity_settings);
         if (savedInstanceState == null) {
             getSupportFragmentManager()
@@ -46,12 +47,6 @@ public class SettingsActivity extends AppCompatActivity {
 
         AppCompatActivityUtils.setToolbar(this, com.termux.shared.R.id.toolbar);
         AppCompatActivityUtils.setShowBackButtonInActionBar(this, true);
-    }
-
-    @Override
-    protected void onResume() {
-        super.onResume();
-        AiTheme.checkRecreate(this);
     }
 
     @Override
