@@ -257,16 +257,21 @@
             </LinearLayout>
         </FrameLayout>
 
-        <com.google.android.material.bottomnavigation.BottomNavigationView
+        <LinearLayout
             android:id="@+id/ai_bottom_nav"
             android:layout_width="match_parent"
             android:layout_height="64dp"
             android:background="@drawable/bg_bottom_nav"
-            app:itemIconTint="@color/ai_text_muted"
-            app:itemTextColor="@color/ai_text_muted"
-            app:itemActiveIndicatorStyle="@style/Widget.Material3.BottomNavigationView.ActiveIndicator"
-            app:labelVisibilityMode="labeled"
-            app:menu="@menu/menu_ai_bottom_nav" />
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp">
+            <LinearLayout android:id="@+id/nav_home" android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent" android:orientation="vertical" android:gravity="center" android:clickable="true" android:focusable="true"><android.widget.ImageView android:layout_width="24dp" android:layout_height="24dp" android:src="@drawable/ic_ai_folder" /><TextView android:text="Home" android:textColor="@color/ai_text" android:textSize="10sp" android:layout_width="wrap_content" android:layout_height="wrap_content" /></LinearLayout>
+            <LinearLayout android:id="@+id/nav_sessions" android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent" android:orientation="vertical" android:gravity="center" android:clickable="true" android:focusable="true"><android.widget.ImageView android:layout_width="24dp" android:layout_height="24dp" android:src="@drawable/ic_ai_storage" /><TextView android:text="Sessions" android:textColor="@color/ai_text_muted" android:textSize="10sp" android:layout_width="wrap_content" android:layout_height="wrap_content" /></LinearLayout>
+            <LinearLayout android:id="@+id/nav_shell" android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent" android:orientation="vertical" android:gravity="center" android:clickable="true" android:focusable="true"><android.widget.ImageView android:layout_width="24dp" android:layout_height="24dp" android:src="@drawable/ic_ai_terminal" /><TextView android:text="Shell" android:textColor="@color/ai_text_muted" android:textSize="10sp" android:layout_width="wrap_content" android:layout_height="wrap_content" /></LinearLayout>
+            <LinearLayout android:id="@+id/nav_providers" android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent" android:orientation="vertical" android:gravity="center" android:clickable="true" android:focusable="true"><android.widget.ImageView android:layout_width="24dp" android:layout_height="24dp" android:src="@drawable/ic_ai_package" /><TextView android:text="Providers" android:textColor="@color/ai_text_muted" android:textSize="10sp" android:layout_width="wrap_content" android:layout_height="wrap_content" /></LinearLayout>
+            <LinearLayout android:id="@+id/nav_settings" android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent" android:orientation="vertical" android:gravity="center" android:clickable="true" android:focusable="true"><android.widget.ImageView android:layout_width="24dp" android:layout_height="24dp" android:src="@drawable/ic_ai_menu" /><TextView android:text="Settings" android:textColor="@color/ai_text_muted" android:textSize="10sp" android:layout_width="wrap_content" android:layout_height="wrap_content" /></LinearLayout>
+        </LinearLayout>
     </LinearLayout>
 
     <LinearLayout android:id="@+id/ai_drawer_panel" android:layout_width="300dp" android:layout_height="match_parent" android:layout_gravity="end" android:background="@color/ai_drawer_background" android:orientation="vertical" android:padding="16dp" android:elevation="16dp">

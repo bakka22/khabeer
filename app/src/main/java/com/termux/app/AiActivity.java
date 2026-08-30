@@ -71,7 +71,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     private View mChatPage;
     private View mSuggestionStrip;
     private View mTerminalCard;
-    private LinearLayout mProviderGrid;
+    private android.widget.GridLayout mProviderGrid;
     private LinearLayout mDrawerProviderList;
     private LinearLayout mChatMessages;
     private LinearLayout mAttachmentList;
@@ -97,7 +97,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     private TextView mChatTitle;
     private TextView mHomeTitle;
     private TextView mHomeBody;
-    private TextView mSelectedProviderIcon;
+    private android.widget.ImageView mSelectedProviderIcon;
     private TextView mSelectedProviderTitle;
     private TextView mSelectedProviderBody;
     private TextView mSetupStatus;
@@ -246,7 +246,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mChatPage = findViewById(R.id.ai_chat_page);
         mSuggestionStrip = findViewById(R.id.ai_suggestion_strip);
         mTerminalCard = findViewById(R.id.ai_terminal_card);
-        mProviderGrid = findViewById(R.id.ai_harness_grid);
+        mProviderGrid = (android.widget.GridLayout) findViewById(R.id.ai_harness_grid);
         mDrawerProviderList = findViewById(R.id.ai_drawer_harness_list);
         mChatMessages = findViewById(R.id.ai_chat_messages);
         mAttachmentList = findViewById(R.id.ai_attachment_list);
@@ -300,18 +300,16 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         if (mSettingsButton != null) mSettingsButton.setOnClickListener(view -> startNewSession());
         if (mStopButton != null) mStopButton.setVisibility(View.GONE);
         if (mTerminalCard != null) mTerminalCard.setVisibility(View.GONE);
-        com.google.android.material.bottomnavigation.BottomNavigationView nav = findViewById(R.id.ai_bottom_nav);
-        if (nav != null) {
-            nav.setOnItemSelectedListener(item -> {
-                int id = item.getItemId();
-                if (id == R.id.nav_home) { showFeaturedProviders(); return true; }
-                if (id == R.id.nav_sessions) { if (mDrawer != null) mDrawer.openDrawer(findViewById(R.id.ai_drawer_panel)); return true; }
-                if (id == R.id.nav_shell) { openShell(); return true; }
-                if (id == R.id.nav_providers) { showProviderDirectory(); return true; }
-                if (id == R.id.nav_settings) { startActivity(new android.content.Intent(this, com.termux.app.activities.SettingsActivity.class)); return true; }
-                return false;
-            });
-        }
+        View navHome = findViewById(R.id.nav_home);
+        View navSessions = findViewById(R.id.nav_sessions);
+        View navShell = findViewById(R.id.nav_shell);
+        View navProviders = findViewById(R.id.nav_providers);
+        View navSettings = findViewById(R.id.nav_settings);
+        if (navHome != null) navHome.setOnClickListener(v -> showFeaturedProviders());
+        if (navSessions != null) navSessions.setOnClickListener(v -> { if (mDrawer != null) mDrawer.openDrawer(findViewById(R.id.ai_drawer_panel)); });
+        if (navShell != null) navShell.setOnClickListener(v -> openShell());
+        if (navProviders != null) navProviders.setOnClickListener(v -> showProviderDirectory());
+        if (navSettings != null) navSettings.setOnClickListener(v -> startActivity(new android.content.Intent(this, com.termux.app.activities.SettingsActivity.class)));
         View back = findViewById(R.id.ai_chat_back);
         if (back != null) back.setOnClickListener(v -> onBackPressed());
     }
@@ -542,10 +540,10 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mProviderConfig.setSelectedProviderId(mSelectedProfile.id);
         mSelectedModel = mProviderConfig.getModel(mSelectedProfile);
         syncControlLabels();
-        mSelectedProviderIcon.setText(mSelectedProfile.mark);
+        mSelectedProviderIcon.setImageResource(iconForProvider(mSelectedProfile.id));
         mSelectedProviderTitle.setText(mSelectedProfile.name);
         mSelectedProviderBody.setText(mSelectedProfile.description);
-        mEmptyChatHint.setText(mSelectedProfile.mark);
+        if (mEmptyChatHint instanceof TextView) ((TextView) mEmptyChatHint).setText(mSelectedProfile.mark);
         mChatTitle.setText(mSelectedProfile.terminalOnly ? "Termux Shell" : mSelectedProfile.name);
 
         if (mSelectedProfile.terminalOnly) {
