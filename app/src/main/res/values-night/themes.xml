@@ -21,6 +21,7 @@
         <item name="bottomSheetDialogTheme">@style/AiBottomSheetDialog</item>
         <item name="actionBarTheme">@style/AiActionBarTheme</item>
         <item name="android:alertDialogTheme">@style/AiFrameworkAlertDialog</item>
+        <item name="alertDialogTheme">@style/AiFrameworkAlertDialog</item>
     </style>
 
     <!--
