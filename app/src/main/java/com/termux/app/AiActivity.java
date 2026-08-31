@@ -112,6 +112,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     private View mSessionsPage;
     private LinearLayout mSessionsList;
     private MaterialButton mProviderButton;
+    private boolean mPickingSessionProvider;
     private LinearLayout mArchivedRuns;
     private View mProvidersHeader;
     private View mSessionsHeader;
@@ -351,7 +352,14 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         if (navProviders != null) navProviders.setOnClickListener(v -> showProviderDirectory());
         if (navSettings != null) navSettings.setOnClickListener(v -> startActivity(new android.content.Intent(this, com.termux.app.activities.SettingsActivity.class)));
         View setupBack = findViewById(R.id.ai_setup_back);
-        if (setupBack != null) setupBack.setOnClickListener(v -> { showFeaturedProviders(); });
+        if (setupBack != null) setupBack.setOnClickListener(v -> {
+            if (mPickingSessionProvider) {
+                mPickingSessionProvider = false;
+                showChatPage();
+                return;
+            }
+            showFeaturedProviders();
+        });
         setupDrawerSections();
         mConversationScroll.setOnScrollChangeListener((androidx.core.widget.NestedScrollView.OnScrollChangeListener) (v, scrollX, scrollY, oldX, oldY) -> {
             View content = v.getChildAt(0);
@@ -392,7 +400,10 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     }
 
     private void setupActions() {
-        mStartButton.setOnClickListener(view -> showChatPage());
+        mStartButton.setOnClickListener(view -> {
+            if (mPickingSessionProvider) applySessionProviderChoice();
+            else showChatPage();
+        });
         mChatSendButton.setOnClickListener(view -> sendPrompt());
         mStopButton.setOnClickListener(view -> {
             if (mRuntimeService != null) mRuntimeService.stopActiveRun();
@@ -406,7 +417,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mTerminalButton.setOnClickListener(view -> mTerminalCard.setVisibility(View.GONE));
         mLoginButton.setOnClickListener(view -> showApiKeyDialog());
         mModelButton.setOnClickListener(view -> showModelDialog());
-        if (mProviderButton != null) mProviderButton.setOnClickListener(view -> showProviderSwitchDialog());
+        if (mProviderButton != null) mProviderButton.setOnClickListener(view -> pickSessionProvider());
         mReasoningButton.setOnClickListener(view -> showReasoningDialog());
         mApprovalButton.setOnClickListener(view -> showApprovalDialog());
         mThinkingButton.setOnClickListener(view -> toggleThinkingDetails());
@@ -527,24 +538,49 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         setStatus("New session ready.", false);
     }
 
-    /** Provider switch from inside a session chat (per-session provider). */
-    private void showProviderSwitchDialog() {
-        if (mSelectedProfile == null) return;
-        java.util.List<AiProviderProfile> options = new ArrayList<>();
-        for (AiProviderProfile profile : AiProviderProfile.PROFILES) {
-            if (profile.implemented && !profile.terminalOnly) options.add(profile);
+    /** Session provider switching: a full providers page — pick a provider,
+     * land on its configuration page, and Continue binds it to THIS session
+     * only (Hermes: the session row carries its own route). */
+    private void pickSessionProvider() {
+        mPickingSessionProvider = true;
+        showProviderDirectory();
+        mHomeTitle.setText("Choose a provider for this session");
+        mHomeBody.setText("Pick a provider, configure it if needed, then Continue to bind it to this session only.");
+    }
+
+    /** Setup page in session-picking mode: UI-level selection only — nothing
+     * is written to the global provider config until Continue. */
+    private void openSessionProviderSetup(AiProviderProfile profile) {
+        mSelectedProfile = profile;
+        mSelectedModel = mProviderConfig.getModel(profile);
+        if ("opencode".equals(profile.id) && (TextUtils.isEmpty(mSelectedModel) || "gpt-4o".equals(mSelectedModel))) mSelectedModel = "big-pickle";
+        syncControlLabels();
+        mSelectedProviderIcon.setImageResource(iconForProvider(profile.id));
+        mSelectedProviderTitle.setText(profile.name);
+        mSelectedProviderBody.setText(profile.description);
+        mSetupTitle.setText("Setup " + profile.name);
+        boolean ready = !profile.apiKeyAuth || mProviderConfig.hasApiKey(profile);
+        mLoginButton.setText("opencode".equals(profile.id) ? "Configure OpenCode" : (ready ? "Update API key" : "Add API key"));
+        mProviderStatus.setText(ready
+            ? "Provider configured. Continue binds it to this session."
+            : "Configuration needed: add an API key for this provider.");
+        mProviderStatus.setTextColor(color(ready ? R.color.ai_success : R.color.ai_warning));
+        showSetupPage();
+    }
+
+    /** Continue pressed on the session-provider setup page. */
+    private void applySessionProviderChoice() {
+        AiProviderProfile profile = mSelectedProfile;
+        mPickingSessionProvider = false;
+        if (profile == null) { showChatPage(); return; }
+        if (mRuntimeService != null && mHasNativeSession) {
+            mRuntimeService.setSessionProvider(profile.id);
+            AiDatabase.RunRecord viewed = mRuntimeService.getActiveRun();
+            if (viewed != null && !TextUtils.isEmpty(viewed.lastResolvedModel)) mSelectedModel = viewed.lastResolvedModel;
+            syncControlLabels();
         }
-        CharSequence[] labels = new CharSequence[options.size()];
-        for (int i = 0; i < options.size(); i++) labels[i] = options.get(i).name;
-        new MaterialAlertDialogBuilder(this)
-            .setTitle("Session provider")
-            .setItems(labels, (dialog, which) -> {
-                AiProviderProfile picked = options.get(which);
-                if (mRuntimeService != null && mHasNativeSession) mRuntimeService.setSessionProvider(picked.id);
-                selectProvider(picked, false);
-                setStatus("Session provider: " + picked.name, false);
-            })
-            .show();
+        setStatus("Session provider: " + profile.name, false);
+        showChatPage();
     }
 
     private void showFeaturedProviders() {
@@ -587,7 +623,10 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         card.setRadius(dp(16));
         card.setClickable(true);
         card.setFocusable(true);
-        card.setOnClickListener(view -> selectProvider(profile, true));
+        card.setOnClickListener(view -> {
+            if (mPickingSessionProvider) openSessionProviderSetup(profile);
+            else selectProvider(profile, true);
+        });
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         lp.setMargins(0, 0, 0, dp(10));
         card.setLayoutParams(lp);
