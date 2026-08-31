@@ -114,6 +114,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     private MaterialButton mProviderButton;
     private boolean mPickingSessionProvider;
     private com.google.android.material.button.MaterialButton mUseSavedConfigButton;
+    private View mOpenCodePage;
     private LinearLayout mArchivedRuns;
     private View mProvidersHeader;
     private View mSessionsHeader;
@@ -239,6 +240,17 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             mDrawer.closeDrawer(findViewById(R.id.ai_drawer_panel));
             return;
         }
+        if (mOpenCodePage != null && mOpenCodePage.getVisibility() == View.VISIBLE) {
+            mOpenCodePage.setVisibility(View.GONE);
+            if (mPickingSessionProvider) {
+                mPickingSessionProvider = false;
+                showChatPage();
+            } else {
+                mHomePanel.setVisibility(View.VISIBLE);
+                showFeaturedProviders();
+            }
+            return;
+        }
         if (mSessionsPage != null && mSessionsPage.getVisibility() == View.VISIBLE) {
             mSessionsPage.setVisibility(View.GONE);
             mHomePanel.setVisibility(View.VISIBLE);
@@ -313,6 +325,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mSessionsPage = findViewById(R.id.ai_sessions_page);
         mSessionsList = findViewById(R.id.ai_sessions_list);
         mProviderButton = findViewById(R.id.ai_provider_button);
+        mOpenCodePage = findViewById(R.id.ai_opencode_page);
         mArchivedRuns = findViewById(R.id.ai_archived_runs);
         mProvidersHeader = findViewById(R.id.ai_providers_header);
         mSessionsHeader = findViewById(R.id.ai_sessions_header);
@@ -536,6 +549,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mHomePanel.setVisibility(View.GONE);
         mSetupPanel.setVisibility(View.GONE);
         if (mSessionsPage != null) mSessionsPage.setVisibility(View.GONE);
+        if (mOpenCodePage != null) mOpenCodePage.setVisibility(View.GONE);
         setStatus("New session ready.", false);
     }
 
@@ -550,6 +564,10 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     /** Setup page in session-picking mode: UI-level selection only — nothing
      * is written to the global provider config until Continue. */
     private void openSessionProviderSetup(AiProviderProfile profile) {
+        if ("opencode".equals(profile.id)) {
+            showOpenCodeSetupPage(true);
+            return;
+        }
         mSelectedProfile = profile;
         mSelectedModel = mProviderConfig.getModel(profile);
         if ("opencode".equals(profile.id) && (TextUtils.isEmpty(mSelectedModel) || "gpt-4o".equals(mSelectedModel))) mSelectedModel = "big-pickle";
@@ -609,6 +627,150 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         showChatPage();
     }
 
+    /** Proper OpenCode setup: Free, Zen and Go each get their own clearly
+     * labeled configuration card — nothing shares or overwrites anything. */
+    private void showOpenCodeSetupPage(boolean sessionMode) {
+        mPickingSessionProvider = sessionMode;
+        mSelectedProfile = AiProviderProfile.find("opencode");
+        mHomePanel.setVisibility(View.GONE);
+        mSetupPanel.setVisibility(View.GONE);
+        mChatPage.setVisibility(View.GONE);
+        if (mSessionsPage != null) mSessionsPage.setVisibility(View.GONE);
+        mChatTitle.setText("OpenCode routes");
+
+        ScrollView scroll = (ScrollView) findViewById(R.id.ai_opencode_scroll);
+        LinearLayout list = findViewById(R.id.ai_opencode_list);
+        if (scroll == null || list == null) return;
+        list.removeAllViews();
+
+        TextView title = new TextView(this);
+        title.setText(sessionMode ? "OpenCode — choose a route for this session" : "OpenCode routes");
+        title.setTextColor(color(R.color.ai_text));
+        title.setTextSize(20);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        title.setPadding(0, dp(12), 0, dp(4));
+        list.addView(title);
+
+        TextView subtitle = new TextView(this);
+        subtitle.setText(sessionMode
+            ? "Each route keeps its own key and model. Save & Use binds the route to this session only."
+            : "Each route keeps its own key and model. Save & Use makes the route active for new sessions.");
+        subtitle.setTextColor(color(R.color.ai_text_muted));
+        subtitle.setTextSize(13);
+        subtitle.setPadding(0, 0, 0, dp(12));
+        list.addView(subtitle);
+
+        list.addView(opencodeRouteCard(AiProviderConfig.OC_ROUTE_FREE, "Free", "Keyless — no API key needed", sessionMode));
+        list.addView(opencodeRouteCard(AiProviderConfig.OC_ROUTE_ZEN, "Zen", "Requires a Zen API key", sessionMode));
+        list.addView(opencodeRouteCard(AiProviderConfig.OC_ROUTE_GO, "Go", "Requires a Go API key", sessionMode));
+
+        mChatPage.setVisibility(View.GONE);
+        mSessionsPage.setVisibility(View.GONE);
+        mHomePanel.setVisibility(View.GONE);
+        findViewById(R.id.ai_opencode_page).setVisibility(View.VISIBLE);
+    }
+
+    private View opencodeRouteCard(String route, String name, String description, boolean sessionMode) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(14), dp(14), dp(14), dp(14));
+        card.setBackgroundResource(R.drawable.bg_provider_card);
+        LinearLayout.LayoutParams cardLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        cardLp.setMargins(0, 0, 0, dp(12));
+        card.setLayoutParams(cardLp);
+
+        TextView nameView = new TextView(this);
+        nameView.setText("OpenCode " + name);
+        nameView.setTextColor(color(R.color.ai_text));
+        nameView.setTextSize(15);
+        nameView.setTypeface(Typeface.DEFAULT_BOLD);
+        card.addView(nameView);
+
+        boolean active = AiProviderConfig.OC_ROUTE_FREE.equals(route)
+            ? "free".equals(mProviderConfig.getOpenCodeSelectedRoute())
+            : mProviderConfig.getOpenCodeSelectedRoute().equals(route);
+        TextView status = new TextView(this);
+        boolean hasKey = !AiProviderConfig.ocRouteNeedsKey(route) || !TextUtils.isEmpty(mProviderConfig.getOpenCodeRouteKey(route));
+        status.setText((active ? "Active route · " : "") + description
+            + (AiProviderConfig.ocRouteNeedsKey(route)
+                ? (hasKey ? " · key saved" : " · no key yet")
+                : ""));
+        status.setTextColor(color(active ? R.color.ai_success : R.color.ai_text_muted));
+        status.setTextSize(11);
+        status.setPadding(0, dp(2), 0, dp(8));
+        card.addView(status);
+
+        TextView modelLabel = new TextView(this);
+        modelLabel.setText("Model");
+        modelLabel.setTextColor(color(R.color.ai_text_muted));
+        modelLabel.setTextSize(11);
+        card.addView(modelLabel);
+
+        final EditText modelInput = new EditText(this);
+        modelInput.setSingleLine(true);
+        modelInput.setText(mProviderConfig.getOpenCodeRouteModel(route));
+        modelInput.setTextColor(color(R.color.ai_text));
+        card.addView(modelInput);
+
+        final boolean needsKey = AiProviderConfig.ocRouteNeedsKey(route);
+        TextView keyLabel = new TextView(this);
+        keyLabel.setText("API key");
+        keyLabel.setTextColor(color(R.color.ai_text_muted));
+        keyLabel.setTextSize(11);
+        keyLabel.setPadding(0, dp(8), 0, 0);
+        keyLabel.setVisibility(needsKey ? View.VISIBLE : View.GONE);
+        card.addView(keyLabel);
+
+        final EditText keyInput = new EditText(this);
+        keyInput.setSingleLine(true);
+        keyInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        String savedKey = mProviderConfig.getOpenCodeRouteKey(route);
+        keyInput.setText(savedKey == null ? "" : savedKey);
+        keyInput.setTextColor(color(R.color.ai_text));
+        keyInput.setVisibility(needsKey ? View.VISIBLE : View.GONE);
+        card.addView(keyInput);
+
+        MaterialButton useButton = new MaterialButton(this);
+        useButton.setText(sessionMode ? "Save & Use for this session" : "Save & Use");
+        useBtnStyle(useButton);
+        useButton.setOnClickListener(v -> {
+            mProviderConfig.setOpenCodeRouteModel(route, modelInput.getText().toString());
+            if (needsKey) mProviderConfig.setOpenCodeRouteKey(route, keyInput.getText().toString());
+            mProviderConfig.setOpenCodeSelectedRoute(route);
+            mSelectedProfile = AiProviderProfile.find("opencode");
+            mSelectedModel = mProviderConfig.getOpenCodeRouteModel(route);
+            if (sessionMode && mRuntimeService != null && mHasNativeSession) {
+                mRuntimeService.setSessionProvider("opencode");
+                mRuntimeService.setSessionRoute(route);
+                mPickingSessionProvider = false;
+                mSelectedModel = mRuntimeService.getActiveRun() == null
+                    ? mSelectedModel : mRuntimeService.getActiveRun().lastResolvedModel;
+            }
+            selectProvider(mSelectedProfile, false);
+            setStatus("OpenCode " + AiProviderConfig.ocRouteLabel(route) + " saved.", false);
+            if (sessionMode) {
+                mPickingSessionProvider = false;
+                showChatPage();
+            } else {
+                showFeaturedProviders();
+            }
+        });
+        card.addView(useButton);
+        return card;
+    }
+
+    private void useBtnStyle(MaterialButton button) {
+        button.setTextColor(0xFFFFFFFF);
+        button.setAllCaps(false);
+        button.setBackgroundTintList(android.content.res.ColorStateList.valueOf(color(R.color.ai_accent)));
+        button.setCornerRadius(dp(12));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.setMargins(0, dp(10), 0, 0);
+        button.setLayoutParams(lp);
+    }
+
     private void showFeaturedProviders() {
         mShowingProviderDirectory = false;
         mProviderGrid.removeAllViews();
@@ -623,6 +785,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mSetupPanel.setVisibility(View.GONE);
         mChatPage.setVisibility(View.GONE);
         if (mSessionsPage != null) mSessionsPage.setVisibility(View.GONE);
+        if (mOpenCodePage != null) mOpenCodePage.setVisibility(View.GONE);
         mChatTitle.setText("Mobile Hermes");
     }
 
@@ -836,6 +999,10 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             : "Configuration needed: add an API key for this provider.");
         mProviderStatus.setTextColor(color(ready ? R.color.ai_success : R.color.ai_warning));
         mSetupStatus.setText("Configuration is separate from chat. Model, reasoning, approval and files are controlled in chat.");
+        if ("opencode".equals(mSelectedProfile.id)) {
+            if (userInitiated) showOpenCodeSetupPage(false);
+            return;
+        }
         if (userInitiated || mSetupPanel.getVisibility() == View.VISIBLE) showSetupPage();
     }
 
@@ -844,6 +1011,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mSetupPanel.setVisibility(View.VISIBLE);
         mChatPage.setVisibility(View.GONE);
         if (mSessionsPage != null) mSessionsPage.setVisibility(View.GONE);
+        if (mOpenCodePage != null) mOpenCodePage.setVisibility(View.GONE);
     }
 
     private void showChatPage() {
@@ -866,6 +1034,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mSetupPanel.setVisibility(View.GONE);
         mChatPage.setVisibility(View.VISIBLE);
         if (mSessionsPage != null) mSessionsPage.setVisibility(View.GONE);
+        if (mOpenCodePage != null) mOpenCodePage.setVisibility(View.GONE);
         syncControlLabels();
     }
 

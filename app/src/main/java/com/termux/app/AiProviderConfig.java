@@ -126,4 +126,98 @@ public final class AiProviderConfig {
             .build());
         return generator.generateKey();
     }
+
+    // ---- OpenCode routes: Free / Zen / Go each keep their own identity ----
+
+    public static final String OC_ROUTE_FREE = "free";
+    public static final String OC_ROUTE_ZEN = "zen";
+    public static final String OC_ROUTE_GO = "go";
+
+    private static final String KEY_OC_ROUTE_KEY = "oc_route_key_";
+    private static final String KEY_OC_ROUTE_MODEL = "oc_route_model_";
+    private static final String KEY_OC_SELECTED_ROUTE = "oc_selected_route";
+
+    public static String ocRouteUrl(String route) {
+        return OC_ROUTE_GO.equals(route) ? "https://opencode.ai/zen/go/v1" : "https://opencode.ai/zen/v1";
+    }
+
+    public static String ocRouteDefaultModel(String route) {
+        if (OC_ROUTE_GO.equals(route)) return "glm-5";
+        if (OC_ROUTE_ZEN.equals(route)) return "x-preview";
+        return "big-pickle";
+    }
+
+    public static String ocRouteLabel(String route) {
+        if (OC_ROUTE_GO.equals(route)) return "Go";
+        if (OC_ROUTE_ZEN.equals(route)) return "Zen";
+        return "Free";
+    }
+
+    public static boolean ocRouteNeedsKey(String route) {
+        return OC_ROUTE_ZEN.equals(route) || OC_ROUTE_GO.equals(route);
+    }
+
+    public String getOpenCodeSelectedRoute() {
+        String route = mPrefs.getString(KEY_OC_SELECTED_ROUTE, OC_ROUTE_FREE);
+        return TextUtils.isEmpty(route) ? OC_ROUTE_FREE : route;
+    }
+
+    public void setOpenCodeSelectedRoute(String route) {
+        if (TextUtils.isEmpty(route)) return;
+        mPrefs.edit().putString(KEY_OC_SELECTED_ROUTE, route).apply();
+    }
+
+    public String getOpenCodeRouteKey(String route) {
+        return getSecret(KEY_OC_ROUTE_KEY + (route == null ? OC_ROUTE_FREE : route));
+    }
+
+    public void setOpenCodeRouteKey(String route, String key) {
+        setSecret(KEY_OC_ROUTE_KEY + (route == null ? OC_ROUTE_FREE : route), key);
+    }
+
+    public String getOpenCodeRouteModel(String route) {
+        return mPrefs.getString(KEY_OC_ROUTE_MODEL + (route == null ? OC_ROUTE_FREE : route),
+            ocRouteDefaultModel(route));
+    }
+
+    public void setOpenCodeRouteModel(String route, String model) {
+        mPrefs.edit().putString(KEY_OC_ROUTE_MODEL + (route == null ? OC_ROUTE_FREE : route),
+            model == null ? "" : model.trim()).apply();
+    }
+
+    private String getSecret(String storageKey) {
+        String encoded = mPrefs.getString(storageKey, "");
+        if (TextUtils.isEmpty(encoded)) return null;
+        try {
+            String[] parts = encoded.split(":", 2);
+            if (parts.length != 2) return null;
+            byte[] iv = Base64.decode(parts[0], Base64.NO_WRAP);
+            byte[] encrypted = Base64.decode(parts[1], Base64.NO_WRAP);
+            Cipher cipher = Cipher.getInstance(CIPHER);
+            cipher.init(Cipher.DECRYPT_MODE, getOrCreateSecretKey(), new GCMParameterSpec(GCM_TAG_BITS, iv));
+            String value = new String(cipher.doFinal(encrypted), StandardCharsets.UTF_8);
+            return TextUtils.isEmpty(value) ? null : value;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private void setSecret(String storageKey, String value) {
+        String clean = value == null ? "" : value.trim();
+        SharedPreferences.Editor editor = mPrefs.edit();
+        if (clean.isEmpty()) {
+            editor.remove(storageKey);
+        } else {
+            try {
+                Cipher cipher = Cipher.getInstance(CIPHER);
+                cipher.init(Cipher.ENCRYPT_MODE, getOrCreateSecretKey());
+                byte[] encrypted = cipher.doFinal(clean.getBytes(StandardCharsets.UTF_8));
+                editor.putString(storageKey, Base64.encodeToString(cipher.getIV(), Base64.NO_WRAP)
+                    + ":" + Base64.encodeToString(encrypted, Base64.NO_WRAP));
+            } catch (Exception e) {
+                return;
+            }
+        }
+        editor.apply();
+    }
 }

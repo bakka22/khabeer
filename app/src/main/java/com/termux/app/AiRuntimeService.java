@@ -469,6 +469,18 @@ public void sendPrompt(String prompt, @Nullable String effort, @Nullable String 
         String baseUrl = mProviderConfig.getBaseUrl(profile);
         String apiKey = mProviderConfig.getApiKey(profile);
         String providerId = profile.id;
+        if ("opencode".equals(providerId)) {
+            // Session-scoped route: each session carries which OpenCode route
+            // (Free / Zen / Go) it belongs to.
+            String route = TextUtils.isEmpty(c.record.route)
+                ? mProviderConfig.getOpenCodeSelectedRoute() : c.record.route;
+            baseUrl = AiProviderConfig.ocRouteUrl(route);
+            apiKey = mProviderConfig.getOpenCodeRouteKey(route);
+            if (TextUtils.isEmpty(c.record.modelOverride))
+                model = mProviderConfig.getOpenCodeRouteModel(route);
+            c.record.lastResolvedModel = model;
+            c.record.route = route;
+        }
 
         if (!isTerminal(c) && c.worker != null && c.worker.isAlive()) {
             if (handleBusyInput(prompt, providerId, baseUrl, apiKey, model, effort, approvalPolicy)) return;
@@ -501,6 +513,17 @@ public void setSessionModel(String model) {
         c.record.lastResolvedModel = model;
         persistRun(c);
         emit("session/model", json("sessionId", c.record.id, "model", model));
+    }
+
+    /** Session-scoped OpenCode route switch (Free / Zen / Go). */
+    public void setSessionRoute(String route) {
+        RunContext c = mViewed;
+        if (c == null || TextUtils.isEmpty(route)) return;
+        c.record.route = route;
+        c.record.modelOverride = mProviderConfig.getOpenCodeRouteModel(route);
+        c.record.lastResolvedModel = c.record.modelOverride;
+        persistRun(c);
+        emit("session/route", json("sessionId", c.record.id, "route", route));
     }
 
     /** Session-scoped provider switch (Hermes model_config.gateway_runtime):
@@ -1494,6 +1517,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         copy.archived = source.archived;
         copy.title = source.title;
         copy.titleSource = source.titleSource;
+        copy.route = source.route;
         return copy;
     }
 

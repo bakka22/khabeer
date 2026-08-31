@@ -19,7 +19,7 @@ import java.util.List;
 public final class AiDatabase extends SQLiteOpenHelper {
 
     private static final String DATABASE_NAME = "termux_ai_runtime.db";
-    private static final int DATABASE_VERSION = 6;
+    private static final int DATABASE_VERSION = 7;
 
     public static final class RunRecord {
         public String id;
@@ -45,6 +45,7 @@ public final class AiDatabase extends SQLiteOpenHelper {
         public boolean archived;
         public String title;
         public String titleSource;
+        public String route;
     }
 
     public AiDatabase(Context context) {
@@ -80,7 +81,8 @@ public final class AiDatabase extends SQLiteOpenHelper {
             "last_resolved_model TEXT," +
             "archived INTEGER DEFAULT 0," +
             "title TEXT," +
-            "title_source TEXT)");
+            "title_source TEXT," +
+            "route TEXT)");
         db.execSQL("CREATE TABLE IF NOT EXISTS events (" +
             "id INTEGER PRIMARY KEY AUTOINCREMENT," +
             "run_id TEXT NOT NULL," +
@@ -167,6 +169,9 @@ public final class AiDatabase extends SQLiteOpenHelper {
             db.execSQL("CREATE INDEX IF NOT EXISTS runs_archived ON runs(archived, updated_at)");
             backfillSessionTitles(db);
         }
+        if (oldVersion < 7) {
+            try { db.execSQL("ALTER TABLE runs ADD COLUMN route TEXT"); } catch (Exception ignored) {}
+        }
         if (oldVersion < 6) {
             // Title provenance (Hermes title_source): 'message' = derived from
             // the first user message, 'ai' = model-generated summary. Existing
@@ -248,6 +253,7 @@ public final class AiDatabase extends SQLiteOpenHelper {
         values.put("archived", record.archived ? 1 : 0);
         values.put("title", record.title);
         values.put("title_source", record.titleSource);
+        values.put("route", record.route);
 
         SQLiteDatabase db = getWritableDatabase();
         if (db.update("runs", values, "id = ?", new String[]{record.id}) == 0) {
@@ -470,6 +476,7 @@ public final class AiDatabase extends SQLiteOpenHelper {
         try { record.archived = cursor.getInt(cursor.getColumnIndexOrThrow("archived")) == 1; } catch (Exception ignored) {}
         try { record.title = cursor.getString(cursor.getColumnIndexOrThrow("title")); } catch (Exception ignored) {}
         try { record.titleSource = cursor.getString(cursor.getColumnIndexOrThrow("title_source")); } catch (Exception ignored) {}
+        try { record.route = cursor.getString(cursor.getColumnIndexOrThrow("route")); } catch (Exception ignored) {}
         return record;
     }
 
