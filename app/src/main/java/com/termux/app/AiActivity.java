@@ -1843,7 +1843,12 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
 
     private void scrollConversation() {
         if (mUserScrolledUp) return;
-        mConversationScroll.post(() -> mConversationScroll.fullScroll(ScrollView.FOCUS_DOWN));
+        // A freshly inflated transcript lays out a frame after the first post,
+        // so scroll twice: the second lands after the real content height exists.
+        mConversationScroll.post(() -> {
+            mConversationScroll.fullScroll(ScrollView.FOCUS_DOWN);
+            mConversationScroll.post(() -> mConversationScroll.fullScroll(ScrollView.FOCUS_DOWN));
+        });
     }
 
     private int color(int resId) {
