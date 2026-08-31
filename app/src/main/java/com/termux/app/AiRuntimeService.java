@@ -76,22 +76,126 @@ public final class AiRuntimeService extends Service {
     private AiDatabase mDatabase;
     private MobileHermesToolExecutor mToolExecutor;
     private AiProviderConfig mProviderConfig;
-    private AiDatabase.RunRecord mActiveRun;
-    private AiRunStateMachine mStateMachine;
-    private Thread mWorker;
-    private volatile boolean mStopRequested;
+    /** Live sessions: each runs its own turns on its own worker thread, with
+     * its own state machine and transcript — parallel sessions at once. */
+    private final Map<String, RunContext> mRuns = new HashMap<>();
+    /** The session the UI is currently looking at; background sessions keep
+     * streaming independently. */
+    private RunContext mViewed;
+    /** The session whose turn is executing on this (worker) thread. */
+    private final ThreadLocal<RunContext> mTurnContext = new ThreadLocal<>();
     private long mNextRequestId = 1;
-    private String mPreviousResponseId;
-    private JSONArray mChatCompletionMessages;
     private BusyInputMode mBusyMode = BusyInputMode.INTERRUPT;
     private final Object mQueueLock = new Object();
-    private String mSteerText;
-    private volatile boolean mLastTurnInterrupted;
 
     private HermesSessionState sessionState(String key) {
         HermesSessionState s = mSessions.get(key);
         if (s == null) { s = new HermesSessionState(); mSessions.put(key, s); }
         return s;
+    }
+
+
+    /** Live sessions: each runs its own turns on its own worker thread, with
+     * its own state machine, transcript and interrupt flags — parallel
+     * sessions at once (Hermes: every session is self-contained). */
+    private static final class RunContext {
+        final AiDatabase.RunRecord record;
+        AiRunStateMachine stateMachine = new AiRunStateMachine();
+        Thread worker;
+        JSONArray chatMessages;
+        String previousResponseId;
+        volatile boolean stopRequested;
+        volatile boolean lastTurnInterrupted;
+        String steerText;
+
+        RunContext(AiDatabase.RunRecord record) { this.record = record; }
+    }
+
+    private RunContext ctx() {
+        RunContext turn = mTurnContext.get();
+        return turn != null ? turn : mViewed;
+    }
+
+    /** Bring a persisted run into the live map so it can be viewed/resumed. */
+    private RunContext adoptRun(AiDatabase.RunRecord record) {
+        RunContext existing = mRuns.get(record.id);
+        if (existing != null) return existing;
+        RunContext ctx = new RunContext(record);
+        try { if (record.chatMessagesJson != null) ctx.chatMessages = new JSONArray(record.chatMessagesJson); } catch (Exception ignored) {}
+        ctx.previousResponseId = record.previousResponseId;
+        mRuns.put(record.id, ctx);
+        return ctx;
+    }
+
+    private boolean isTerminal(RunContext ctx) {
+        if (ctx == null) return false;
+        AiRunStateMachine.State state = ctx.stateMachine.getState();
+        return state == AiRunStateMachine.State.COMPLETED
+            || state == AiRunStateMachine.State.FAILED
+            || state == AiRunStateMachine.State.CANCELED;
+    }
+
+    private void transition(RunContext ctx, AiRunStateMachine.State next) {
+        if (ctx == null) return;
+        try {
+            ctx.stateMachine.transition(next);
+            ctx.record.state = next;
+            persistRun(ctx);
+        } catch (IllegalStateException e) {
+            notifyError(ctx.record.id, e.getMessage());
+        }
+    }
+
+    private void persistRun(RunContext ctx) {
+        if (ctx == null) return;
+        ctx.record.updatedAt = System.currentTimeMillis();
+        mDatabase.saveRun(ctx.record);
+        AiDatabase.RunRecord copy = copyRun(ctx.record);
+        mHandler.post(() -> {
+            for (Listener listener : new ArrayList<>(mListeners)) listener.onRunChanged(copy);
+        });
+    }
+
+    private void clearActiveTurn(RunContext ctx) {
+        if (ctx == null) return;
+        try {
+            HermesSessionState ss = sessionState(ctx.record.sessionKey == null ? ctx.record.id : ctx.record.sessionKey);
+            mDatabase.clearTurnLease(ctx.record.sessionKey, ss.persistent.runGeneration);
+            ctx.record.activeTurnToken = null;
+            persistRun(ctx);
+        } catch (Exception ignored) {}
+    }
+
+    private void markActiveTurn(RunContext ctx) {
+        if (ctx == null) return;
+        try {
+            String token = UUID.randomUUID().toString();
+            ctx.record.activeTurnToken = token;
+            ctx.record.activeTurnStartedAt = System.currentTimeMillis();
+            ctx.record.resumePending = false;
+            HermesSessionState ss = sessionState(ctx.record.sessionKey == null ? ctx.record.id : ctx.record.sessionKey);
+            mDatabase.markTurnLease(ctx.record.sessionKey, token, ss.persistent.runGeneration);
+            persistRun(ctx);
+        } catch (Exception ignored) {}
+    }
+
+    private void failRun(RunContext ctx, @Nullable String message) {
+        if (ctx == null) return;
+        ctx.record.lastError = message == null ? "Unknown native agent runtime failure." : message;
+        try { ctx.stateMachine.transition(AiRunStateMachine.State.FAILED); } catch (Exception ignored) {}
+        ctx.record.state = AiRunStateMachine.State.FAILED;
+        persistRun(ctx);
+        notifyError(ctx.record.id, ctx.record.lastError);
+    }
+
+    private void completeRun(RunContext ctx) {
+        if (ctx == null) return;
+        try { ctx.stateMachine.transition(AiRunStateMachine.State.COMPLETED); } catch (Exception ignored) {}
+        ctx.record.state = AiRunStateMachine.State.COMPLETED;
+        ctx.record.hygieneFailureStreak = 0;
+        clearActiveTurn(ctx);
+        persistRun(ctx);
+        if (ctx.record.sessionKey != null) sessionState(ctx.record.sessionKey).clearTurn();
     }
 
     @Override
@@ -106,34 +210,29 @@ public final class AiRuntimeService extends Service {
         restoreLatestActiveRun();
     }
 
-    private void restoreLatestActiveRun() {
+private void restoreLatestActiveRun() {
         try {
             AiDatabase.RunRecord r = mDatabase.getLatestActiveRun();
             if (r == null) {
-                // Fallback: freshest non-archived row even if terminal, so the
-                // transcript can be shown again after an app restart.
                 java.util.List<AiDatabase.RunRecord> recent = mDatabase.getSessions(1);
                 if (recent.isEmpty()) recent = mDatabase.getArchivedSessions(1);
                 if (!recent.isEmpty()) r = recent.get(0);
             }
-            if (r != null) {
-                long age = System.currentTimeMillis() - r.updatedAt;
-                boolean fresh = age < AUTO_CONTINUE_FRESHNESS_MS;
+            if (r != null && r.chatMessagesJson != null) {
                 boolean isFailed = r.state == AiRunStateMachine.State.FAILED;
-                if (!isFailed && r.chatMessagesJson != null) {
-                    mActiveRun = r;
-                    mStateMachine = new AiRunStateMachine();
-                    try { mStateMachine.transition(AiRunStateMachine.State.STARTING); mStateMachine.transition(AiRunStateMachine.State.CONNECTING); } catch (Exception ignored) {}
+                if (!isFailed) {
+                    RunContext ctx = adoptRun(r);
+                    mViewed = ctx;
+                    boolean fresh = System.currentTimeMillis() - r.updatedAt < AUTO_CONTINUE_FRESHNESS_MS;
                     if (r.state == AiRunStateMachine.State.CANCELED || r.state == AiRunStateMachine.State.COMPLETED) {
-                        try { mStateMachine.transition(AiRunStateMachine.State.RUNNING); } catch (Exception ignored) { try { mStateMachine.transition(AiRunStateMachine.State.STARTING); } catch (Exception ignored2) {} }
-                    } else {
-                        try { mStateMachine.transition(AiRunStateMachine.State.RUNNING); } catch (Exception ignored) {}
+                        try {
+                            ctx.stateMachine.transition(AiRunStateMachine.State.STARTING);
+                            ctx.stateMachine.transition(AiRunStateMachine.State.CONNECTING);
+                            ctx.stateMachine.transition(AiRunStateMachine.State.RUNNING);
+                            r.state = AiRunStateMachine.State.RUNNING;
+                        } catch (Exception ignored) {}
                     }
-                    mPreviousResponseId = r.previousResponseId;
-                    try { mChatCompletionMessages = new JSONArray(r.chatMessagesJson); } catch (Exception ignored) {}
-                    if (fresh && r.activeTurnToken != null) {
-                        mDatabase.setResumePending(r.id, true);
-                    }
+                    if (fresh && r.activeTurnToken != null) mDatabase.setResumePending(r.id, true);
                 }
             }
         } catch (Exception ignored) {}
@@ -149,10 +248,10 @@ public final class AiRuntimeService extends Service {
         return mBinder;
     }
 
-    public void addListener(Listener listener) {
+public void addListener(Listener listener) {
         if (listener == null || mListeners.contains(listener)) return;
         mListeners.add(listener);
-        if (mActiveRun != null) listener.onRunChanged(copyRun(mActiveRun));
+        if (mViewed != null) listener.onRunChanged(copyRun(mViewed.record));
     }
 
     public void removeListener(Listener listener) {
@@ -160,8 +259,8 @@ public final class AiRuntimeService extends Service {
     }
 
     @Nullable
-    public AiDatabase.RunRecord getActiveRun() {
-        return copyRun(mActiveRun);
+public AiDatabase.RunRecord getActiveRun() {
+        return mViewed == null ? null : copyRun(mViewed.record);
     }
 
     public List<AiDatabase.RunRecord> getRecentRuns() {
@@ -189,78 +288,75 @@ public final class AiRuntimeService extends Service {
 
     /** Archive a session (soft hide, Hermes-style). Archiving the active run
      * stops its turn first and drops it as the current session. */
-    public void archiveRun(String runId, boolean archived) {
+public void archiveRun(String runId, boolean archived) {
         AiDatabase.RunRecord target = mDatabase.getRun(runId);
         if (target == null) return;
-        if (archived && mActiveRun != null && runId.equals(mActiveRun.id)) {
-            stopActiveRun();
-            mActiveRun = null;
-            mChatCompletionMessages = null;
-            mStateMachine = new AiRunStateMachine();
-            for (Listener listener : new ArrayList<>(mListeners)) listener.onRunChanged(null);
+        RunContext live = mRuns.get(runId);
+        if (archived && live != null) {
+            stopRun(live);
+            mRuns.remove(runId);
+            if (mViewed == live) {
+                mViewed = null;
+                for (Listener listener : new ArrayList<>(mListeners)) listener.onRunChanged(null);
+            }
         }
         mDatabase.setRunArchived(runId, archived);
-        emit("session/archived", json("sessionId", runId, "archived", archived ? "1" : "0"));
     }
 
     /** Resume a persisted session: restore its transcript into the runtime so
      * the next prompt continues that conversation. Busy turns must be stopped
      * first — switching mid-turn would scramble history (Hermes claims the
      * active session before any switch). */
-    public void resumeRun(String runId) {
+public void resumeRun(String runId) {
         AiDatabase.RunRecord r = mDatabase.getRun(runId);
         if (r == null) { notifyError(runId, "Session not found: " + runId); return; }
-        boolean busy = mWorker != null && mWorker.isAlive() && !isTerminalState();
-        if (busy) {
-            notifyError(runId, "Stop the current task before switching sessions.");
-            return;
-        }
+        boolean fresh = mRuns.get(runId) == null;
         if (r.archived) mDatabase.setRunArchived(runId, false);
-        mActiveRun = r;
-        mActiveRun.archived = false;
-        mStateMachine = new AiRunStateMachine();
-        try { mStateMachine.transition(AiRunStateMachine.State.STARTING); mStateMachine.transition(AiRunStateMachine.State.CONNECTING); mStateMachine.transition(AiRunStateMachine.State.RUNNING); } catch (Exception ignored) {}
-        mPreviousResponseId = r.previousResponseId;
-        try { mChatCompletionMessages = r.chatMessagesJson == null ? null : new JSONArray(r.chatMessagesJson); } catch (Exception ignored) {}
+        RunContext ctx = adoptRun(r);
+        if (fresh) {
+            // Not live in this process: rebuild the session context so the
+            // transcript and route come back exactly as persisted.
+            try {
+                ctx.stateMachine.transition(AiRunStateMachine.State.STARTING);
+                ctx.stateMachine.transition(AiRunStateMachine.State.CONNECTING);
+                ctx.stateMachine.transition(AiRunStateMachine.State.RUNNING);
+            } catch (Exception ignored) {}
+        }
+        mViewed = ctx;
         mDatabase.setResumePending(runId, false);
-        mActiveRun.state = AiRunStateMachine.State.RUNNING;
-        persistRun();
+        r.state = AiRunStateMachine.State.RUNNING;
+        persistRun(ctx);
         emit("session/resumed", json("sessionId", runId));
-        for (Listener listener : new ArrayList<>(mListeners)) listener.onRunChanged(copyRun(mActiveRun));
+        for (Listener listener : new ArrayList<>(mListeners)) listener.onRunChanged(copyRun(r));
     }
 
     /** Starts a true session boundary: stops any turn and drops the current
      * run entirely so the next prompt creates a fresh session (Hermes
      * session_reset). stopActiveRun alone keeps the run as current. */
-    public void newSession() {
-        stopActiveRun();
-        mActiveRun = null;
-        mChatCompletionMessages = null;
-        mPreviousResponseId = null;
-        mStateMachine = new AiRunStateMachine();
-        // stopActiveRun() may have already queued a run-changed post with the
-        // old run; enqueue ours after it so the UI lands on the null (no
-        // current session) state, not on the stale run.
+public void newSession() {
+        // Parallel sessions: leave every live run untouched — this only moves
+        // the UI focus off the current session (Hermes session boundary).
+        mViewed = null;
         mHandler.post(() -> {
             for (Listener listener : new ArrayList<>(mListeners)) listener.onRunChanged(null);
         });
-        emit("session/new", json("at", String.valueOf(System.currentTimeMillis())));
     }
 
     public void setBusyMode(BusyInputMode mode) { if (mode != null) mBusyMode = mode; }
     public BusyInputMode getBusyMode() { return mBusyMode; }
 
-    public boolean steerActiveTurn(String text) {
-        if (mActiveRun == null || mWorker == null || !mWorker.isAlive()) return false;
-        HermesSessionState s = sessionState(mActiveRun.sessionKey == null ? mActiveRun.id : mActiveRun.sessionKey);
-        if (mStateMachine != null && mStateMachine.getState() == AiRunStateMachine.State.WAITING_APPROVAL) return false;
+public boolean steerActiveTurn(String text) {
+        RunContext c = mViewed;
+        if (c == null || c.worker == null || !c.worker.isAlive()) return false;
+        if (c.stateMachine.getState() == AiRunStateMachine.State.WAITING_APPROVAL) return false;
+        HermesSessionState s = sessionState(c.record.sessionKey == null ? c.record.id : c.record.sessionKey);
         s.conversation.sidecarNotes.add(text);
-        mSteerText = text;
+        c.steerText = text;
         emit("turn/steered", json("text", text));
         return true;
     }
 
-    public void startAgent(String providerId, String baseUrl, String apiKey, String workspace, String prompt,
+public void startAgent(String providerId, String baseUrl, String apiKey, String workspace, String prompt,
                            String model, @Nullable String effort, @Nullable String approvalPolicy) {
         String normalizedWorkspace = MobileHermesToolExecutor.normalizeWorkspace(workspace);
         if (normalizedWorkspace == null) {
@@ -277,32 +373,30 @@ public final class AiRuntimeService extends Service {
             return;
         }
 
-        if (mActiveRun != null && mStateMachine != null && !isTerminalState()) {
-            if (handleBusyInput(prompt, providerId, baseUrl, apiKey, model, effort, approvalPolicy)) return;
-        }
-        stopActiveRun();
-        mStopRequested = false;
-        mPreviousResponseId = null;
-        mChatCompletionMessages = null;
+        // Parallel sessions: a new session starts immediately without touching
+        // any other live session — they keep streaming in the background.
         String sessionKey = AiDatabase.buildSessionKey(providerId == null ? "native-agent" : providerId, normalizedWorkspace);
-        mActiveRun = mDatabase.createRun(providerId == null ? "native-agent" : providerId, normalizedWorkspace, sessionKey);
-        mActiveRun.modelOverride = model;
-        mActiveRun.lastResolvedModel = model;
-        mStateMachine = new AiRunStateMachine();
+        AiDatabase.RunRecord record = mDatabase.createRun(providerId == null ? "native-agent" : providerId, normalizedWorkspace, sessionKey);
+        record.modelOverride = model;
+        record.lastResolvedModel = model;
+        RunContext ctx = adoptRun(record);
+        mViewed = ctx;
         HermesSessionState ss = sessionState(sessionKey);
         ss.persistent.bumpGeneration();
-        transition(AiRunStateMachine.State.STARTING);
-        transition(AiRunStateMachine.State.CONNECTING);
-        markActiveTurn();
-        runTurn(providerId, baseUrl, apiKey, normalizedWorkspace, prompt, model, effort, approvalPolicy);
+        transition(ctx, AiRunStateMachine.State.STARTING);
+        transition(ctx, AiRunStateMachine.State.CONNECTING);
+        markActiveTurn(ctx);
+        runTurn(ctx, providerId, baseUrl, apiKey, normalizedWorkspace, prompt, model, effort, approvalPolicy);
     }
 
-    private boolean handleBusyInput(String prompt, String providerId, String baseUrl, String apiKey, String model, String effort, String approvalPolicy) {
+private boolean handleBusyInput(String prompt, String providerId, String baseUrl, String apiKey, String model, String effort, String approvalPolicy) {
+        RunContext c = mViewed;
+        if (c == null) return false;
         if (mBusyMode == BusyInputMode.QUEUE) {
-            HermesSessionState ss = sessionState(mActiveRun.sessionKey == null ? mActiveRun.id : mActiveRun.sessionKey);
+            HermesSessionState ss = sessionState(c.record.sessionKey == null ? c.record.id : c.record.sessionKey);
             synchronized (mQueueLock) {
                 if (ss.conversation.queuedEvents.size() >= BUSY_QUEUE_MAX_PENDING) {
-                    notifyError(mActiveRun.id, "Queue full (" + BUSY_QUEUE_MAX_PENDING + "). Wait for current turn to finish.");
+                    notifyError(c.record.id, "Queue full (" + BUSY_QUEUE_MAX_PENDING + "). Wait for current turn to finish.");
                     return true;
                 }
                 ss.conversation.queuedEvents.add(prompt);
@@ -315,9 +409,9 @@ public final class AiRuntimeService extends Service {
         return false;
     }
 
-    private void drainQueueIfNeeded() {
-        if (mActiveRun == null) return;
-        HermesSessionState ss = sessionState(mActiveRun.sessionKey == null ? mActiveRun.id : mActiveRun.sessionKey);
+private void drainQueueIfNeeded(RunContext ctx) {
+        if (ctx == null) return;
+        HermesSessionState ss = sessionState(ctx.record.sessionKey == null ? ctx.record.id : ctx.record.sessionKey);
         String next = null;
         synchronized (mQueueLock) {
             if (!ss.conversation.queuedEvents.isEmpty()) next = ss.conversation.queuedEvents.remove(0);
@@ -325,36 +419,38 @@ public final class AiRuntimeService extends Service {
         if (next != null) {
             String p = next;
             mHandler.postDelayed(() -> {
-                if (mActiveRun != null) runTurn(mActiveRun.harnessId, null, null, mActiveRun.workspace, p, mActiveRun.modelOverride, null, null);
+                RunContext live = mRuns.get(ctx.record.id);
+                if (live != null) runTurn(live, live.record.harnessId, null, null, live.record.workspace, p, live.record.modelOverride, null, null);
             }, 200);
         }
     }
 
     private void markActiveTurn() {
-        if (mActiveRun == null) return;
+        if (ctx() == null) return;
         try {
             String token = UUID.randomUUID().toString();
-            mActiveRun.activeTurnToken = token;
-            mActiveRun.activeTurnStartedAt = System.currentTimeMillis();
-            mActiveRun.resumePending = false;
-            HermesSessionState ss = sessionState(mActiveRun.sessionKey == null ? mActiveRun.id : mActiveRun.sessionKey);
-            mDatabase.markTurnLease(mActiveRun.sessionKey, token, ss.persistent.runGeneration);
+            ctx().record.activeTurnToken = token;
+            ctx().record.activeTurnStartedAt = System.currentTimeMillis();
+            ctx().record.resumePending = false;
+            HermesSessionState ss = sessionState(ctx().record.sessionKey == null ? ctx().record.id : ctx().record.sessionKey);
+            mDatabase.markTurnLease(ctx().record.sessionKey, token, ss.persistent.runGeneration);
             persistRun();
         } catch (Exception ignored) {}
     }
 
     private void clearActiveTurn() {
-        if (mActiveRun == null) return;
+        if (ctx() == null) return;
         try {
-            HermesSessionState ss = sessionState(mActiveRun.sessionKey == null ? mActiveRun.id : mActiveRun.sessionKey);
-            mDatabase.clearTurnLease(mActiveRun.sessionKey, ss.persistent.runGeneration);
-            mActiveRun.activeTurnToken = null;
+            HermesSessionState ss = sessionState(ctx().record.sessionKey == null ? ctx().record.id : ctx().record.sessionKey);
+            mDatabase.clearTurnLease(ctx().record.sessionKey, ss.persistent.runGeneration);
+            ctx().record.activeTurnToken = null;
             persistRun();
         } catch (Exception ignored) {}
     }
 
-    public void sendPrompt(String prompt, @Nullable String effort, @Nullable String approvalPolicy) {
-        if (mActiveRun == null) {
+public void sendPrompt(String prompt, @Nullable String effort, @Nullable String approvalPolicy) {
+        RunContext c = mViewed;
+        if (c == null) {
             notifyError(null, "No active native agent session.");
             return;
         }
@@ -362,62 +458,66 @@ public final class AiRuntimeService extends Service {
         // provider, model and credentials come from the session row and the
         // provider registry, never from ambient UI state — sessions carry
         // their own provider identity.
-        AiProviderProfile profile = AiProviderProfile.find(mActiveRun.harnessId);
+        AiProviderProfile profile = AiProviderProfile.find(c.record.harnessId);
         if (profile == null) {
-            notifyError(mActiveRun.id, "Session provider is not available.");
+            notifyError(c.record.id, "Session provider is not available.");
             return;
         }
-        String model = TextUtils.isEmpty(mActiveRun.modelOverride)
-            ? mProviderConfig.getModel(profile) : mActiveRun.modelOverride;
+        String model = TextUtils.isEmpty(c.record.modelOverride)
+            ? mProviderConfig.getModel(profile) : c.record.modelOverride;
         if (TextUtils.isEmpty(model)) model = profile.defaultModel;
-        mActiveRun.lastResolvedModel = model;
+        c.record.lastResolvedModel = model;
         String baseUrl = mProviderConfig.getBaseUrl(profile);
         String apiKey = mProviderConfig.getApiKey(profile);
         String providerId = profile.id;
 
-        if (!isTerminalState() && mWorker != null && mWorker.isAlive()) {
+        if (!isTerminal(c) && c.worker != null && c.worker.isAlive()) {
             if (handleBusyInput(prompt, providerId, baseUrl, apiKey, model, effort, approvalPolicy)) return;
-            mStopRequested = true;
-            if (mStateMachine != null) {
-                try { mStateMachine.transition(AiRunStateMachine.State.INTERRUPTING); mActiveRun.state = AiRunStateMachine.State.INTERRUPTING; persistRun(); } catch (Exception ignored) {}
-            }
-            HermesInterruptManager.setInterrupt(true, mWorker.getId(), "steer");
+            c.stopRequested = true;
+            try {
+                c.stateMachine.transition(AiRunStateMachine.State.INTERRUPTING);
+                c.record.state = AiRunStateMachine.State.INTERRUPTING;
+                persistRun(c);
+            } catch (Exception ignored) {}
+            HermesInterruptManager.setInterrupt(true, c.worker.getId(), "steer");
         }
         // Let the interrupted worker unwind so it can persist its partial reply
         // before we build the next turn (mirrors Hermes' orderly interrupt drain).
-        if (mWorker != null && mWorker.isAlive()) {
-            try { mWorker.join(3000); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+        if (c.worker != null && c.worker.isAlive()) {
+            try { c.worker.join(3000); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
         }
-        mStopRequested = false;
-        mSteerText = null;
-        prompt = applyInterruptScaffold(prompt);
-        persistRun();
-        runTurn(providerId, baseUrl, apiKey, mActiveRun.workspace, prompt, model, effort, approvalPolicy);
+        c.stopRequested = false;
+        c.steerText = null;
+        prompt = applyInterruptScaffold(c, prompt);
+        persistRun(c);
+        runTurn(c, providerId, baseUrl, apiKey, c.record.workspace, prompt, model, effort, approvalPolicy);
     }
 
     /** Session-scoped /model switch (Hermes _persist_model_switch_to_session):
      * the model lives on the session row so resume restores it. */
-    public void setSessionModel(String model) {
-        if (mActiveRun == null || TextUtils.isEmpty(model)) return;
-        mActiveRun.modelOverride = model;
-        mActiveRun.lastResolvedModel = model;
-        persistRun();
-        emit("session/model", json("sessionId", mActiveRun.id, "model", model));
+public void setSessionModel(String model) {
+        RunContext c = mViewed;
+        if (c == null || TextUtils.isEmpty(model)) return;
+        c.record.modelOverride = model;
+        c.record.lastResolvedModel = model;
+        persistRun(c);
+        emit("session/model", json("sessionId", c.record.id, "model", model));
     }
 
     /** Session-scoped provider switch (Hermes model_config.gateway_runtime):
      * the session keeps its transcript but subsequent turns run on the new
      * provider; the model resets to that provider's default. */
-    public void setSessionProvider(String providerId) {
-        if (mActiveRun == null || TextUtils.isEmpty(providerId)) return;
+public void setSessionProvider(String providerId) {
+        RunContext c = mViewed;
+        if (c == null || TextUtils.isEmpty(providerId)) return;
         AiProviderProfile profile = AiProviderProfile.find(providerId);
         if (profile == null || profile.terminalOnly || !profile.implemented) return;
-        mActiveRun.harnessId = profile.id;
-        mActiveRun.modelOverride = mProviderConfig.getModel(profile);
-        if (TextUtils.isEmpty(mActiveRun.modelOverride)) mActiveRun.modelOverride = profile.defaultModel;
-        mActiveRun.lastResolvedModel = mActiveRun.modelOverride;
-        persistRun();
-        emit("session/provider", json("sessionId", mActiveRun.id, "provider", profile.id));
+        c.record.harnessId = profile.id;
+        c.record.modelOverride = mProviderConfig.getModel(profile);
+        if (TextUtils.isEmpty(c.record.modelOverride)) c.record.modelOverride = profile.defaultModel;
+        c.record.lastResolvedModel = c.record.modelOverride;
+        persistRun(c);
+        emit("session/provider", json("sessionId", c.record.id, "provider", profile.id));
     }
 
     /**
@@ -426,9 +526,9 @@ public final class AiRuntimeService extends Service {
      * model its own reply was interrupted and shows the visible text it had
      * produced, so "continue" has full context.
      */
-    private String applyInterruptScaffold(String prompt) {
-        if (!mLastTurnInterrupted) return prompt;
-        mLastTurnInterrupted = false;
+private String applyInterruptScaffold(RunContext ctx, String prompt) {
+        if (ctx == null || !ctx.lastTurnInterrupted) return prompt;
+        ctx.lastTurnInterrupted = false;
         StringBuilder sb = new StringBuilder();
         sb.append("[Context from the interrupted assistant response]\n");
         sb.append("[This response was interrupted by a user correction.]\n");
@@ -437,119 +537,128 @@ public final class AiRuntimeService extends Service {
         return sb.toString();
     }
 
-    public void stopActiveRun() {
-        mStopRequested = true;
-        if (mWorker != null) HermesInterruptManager.setInterrupt(true, mWorker.getId(), "stop");
-        for (PendingApproval approval : new ArrayList<>(mPendingApprovals.values())) approval.cancel();
-        mPendingApprovals.clear();
-        if (mWorker != null) mWorker.interrupt();
-        if (mActiveRun != null && mStateMachine != null && !isTerminalState()) {
+public void stopActiveRun() {
+        stopRun(mViewed);
+    }
+
+    private void stopRun(RunContext ctx) {
+        if (ctx == null) return;
+        ctx.stopRequested = true;
+        if (ctx.worker != null) HermesInterruptManager.setInterrupt(true, ctx.worker.getId(), "stop");
+        cancelApprovalsFor(ctx.record.id);
+        if (ctx.worker != null) ctx.worker.interrupt();
+        if (!isTerminal(ctx)) {
             try {
-                if (mStateMachine.getState() == AiRunStateMachine.State.RUNNING || mStateMachine.getState() == AiRunStateMachine.State.WAITING_APPROVAL)
-                    mStateMachine.transition(AiRunStateMachine.State.INTERRUPTING);
-                mStateMachine.transition(AiRunStateMachine.State.CANCELED);
+                if (ctx.stateMachine.getState() == AiRunStateMachine.State.RUNNING || ctx.stateMachine.getState() == AiRunStateMachine.State.WAITING_APPROVAL)
+                    ctx.stateMachine.transition(AiRunStateMachine.State.INTERRUPTING);
+                ctx.stateMachine.transition(AiRunStateMachine.State.CANCELED);
             } catch (IllegalStateException ignored) {
-                try { mStateMachine.transition(AiRunStateMachine.State.CANCELED); } catch (Exception ignored2) {}
+                try { ctx.stateMachine.transition(AiRunStateMachine.State.CANCELED); } catch (Exception ignored2) {}
             }
-            mActiveRun.state = AiRunStateMachine.State.CANCELED;
-            clearActiveTurn();
-            persistRun();
-            if (mActiveRun.sessionKey != null) sessionState(mActiveRun.sessionKey).clearTurn();
+            ctx.record.state = AiRunStateMachine.State.CANCELED;
+            clearActiveTurn(ctx);
+            persistRun(ctx);
+            if (ctx.record.sessionKey != null) sessionState(ctx.record.sessionKey).clearTurn();
         }
         synchronized (mQueueLock) {
-            if (mActiveRun != null && mActiveRun.sessionKey != null) sessionState(mActiveRun.sessionKey).conversation.queuedEvents.clear();
+            if (ctx.record.sessionKey != null) sessionState(ctx.record.sessionKey).conversation.queuedEvents.clear();
         }
     }
 
-    public void interruptActiveRun() {
-        if (mActiveRun == null || mWorker == null) { stopActiveRun(); return; }
-        mStopRequested = true;
-        HermesInterruptManager.setInterrupt(true, mWorker.getId(), "interrupt");
-        try { mStateMachine.transition(AiRunStateMachine.State.INTERRUPTING); mActiveRun.state = AiRunStateMachine.State.INTERRUPTING; persistRun(); } catch (Exception ignored) {}
+public void interruptActiveRun() {
+        RunContext c = mViewed;
+        if (c == null || c.worker == null) { stopActiveRun(); return; }
+        c.stopRequested = true;
+        HermesInterruptManager.setInterrupt(true, c.worker.getId(), "interrupt");
+        try { c.stateMachine.transition(AiRunStateMachine.State.INTERRUPTING); c.record.state = AiRunStateMachine.State.INTERRUPTING; persistRun(c); } catch (Exception ignored) {}
         emit("turn/interrupted", json("reason", "user"));
     }
 
     public void loginWithChatGpt() {
-        notifyError(mActiveRun == null ? null : mActiveRun.id,
+        notifyError(ctx() == null ? null : ctx().record.id,
             "ChatGPT OAuth is not wired into the native runtime yet. Use provider API keys in configuration for this slice.");
     }
 
     public void loginWithDeviceCode() {
-        notifyError(mActiveRun == null ? null : mActiveRun.id,
+        notifyError(ctx() == null ? null : ctx().record.id,
             "Device-code login is not wired into the native runtime yet. Use provider API keys in configuration for this slice.");
     }
 
     public void loginWithApiKey(String apiKey) {
-        notifyError(mActiveRun == null ? null : mActiveRun.id,
+        notifyError(ctx() == null ? null : ctx().record.id,
             "API keys are saved from the provider configuration screen now.");
     }
 
     public void logout() {
-        notifyError(mActiveRun == null ? null : mActiveRun.id,
+        notifyError(ctx() == null ? null : ctx().record.id,
             "Provider logout will clear saved credentials from configuration in the next slice.");
     }
 
-    public void respondToRequest(long id, JSONObject result) {
+public void respondToRequest(long id, JSONObject result) {
         PendingApproval approval = mPendingApprovals.remove(id);
         if (approval == null) return; // already answered or auto-denied by timeout
         approval.answer(result != null && result.optBoolean("approved", false));
-        if (mStateMachine != null && mStateMachine.getState() == AiRunStateMachine.State.WAITING_APPROVAL)
-            transition(AiRunStateMachine.State.RUNNING);
+        RunContext ctx = approval.runId == null ? null : mRuns.get(approval.runId);
+        if (ctx != null && ctx.stateMachine.getState() == AiRunStateMachine.State.WAITING_APPROVAL)
+            transition(ctx, AiRunStateMachine.State.RUNNING);
     }
 
     @Override
-    public void onDestroy() {
-        stopActiveRun();
+public void onDestroy() {
+        for (RunContext ctx : new ArrayList<>(mRuns.values())) stopRun(ctx);
+        mRuns.clear();
+        mViewed = null;
         if (mDatabase != null) mDatabase.close();
         super.onDestroy();
     }
 
-    private void runTurn(String providerId, String baseUrl, String apiKey, String workspace, String prompt,
+private void runTurn(RunContext ctx, String providerId, String baseUrl, String apiKey, String workspace, String prompt,
                          String model, @Nullable String effort, @Nullable String approvalPolicy) {
-        if (mWorker != null) mWorker.interrupt();
-        mWorker = new Thread(() -> executeTurn(providerId, baseUrl, apiKey, workspace,
-            prompt == null ? "" : prompt, model, effort, approvalPolicy), "mobile-hermes-runtime");
-        mWorker.start();
+        if (ctx.worker != null) ctx.worker.interrupt();
+        String tag = ctx.record.id == null ? "runtime" : ctx.record.id.substring(0, Math.min(8, ctx.record.id.length()));
+        ctx.worker = new Thread(() -> executeTurn(ctx, providerId, baseUrl, apiKey, workspace,
+            prompt == null ? "" : prompt, model, effort, approvalPolicy), "mobile-hermes-" + tag);
+        ctx.worker.start();
     }
 
-    private void executeTurn(String providerId, String baseUrl, String apiKey, String workspace, String prompt,
-                             String model, @Nullable String effort, @Nullable String approvalPolicy) {
-        if (mActiveRun == null) return;
+    private void executeTurn(RunContext ctx, String providerId, String baseUrl, String apiKey, String workspace, String prompt,
+                         String model, @Nullable String effort, @Nullable String approvalPolicy) {
+        mTurnContext.set(ctx);
         HermesInterruptManager.clearCurrentThread();
         HermesInterruptManager.setInterrupt(false, Thread.currentThread().getId(), null);
         // A continuation after CANCELED needs a fresh machine (FSM has no CANCELED->RUNNING).
-        if (mStateMachine == null || mStateMachine.getState() == AiRunStateMachine.State.CANCELED) {
-            mStateMachine = new AiRunStateMachine();
-            try { mStateMachine.transition(AiRunStateMachine.State.STARTING); mStateMachine.transition(AiRunStateMachine.State.CONNECTING); } catch (Exception ignored) {}
-            mActiveRun.state = AiRunStateMachine.State.STARTING;
+        if (ctx() == null || ctx().stateMachine.getState() == AiRunStateMachine.State.CANCELED) {
+            ctx().stateMachine = new AiRunStateMachine();
+            try { ctx().stateMachine.transition(AiRunStateMachine.State.STARTING); ctx().stateMachine.transition(AiRunStateMachine.State.CONNECTING); } catch (Exception ignored) {}
+            ctx().record.state = AiRunStateMachine.State.STARTING;
         }
-        if (mSteerText != null) prompt = "[steered] " + mSteerText + "\n\n" + prompt;
-        mSteerText = null;
+        if (ctx().steerText != null) prompt = "[steered] " + ctx().steerText + "\n\n" + prompt;
+        ctx().steerText = null;
         emit("turn/started", new JSONObject());
         transition(AiRunStateMachine.State.RUNNING);
         emit("item/agentMessage/delta", json("text", "Thinking…"));
-        if (mActiveRun != null) mDatabase.appendMessage(mActiveRun.id, "user", prompt);
+        if (ctx() != null) mDatabase.appendMessage(ctx().record.id, "user", prompt);
 
         JSONArray input;
         try {
-            if (mChatCompletionMessages == null)
-                mChatCompletionMessages = new JSONArray().put(json("role", "system", "content", systemInstructions()));
+            if (ctx().chatMessages == null)
+                ctx().chatMessages = new JSONArray().put(json("role", "system", "content", systemInstructions()));
             sanitizeReplayHistory();
-            mChatCompletionMessages.put(json("role", "user", "content", prompt));
-            if (mActiveRun != null) { mActiveRun.chatMessagesJson = mChatCompletionMessages.toString(); persistRun(); }
-            input = toResponsesInput(mChatCompletionMessages);
+            ctx().chatMessages.put(json("role", "user", "content", prompt));
+            if (ctx() != null) { ctx().record.chatMessagesJson = ctx().chatMessages.toString(); persistRun(); }
+            input = toResponsesInput(ctx().chatMessages);
         } catch (Exception e) {
             input = new JSONArray();
             input.put(json("role", "user", "content", prompt));
         }
-        mPreviousResponseId = null;
+        ctx().previousResponseId = null;
 
         try {
             if (usesChatCompletions(providerId)) {
-                executeChatCompletionsTurn(providerId, baseUrl, apiKey, workspace, prompt, model, approvalPolicy);
+                executeChatCompletionsTurn(ctx, providerId, baseUrl, apiKey, workspace, prompt, model, approvalPolicy);
                 return;
             }
-            for (int step = 0; step < MAX_MODEL_STEPS && !mStopRequested && !HermesInterruptManager.isInterrupted(); step++) {
+            for (int step = 0; step < MAX_MODEL_STEPS && !ctx().stopRequested && !HermesInterruptManager.isInterrupted(); step++) {
                 JSONObject response = callResponsesApiWithRetry(providerId, baseUrl, apiKey, model, effort, input);
                 JSONArray outputs = response.optJSONArray("output");
                 boolean hasToolCall = false;
@@ -563,7 +672,7 @@ public final class AiRuntimeService extends Service {
                             emitMessage(item);
                             String text = extractMessageText(item);
                             if (!TextUtils.isEmpty(text)) {
-                                try { mChatCompletionMessages.put(new JSONObject().put("role", "assistant").put("content", text)); } catch (Exception ignored) {}
+                                try { ctx().chatMessages.put(new JSONObject().put("role", "assistant").put("content", text)); } catch (Exception ignored) {}
                             }
                         } else if (isReasoningType(type)) {
                             emitReasoningItem(item);
@@ -578,17 +687,17 @@ public final class AiRuntimeService extends Service {
                                         .put("function", new JSONObject()
                                             .put("name", item.optString("name"))
                                             .put("arguments", item.optString("arguments", "{}")))));
-                                mChatCompletionMessages.put(fn);
-                                if (mActiveRun != null) { mActiveRun.chatMessagesJson = mChatCompletionMessages.toString(); persistRun(); }
+                                ctx().chatMessages.put(fn);
+                                if (ctx() != null) { ctx().record.chatMessagesJson = ctx().chatMessages.toString(); persistRun(); }
                             } catch (Exception ignored) {}
                             JSONObject toolResult = executeToolCall(item, workspace, approvalPolicy);
                             String output = toolResult.optString("output", "");
                             try {
-                                mChatCompletionMessages.put(new JSONObject()
+                                ctx().chatMessages.put(new JSONObject()
                                     .put("role", "tool")
                                     .put("tool_call_id", item.optString("call_id", item.optString("id")))
                                     .put("content", output));
-                                if (mActiveRun != null) { mActiveRun.chatMessagesJson = mChatCompletionMessages.toString(); persistRun(); }
+                                if (ctx() != null) { ctx().record.chatMessagesJson = ctx().chatMessages.toString(); persistRun(); }
                             } catch (Exception ignored) {}
                             input.put(toolResult);
                         }
@@ -604,16 +713,16 @@ public final class AiRuntimeService extends Service {
                 }
             }
 
-        if (!mStopRequested && !HermesInterruptManager.isInterrupted()) failRun("The native agent reached its tool-step limit before finishing.");
-            else if (HermesInterruptManager.isInterrupted()) { emit("turn/interrupted", json("reason", HermesInterruptManager.getReason())); mLastTurnInterrupted = true; clearActiveTurn(); }
-            else { mLastTurnInterrupted = true; clearActiveTurn(); }
-            drainQueueIfNeeded();
+        if (!ctx().stopRequested && !HermesInterruptManager.isInterrupted()) failRun("The native agent reached its tool-step limit before finishing.");
+            else if (HermesInterruptManager.isInterrupted()) { emit("turn/interrupted", json("reason", HermesInterruptManager.getReason())); ctx().lastTurnInterrupted = true; clearActiveTurn(); }
+            else { ctx().lastTurnInterrupted = true; clearActiveTurn(); }
+            drainQueueIfNeeded(ctx);
         } catch (Exception e) {
-            if (!mStopRequested && !HermesInterruptManager.isInterrupted()) {
+            if (!ctx().stopRequested && !HermesInterruptManager.isInterrupted()) {
                 if (isNetworkError(e)) { transitionWithFallback(AiRunStateMachine.State.DISCONNECTED); failRun(e.getMessage() == null ? e.toString() : e.getMessage()); }
                 else failRun(e.getMessage() == null ? e.toString() : e.getMessage());
-            } else { emit("turn/interrupted", json("reason", "cancel")); mLastTurnInterrupted = true; clearActiveTurn(); }
-        } finally { HermesInterruptManager.clearCurrentThread(); }
+            } else { emit("turn/interrupted", json("reason", "cancel")); ctx().lastTurnInterrupted = true; clearActiveTurn(); }
+        } finally { HermesInterruptManager.clearCurrentThread(); mTurnContext.remove(); }
     }
 
     private String extractMessageText(JSONObject item) {
@@ -683,7 +792,7 @@ public final class AiRuntimeService extends Service {
             catch (Exception e) {
                 String msg = e.getMessage() == null ? "" : e.getMessage();
                 boolean retryable = msg.contains("HTTP 429") || msg.contains("HTTP 5");
-                if (attempt < maxRetries && retryable && !mStopRequested) {
+                if (attempt < maxRetries && retryable && !ctx().stopRequested) {
                     long backoff = HermesRetry.jitteredBackoff(attempt, 1000, 8000);
                     try { Thread.sleep(backoff); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); throw ie; }
                     continue;
@@ -694,16 +803,16 @@ public final class AiRuntimeService extends Service {
         throw new IllegalStateException("retry exhausted");
     }
 
-    private void executeChatCompletionsTurn(String providerId, String baseUrl, String apiKey, String workspace,
+    private void executeChatCompletionsTurn(RunContext ctx, String providerId, String baseUrl, String apiKey, String workspace,
                                             String prompt, String model, @Nullable String approvalPolicy) throws Exception {
-        if (mChatCompletionMessages == null)
-            mChatCompletionMessages = new JSONArray().put(json("role", "system", "content", systemInstructions()));
+        if (ctx().chatMessages == null)
+            ctx().chatMessages = new JSONArray().put(json("role", "system", "content", systemInstructions()));
         sanitizeReplayHistory();
-        mChatCompletionMessages.put(json("role", "user", "content", prompt));
-        if (mActiveRun != null) { mActiveRun.chatMessagesJson = mChatCompletionMessages.toString(); persistRun(); }
+        ctx().chatMessages.put(json("role", "user", "content", prompt));
+        if (ctx() != null) { ctx().record.chatMessagesJson = ctx().chatMessages.toString(); persistRun(); }
 
-        for (int step = 0; step < MAX_MODEL_STEPS && !mStopRequested && !HermesInterruptManager.isInterrupted(); step++) {
-            JSONObject response = callChatCompletionsApi(providerId, baseUrl, apiKey, model, mChatCompletionMessages);
+        for (int step = 0; step < MAX_MODEL_STEPS && !ctx().stopRequested && !HermesInterruptManager.isInterrupted(); step++) {
+            JSONObject response = callChatCompletionsApi(providerId, baseUrl, apiKey, model, ctx().chatMessages);
             JSONArray choices = response.optJSONArray("choices");
             JSONObject choice = choices == null ? null : choices.optJSONObject(0);
             JSONObject message = choice == null ? null : choice.optJSONObject("message");
@@ -720,14 +829,14 @@ public final class AiRuntimeService extends Service {
                 if (hasToolCalls) emit("item/reasoning/delta", json("text", content));
                 else emit("item/agentMessage/delta", json("text", content));
             }
-            mChatCompletionMessages.put(message);
-            if (mActiveRun != null) { mActiveRun.chatMessagesJson = mChatCompletionMessages.toString(); persistRun(); }
+            ctx().chatMessages.put(message);
+            if (ctx() != null) { ctx().record.chatMessagesJson = ctx().chatMessages.toString(); persistRun(); }
 
             if (!hasToolCalls) {
-                if (mActiveRun != null) mDatabase.appendMessage(mActiveRun.id, "assistant", content);
+                if (ctx() != null) mDatabase.appendMessage(ctx().record.id, "assistant", content);
                 completeRun();
                 clearActiveTurn();
-                drainQueueIfNeeded();
+                drainQueueIfNeeded(ctx);
                 return;
             }
 
@@ -735,14 +844,14 @@ public final class AiRuntimeService extends Service {
                 JSONObject toolCall = toolCalls.optJSONObject(i);
                 if (toolCall == null) continue;
                 JSONObject toolResult = executeChatToolCall(toolCall, workspace, approvalPolicy);
-                mChatCompletionMessages.put(toolResult);
-                if (mActiveRun != null) { mActiveRun.chatMessagesJson = mChatCompletionMessages.toString(); persistRun(); }
+                ctx().chatMessages.put(toolResult);
+                if (ctx() != null) { ctx().record.chatMessagesJson = ctx().chatMessages.toString(); persistRun(); }
             }
         }
 
-        if (!mStopRequested && !HermesInterruptManager.isInterrupted()) failRun("The chat-completions agent reached its tool-step limit before finishing.");
-        else { mLastTurnInterrupted = true; clearActiveTurn(); }
-        drainQueueIfNeeded();
+        if (!ctx().stopRequested && !HermesInterruptManager.isInterrupted()) failRun("The chat-completions agent reached its tool-step limit before finishing.");
+        else { ctx().lastTurnInterrupted = true; clearActiveTurn(); }
+        drainQueueIfNeeded(ctx);
     }
 
     /**
@@ -753,11 +862,11 @@ public final class AiRuntimeService extends Service {
      * knows the tool "may have executed; effect UNKNOWN".
      */
     private void sanitizeReplayHistory() {
-        if (mChatCompletionMessages == null) return;
+        if (ctx().chatMessages == null) return;
         JSONArray cleaned = new JSONArray();
-        int n = mChatCompletionMessages.length();
+        int n = ctx().chatMessages.length();
         for (int i = 0; i < n; i++) {
-            JSONObject msg = mChatCompletionMessages.optJSONObject(i);
+            JSONObject msg = ctx().chatMessages.optJSONObject(i);
             if (msg == null) continue;
             String role = msg.optString("role", "");
             if ("assistant".equals(role) && msg.optJSONArray("tool_calls") != null) {
@@ -765,7 +874,7 @@ public final class AiRuntimeService extends Service {
                 JSONArray toolCalls = msg.optJSONArray("tool_calls");
                 boolean anyAnswer = false;
                 for (int j = i + 1; j < n; j++) {
-                    JSONObject nxt = mChatCompletionMessages.optJSONObject(j);
+                    JSONObject nxt = ctx().chatMessages.optJSONObject(j);
                     if (nxt == null || !"tool".equals(nxt.optString("role"))) break;
                     anyAnswer = true;
                 }
@@ -785,7 +894,7 @@ public final class AiRuntimeService extends Service {
             }
             cleaned.put(msg);
         }
-        mChatCompletionMessages = cleaned;
+        ctx().chatMessages = cleaned;
     }
 
     private JSONObject callChatCompletionsApi(String providerId, String baseUrl, String apiKey, String model,
@@ -860,7 +969,7 @@ public final class AiRuntimeService extends Service {
 
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) {
             String rawLine;
-            while ((rawLine = reader.readLine()) != null && !mStopRequested) {
+            while ((rawLine = reader.readLine()) != null && !ctx().stopRequested) {
                 consumeChatCompletionsStreamLine(rawLine, content, toolCalls, finishReason, pendingReasoning, lastReasoningEmit);
             }
         }
@@ -1127,12 +1236,12 @@ public final class AiRuntimeService extends Service {
     }
 
     private boolean requestApproval(String command, String workspace) throws InterruptedException {
-        if (mActiveRun == null) return false;
+        if (ctx() == null) return false;
         HermesInterruptManager.clearCurrentThread();
         long id = mNextRequestId++;
-        PendingApproval approval = new PendingApproval();
+        PendingApproval approval = new PendingApproval(ctx().record.id);
         mPendingApprovals.put(id, approval);
-        HermesSessionState ss = sessionState(mActiveRun.sessionKey == null ? mActiveRun.id : mActiveRun.sessionKey);
+        HermesSessionState ss = sessionState(ctx().record.sessionKey == null ? ctx().record.id : ctx().record.sessionKey);
         ss.persistent.pendingApproval = command;
         transition(AiRunStateMachine.State.WAITING_APPROVAL);
         JSONObject payload = new JSONObject();
@@ -1288,60 +1397,60 @@ public final class AiRuntimeService extends Service {
     }
 
     private void transition(AiRunStateMachine.State next) {
-        if (mStateMachine == null || mActiveRun == null) return;
+        if (ctx() == null || ctx().record == null) return;
         try {
-            mStateMachine.transition(next);
-            mActiveRun.state = next;
+            ctx().stateMachine.transition(next);
+            ctx().record.state = next;
             persistRun();
         } catch (IllegalStateException e) {
-            notifyError(mActiveRun.id, e.getMessage());
+            notifyError(ctx().record.id, e.getMessage());
         }
     }
 
     private void completeRun() {
-        if (mActiveRun == null) return;
+        if (ctx() == null) return;
         try {
-            mStateMachine.transition(AiRunStateMachine.State.COMPLETED);
+            ctx().stateMachine.transition(AiRunStateMachine.State.COMPLETED);
         } catch (Exception ignored) {
         }
-        mActiveRun.state = AiRunStateMachine.State.COMPLETED;
-        mActiveRun.hygieneFailureStreak = 0;
+        ctx().record.state = AiRunStateMachine.State.COMPLETED;
+        ctx().record.hygieneFailureStreak = 0;
         clearActiveTurn();
         persistRun();
-        if (mActiveRun.sessionKey != null) sessionState(mActiveRun.sessionKey).clearTurn();
+        if (ctx().record.sessionKey != null) sessionState(ctx().record.sessionKey).clearTurn();
     }
 
     private void persistRun() {
-        if (mActiveRun == null) return;
-        mActiveRun.updatedAt = System.currentTimeMillis();
-        mDatabase.saveRun(mActiveRun);
-        AiDatabase.RunRecord copy = copyRun(mActiveRun);
+        if (ctx() == null) return;
+        ctx().record.updatedAt = System.currentTimeMillis();
+        mDatabase.saveRun(ctx().record);
+        AiDatabase.RunRecord copy = copyRun(ctx().record);
         mHandler.post(() -> {
             for (Listener listener : new ArrayList<>(mListeners)) listener.onRunChanged(copy);
         });
     }
 
     private void failRun(@Nullable String message) {
-        if (mActiveRun == null) return;
-        mActiveRun.lastError = message == null ? "Unknown native agent runtime failure." : message;
+        if (ctx() == null) return;
+        ctx().record.lastError = message == null ? "Unknown native agent runtime failure." : message;
         try {
-            if (mStateMachine != null) mStateMachine.transition(AiRunStateMachine.State.FAILED);
+            if (ctx() != null) ctx().stateMachine.transition(AiRunStateMachine.State.FAILED);
         } catch (Exception ignored) {
         }
-        mActiveRun.state = AiRunStateMachine.State.FAILED;
+        ctx().record.state = AiRunStateMachine.State.FAILED;
         persistRun();
-        notifyError(mActiveRun.id, mActiveRun.lastError);
+        notifyError(ctx().record.id, ctx().record.lastError);
     }
 
     private void emit(String method, JSONObject payload) {
-        if (mActiveRun == null) return;
-        mDatabase.appendEvent(mActiveRun.id, method, payload.toString());
-        String runId = mActiveRun.id;
+        if (ctx() == null) return;
+        mDatabase.appendEvent(ctx().record.id, method, payload.toString());
+        String runId = ctx().record.id;
         mHandler.post(() -> {
             for (Listener listener : new ArrayList<>(mListeners)) listener.onProtocolEvent(runId, method, payload);
         });
-        if (method.equals("item/agentMessage/delta") && mActiveRun != null) {
-            try { mDatabase.appendMessage(mActiveRun.id, "assistant", payload.optString("text")); } catch (Exception ignored) {}
+        if (method.equals("item/agentMessage/delta") && ctx().record != null) {
+            try { mDatabase.appendMessage(ctx().record.id, "assistant", payload.optString("text")); } catch (Exception ignored) {}
         }
     }
 
@@ -1353,8 +1462,8 @@ public final class AiRuntimeService extends Service {
     }
 
     private boolean isTerminalState() {
-        if (mStateMachine == null) return false;
-        AiRunStateMachine.State state = mStateMachine.getState();
+        if (ctx().stateMachine == null) return false;
+        AiRunStateMachine.State state = ctx().stateMachine.getState();
         return state == AiRunStateMachine.State.COMPLETED
             || state == AiRunStateMachine.State.FAILED
             || state == AiRunStateMachine.State.CANCELED;
@@ -1397,9 +1506,22 @@ public final class AiRuntimeService extends Service {
             getString(R.string.ai_app_title), NotificationManager.IMPORTANCE_LOW));
     }
 
+    private void cancelApprovalsFor(String runId) {
+        for (Long id : new ArrayList<>(mPendingApprovals.keySet())) {
+            PendingApproval approval = mPendingApprovals.get(id);
+            if (approval != null && runId.equals(approval.runId)) {
+                approval.cancel();
+                mPendingApprovals.remove(id);
+            }
+        }
+    }
+
     private static final class PendingApproval {
         private final CountDownLatch latch = new CountDownLatch(1);
         private volatile boolean approved;
+        final String runId;
+
+        PendingApproval(String runId) { this.runId = runId; }
 
         boolean await() throws InterruptedException {
             // Auto-deny backstop: if nobody answers (e.g. the UI died), the

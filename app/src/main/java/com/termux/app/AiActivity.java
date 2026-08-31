@@ -1070,6 +1070,15 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
 
     @Override
     public void onRunChanged(AiDatabase.RunRecord run) {
+        // Background sessions stream updates too — only the run the service
+        // currently has in view may drive the chat UI state.
+        if (run != null && mRuntimeBound && mRuntimeService != null) {
+            AiDatabase.RunRecord viewed = mRuntimeService.getActiveRun();
+            if (viewed == null || !viewed.id.equals(run.id)) {
+                refreshRecentRuns();
+                return;
+            }
+        }
         mHasNativeSession = run != null && run.state != AiRunStateMachine.State.FAILED;
         mRunActive = run != null && run.state != AiRunStateMachine.State.COMPLETED
             && run.state != AiRunStateMachine.State.FAILED
@@ -1094,6 +1103,8 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
 
     @Override
     public void onProtocolEvent(String runId, String method, JSONObject payload) {
+        if (runId != null && mCurrentRunId != null && !runId.equals(mCurrentRunId)
+            && !method.contains("requestApproval") && !method.startsWith("session/")) return;
         if ("turn/started".equals(method)) {
             mStreamingAgentBubble = null;
             clearReasoningBuffer();
@@ -1132,6 +1143,10 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
 
     @Override
     public void onRuntimeError(String runId, String message) {
+        if (runId != null && mCurrentRunId != null && !runId.equals(mCurrentRunId)) {
+            setStatus(message, true);
+            return;
+        }
         showError(message);
         addSystemMessage(message);
     }
