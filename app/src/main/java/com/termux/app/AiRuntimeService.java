@@ -196,6 +196,7 @@ public final class AiRuntimeService extends Service {
         clearActiveTurn(ctx);
         persistRun(ctx);
         if (ctx.record.sessionKey != null) sessionState(ctx.record.sessionKey).clearTurn();
+        if (!"ai".equals(ctx.record.titleSource)) generateSessionTitleAsync(ctx.record.id);
     }
 
     @Override
@@ -1504,6 +1505,102 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         NotificationManager manager = getSystemService(NotificationManager.class);
         manager.createNotificationChannel(new NotificationChannel(CHANNEL_ID,
             getString(R.string.ai_app_title), NotificationManager.IMPORTANCE_LOW));
+    }
+
+    private final java.util.concurrent.atomic.AtomicBoolean mTitleBusy = new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    /** AI session titles (Hermes title_generator): a one-shot model call that
+     * names the session after its opening exchange. Message-derived titles
+     * are regenerated; AI titles are never touched. */
+    private void generateSessionTitleAsync(String runId) {
+        AiDatabase.RunRecord record = mDatabase.getRun(runId);
+        if (record == null) return;
+        if ("ai".equals(record.titleSource)) return;
+        AiProviderProfile profile = AiProviderProfile.find(record.harnessId);
+        if (profile == null) return;
+        if (!mTitleBusy.compareAndSet(false, true)) return;
+        Thread t = new Thread(() -> {
+            try {
+                JSONArray history = mDatabase.getTranscript(runId, 4);
+                String firstUser = null;
+                String firstAssistant = null;
+                for (int i = 0; i < history.length(); i++) {
+                    JSONObject row = history.optJSONObject(i);
+                    if (row == null) continue;
+                    if (firstUser == null && "user".equals(row.optString("role"))) firstUser = row.optString("content");
+                    if (firstAssistant == null && "assistant".equals(row.optString("role"))) firstAssistant = row.optString("content");
+                }
+                if (TextUtils.isEmpty(firstUser)) return;
+                String baseUrl = mProviderConfig.getBaseUrl(profile);
+                String apiKey = mProviderConfig.getApiKey(profile);
+                String model = TextUtils.isEmpty(record.lastResolvedModel)
+                    ? mProviderConfig.getModel(profile) : record.lastResolvedModel;
+
+                JSONArray messages = new JSONArray()
+                    .put(json("role", "system", "content",
+                        "You name chat sessions. Reply with a 3-6 word title that captures the task. No quotes, no punctuation at the end."))
+                    .put(json("role", "user", "content",
+                        "User: " + bound(firstUser) + "\nAssistant: " + bound(firstAssistant == null ? "(no reply yet)" : firstAssistant)
+                            + "\n\nTitle:"));
+
+                JSONObject body = new JSONObject()
+                    .put("model", model)
+                    .put("messages", messages)
+                    .put("max_tokens", 24)
+                    .put("temperature", 0.3);
+                HttpURLConnection connection = (HttpURLConnection) new URL(chatCompletionsUrl(baseUrl)).openConnection();
+                connection.setRequestMethod("POST");
+                connection.setConnectTimeout(MODEL_CONNECT_TIMEOUT_MS);
+                connection.setReadTimeout(30000);
+                connection.setDoOutput(true);
+                connection.setRequestProperty("Content-Type", "application/json");
+                if (!TextUtils.isEmpty(apiKey)) connection.setRequestProperty("Authorization", "Bearer " + apiKey);
+                try (OutputStream output = connection.getOutputStream()) {
+                    output.write(body.toString().getBytes(StandardCharsets.UTF_8));
+                }
+                int code = connection.getResponseCode();
+                if (code < 200 || code >= 300) return;
+                JSONObject response = new JSONObject(readFully(connection.getInputStream()));
+                JSONArray choices = response.optJSONArray("choices");
+                JSONObject choice = choices == null ? null : choices.optJSONObject(0);
+                JSONObject message = choice == null ? null : choice.optJSONObject("message");
+                String title = message == null ? "" : message.optString("content", "").replace("\"", "").trim();
+                if (TextUtils.isEmpty(title) || title.length() > 80) return;
+                title = title.split("\n")[0].trim();
+                if (TextUtils.isEmpty(title)) return;
+
+                AiDatabase.RunRecord fresh = mDatabase.getRun(runId);
+                if (fresh == null || "ai".equals(fresh.titleSource)) return;
+                fresh.title = title;
+                fresh.titleSource = "ai";
+                mDatabase.saveRun(fresh);
+                AiDatabase.RunRecord copy = copyRun(fresh);
+                mHandler.post(() -> {
+                    for (Listener listener : new ArrayList<>(mListeners)) listener.onRunChanged(copy);
+                });
+            } catch (Exception ignored) {
+            } finally {
+                mTitleBusy.set(false);
+            }
+        }, "session-titler");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    /** Backfill: name older sessions that only carry a first-message title. */
+    public void backfillSessionTitles() {
+        for (AiDatabase.RunRecord run : mDatabase.getSessions(10)) {
+            if (!"ai".equals(run.titleSource)) {
+                generateSessionTitleAsync(run.id);
+                return; // one at a time; the page refresh keeps pulling
+            }
+        }
+    }
+
+    private String bound(String text) {
+        if (text == null) return "";
+        String clean = text.replace('\n', ' ').trim();
+        return clean.length() <= 400 ? clean : clean.substring(0, 399) + "…";
     }
 
     private void cancelApprovalsFor(String runId) {

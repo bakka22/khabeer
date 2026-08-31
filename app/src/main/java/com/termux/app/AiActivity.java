@@ -109,6 +109,9 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     private TextView mProviderStatus;
     private TextView mActivityStatus;
     private LinearLayout mRecentRuns;
+    private View mSessionsPage;
+    private LinearLayout mSessionsList;
+    private MaterialButton mProviderButton;
     private LinearLayout mArchivedRuns;
     private View mProvidersHeader;
     private View mSessionsHeader;
@@ -234,6 +237,12 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             mDrawer.closeDrawer(findViewById(R.id.ai_drawer_panel));
             return;
         }
+        if (mSessionsPage != null && mSessionsPage.getVisibility() == View.VISIBLE) {
+            mSessionsPage.setVisibility(View.GONE);
+            mHomePanel.setVisibility(View.VISIBLE);
+            showFeaturedProviders();
+            return;
+        }
         if (mShowingProviderDirectory) {
             showFeaturedProviders();
             return;
@@ -299,6 +308,9 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mProviderStatus = findViewById(R.id.ai_harness_status);
         mActivityStatus = findViewById(R.id.ai_activity_status);
         mRecentRuns = findViewById(R.id.ai_recent_runs);
+        mSessionsPage = findViewById(R.id.ai_sessions_page);
+        mSessionsList = findViewById(R.id.ai_sessions_list);
+        mProviderButton = findViewById(R.id.ai_provider_button);
         mArchivedRuns = findViewById(R.id.ai_archived_runs);
         mProvidersHeader = findViewById(R.id.ai_providers_header);
         mSessionsHeader = findViewById(R.id.ai_sessions_header);
@@ -325,7 +337,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     private void setupChrome() {
         mChatTitle.setText("Mobile Hermes");
         if (mMenuButton != null) mMenuButton.setOnClickListener(view -> { if (mDrawer != null) mDrawer.openDrawer(findViewById(R.id.ai_drawer_panel)); });
-        if (mSettingsButton != null) mSettingsButton.setOnClickListener(view -> startActivity(new android.content.Intent(this, com.termux.app.activities.SettingsActivity.class)));
+        if (mSettingsButton != null) mSettingsButton.setOnClickListener(view -> createNewSessionChat());
         if (mStopButton != null) mStopButton.setVisibility(View.GONE);
         if (mTerminalCard != null) mTerminalCard.setVisibility(View.GONE);
         View navHome = findViewById(R.id.nav_home);
@@ -334,13 +346,8 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         View navProviders = findViewById(R.id.nav_providers);
         View navSettings = findViewById(R.id.nav_settings);
         if (navHome != null) navHome.setOnClickListener(v -> showFeaturedProviders());
-        if (navSessions != null) navSessions.setOnClickListener(v -> {
-            mSessionsExpanded = true;
-            mProvidersExpanded = false;
-            applySectionState();
-            if (mDrawer != null) mDrawer.openDrawer(findViewById(R.id.ai_drawer_panel));
-        });
-        if (navShell != null) navShell.setOnClickListener(v -> openShell());
+        if (navSessions != null) navSessions.setOnClickListener(v -> showSessionsPage());
+        if (navShell != null) navShell.setOnClickListener(v -> openChatLastActive());
         if (navProviders != null) navProviders.setOnClickListener(v -> showProviderDirectory());
         if (navSettings != null) navSettings.setOnClickListener(v -> startActivity(new android.content.Intent(this, com.termux.app.activities.SettingsActivity.class)));
         View setupBack = findViewById(R.id.ai_setup_back);
@@ -399,12 +406,13 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mTerminalButton.setOnClickListener(view -> mTerminalCard.setVisibility(View.GONE));
         mLoginButton.setOnClickListener(view -> showApiKeyDialog());
         mModelButton.setOnClickListener(view -> showModelDialog());
+        if (mProviderButton != null) mProviderButton.setOnClickListener(view -> showProviderSwitchDialog());
         mReasoningButton.setOnClickListener(view -> showReasoningDialog());
         mApprovalButton.setOnClickListener(view -> showApprovalDialog());
         mThinkingButton.setOnClickListener(view -> toggleThinkingDetails());
         mAttachButton.setOnClickListener(view -> showAttachDialog());
         mNewSessionButton.setOnClickListener(view -> {
-            startNewSession();
+            createNewSessionChat();
             if (mDrawer != null) mDrawer.closeDrawer(findViewById(R.id.ai_drawer_panel));
         });
         findViewById(R.id.ai_suggestion_project_plan).setOnClickListener(view ->
@@ -421,6 +429,124 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         }
     }
 
+    private void showSessionsPage() {
+        if (mSessionsPage == null) return;
+        mHomePanel.setVisibility(View.GONE);
+        mSetupPanel.setVisibility(View.GONE);
+        mChatPage.setVisibility(View.GONE);
+        mSessionsPage.setVisibility(View.VISIBLE);
+        mChatTitle.setText("Sessions");
+        refreshSessionsPage();
+        if (mRuntimeService != null) mRuntimeService.backfillSessionTitles();
+    }
+
+    private void refreshSessionsPage() {
+        if (mSessionsList == null) return;
+        mSessionsList.removeAllViews();
+        TextView heading = new TextView(this);
+        heading.setText("SESSIONS");
+        heading.setTextColor(color(R.color.ai_text));
+        heading.setTextSize(12);
+        heading.setTypeface(Typeface.DEFAULT_BOLD);
+        heading.setLetterSpacing(0.08f);
+        heading.setPadding(0, dp(8), 0, dp(10));
+        mSessionsList.addView(heading);
+        java.util.List<AiDatabase.RunRecord> sessions = mRuntimeService == null
+            ? new ArrayList<>() : mRuntimeService.getSessions();
+        if (sessions.isEmpty()) {
+            TextView empty = new TextView(this);
+            empty.setText("No sessions yet. Start one from Home or the + button.");
+            empty.setTextColor(color(R.color.ai_text_muted));
+            empty.setTextSize(13);
+            empty.setPadding(0, dp(6), 0, dp(16));
+            mSessionsList.addView(empty);
+        } else {
+            for (AiDatabase.RunRecord run : sessions) mSessionsList.addView(createSessionRow(run, false));
+        }
+        java.util.List<AiDatabase.RunRecord> archived = mRuntimeService == null
+            ? new ArrayList<>() : mRuntimeService.getArchivedSessions();
+        if (!archived.isEmpty()) {
+            TextView archivedHeading = new TextView(this);
+            archivedHeading.setText("ARCHIVED");
+            archivedHeading.setTextColor(color(R.color.ai_text_muted));
+            archivedHeading.setTextSize(12);
+            archivedHeading.setTypeface(Typeface.DEFAULT_BOLD);
+            archivedHeading.setLetterSpacing(0.08f);
+            archivedHeading.setPadding(0, dp(18), 0, dp(10));
+            mSessionsList.addView(archivedHeading);
+            for (AiDatabase.RunRecord run : archived) mSessionsList.addView(createSessionRow(run, true));
+        }
+    }
+
+    /** Opens the chat with the last interacted session, or starts a fresh one. */
+    private void openChatLastActive() {
+        if (mRuntimeService == null || !mRuntimeBound) {
+            showError("Native runtime is still starting.");
+            return;
+        }
+        AiDatabase.RunRecord active = mRuntimeService.getActiveRun();
+        if (active != null) {
+            mCurrentRunId = active.id;
+            rebuildTranscript(active.id);
+            syncControlLabels();
+            showChatPage();
+            return;
+        }
+        java.util.List<AiDatabase.RunRecord> sessions = mRuntimeService.getSessions();
+        if (!sessions.isEmpty()) {
+            openResumedSession(sessions.get(0).id);
+            return;
+        }
+        createNewSessionChat();
+    }
+
+    /** New session = an instant empty chat wired to the last configured
+     * provider/model; the previous session stays live in the background. */
+    private void createNewSessionChat() {
+        if (mRuntimeService == null || !mRuntimeBound) {
+            showError("Native runtime is still starting.");
+            return;
+        }
+        mRuntimeService.newSession();
+        mCurrentRunId = null;
+        mRunActive = false;
+        mHasNativeSession = false;
+        mChatMessages.removeAllViews();
+        mStreamingAgentBubble = null;
+        hideThinkingBubble();
+        clearReasoningBuffer();
+        mReasoningBubble = null;
+        mCurrentToolBubble = null;
+        mStopButton.setVisibility(View.GONE);
+        mEmptyChatHint.setVisibility(View.VISIBLE);
+        mSuggestionStrip.setVisibility(View.VISIBLE);
+        mChatPage.setVisibility(View.VISIBLE);
+        mHomePanel.setVisibility(View.GONE);
+        mSetupPanel.setVisibility(View.GONE);
+        if (mSessionsPage != null) mSessionsPage.setVisibility(View.GONE);
+        setStatus("New session ready.", false);
+    }
+
+    /** Provider switch from inside a session chat (per-session provider). */
+    private void showProviderSwitchDialog() {
+        if (mSelectedProfile == null) return;
+        java.util.List<AiProviderProfile> options = new ArrayList<>();
+        for (AiProviderProfile profile : AiProviderProfile.PROFILES) {
+            if (profile.implemented && !profile.terminalOnly) options.add(profile);
+        }
+        CharSequence[] labels = new CharSequence[options.size()];
+        for (int i = 0; i < options.size(); i++) labels[i] = options.get(i).name;
+        new MaterialAlertDialogBuilder(this)
+            .setTitle("Session provider")
+            .setItems(labels, (dialog, which) -> {
+                AiProviderProfile picked = options.get(which);
+                if (mRuntimeService != null && mHasNativeSession) mRuntimeService.setSessionProvider(picked.id);
+                selectProvider(picked, false);
+                setStatus("Session provider: " + picked.name, false);
+            })
+            .show();
+    }
+
     private void showFeaturedProviders() {
         mShowingProviderDirectory = false;
         mProviderGrid.removeAllViews();
@@ -434,6 +560,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mHomePanel.setVisibility(View.VISIBLE);
         mSetupPanel.setVisibility(View.GONE);
         mChatPage.setVisibility(View.GONE);
+        if (mSessionsPage != null) mSessionsPage.setVisibility(View.GONE);
         mChatTitle.setText("Mobile Hermes");
     }
 
@@ -449,6 +576,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mHomePanel.setVisibility(View.VISIBLE);
         mSetupPanel.setVisibility(View.GONE);
         mChatPage.setVisibility(View.GONE);
+        if (mSessionsPage != null) mSessionsPage.setVisibility(View.GONE);
     }
 
     private MaterialCardView createProviderTile(AiProviderProfile profile) {
@@ -648,6 +776,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mHomePanel.setVisibility(View.GONE);
         mSetupPanel.setVisibility(View.VISIBLE);
         mChatPage.setVisibility(View.GONE);
+        if (mSessionsPage != null) mSessionsPage.setVisibility(View.GONE);
     }
 
     private void showChatPage() {
@@ -669,6 +798,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mHomePanel.setVisibility(View.GONE);
         mSetupPanel.setVisibility(View.GONE);
         mChatPage.setVisibility(View.VISIBLE);
+        if (mSessionsPage != null) mSessionsPage.setVisibility(View.GONE);
         syncControlLabels();
     }
 
@@ -954,6 +1084,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         if (mSelectedProfile == null) return;
         String model = TextUtils.isEmpty(mSelectedModel) ? mSelectedProfile.defaultModel : mSelectedModel;
         if (mModelButton != null) mModelButton.setText(model);
+        if (mProviderButton != null) mProviderButton.setText(mSelectedProfile.name);
         if (mSetupModelDisplay != null) mSetupModelDisplay.setText(model);
         if (mSetupTitle != null) mSetupTitle.setText("Setup " + mSelectedProfile.name);
         if (mReasoningButton != null) mReasoningButton.setText(TextUtils.isEmpty(mSelectedEffort) ? "Reasoning auto" : "Reasoning " + mSelectedEffort);
@@ -1076,6 +1207,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             AiDatabase.RunRecord viewed = mRuntimeService.getActiveRun();
             if (viewed == null || !viewed.id.equals(run.id)) {
                 refreshRecentRuns();
+                if (mSessionsPage != null && mSessionsPage.getVisibility() == View.VISIBLE) refreshSessionsPage();
                 return;
             }
         }
