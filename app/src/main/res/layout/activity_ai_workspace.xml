@@ -73,7 +73,6 @@
 
         <TextView android:id="@+id/ai_chat_title" android:layout_width="0dp" android:layout_height="0dp" android:visibility="gone" />
         <TextView android:id="@+id/ai_chat_subtitle" android:layout_width="0dp" android:layout_height="0dp" android:visibility="gone" />
-        <com.google.android.material.button.MaterialButton android:id="@+id/ai_model_button_placeholder" style="@style/Widget.MaterialComponents.Button.TextButton" android:layout_width="0dp" android:layout_height="0dp" android:visibility="gone" />
 
         <FrameLayout
             android:id="@+id/ai_page_host"
@@ -167,13 +166,6 @@
                     </com.google.android.material.textfield.TextInputLayout>
                     <com.google.android.material.button.MaterialButton android:id="@+id/ai_browse_button" style="@style/Widget.MaterialComponents.Button.OutlinedButton" android:layout_width="match_parent" android:layout_height="46dp" android:layout_marginTop="8dp" android:text="@string/ai_browse" android:textAllCaps="false" app:cornerRadius="14dp" app:strokeColor="@color/ai_border" app:icon="@drawable/ic_ai_folder" />
 
-                    <TextView android:text="Project summary" android:textColor="@color/ai_text_muted" android:textSize="12sp" android:layout_marginTop="16dp" android:layout_width="wrap_content" android:layout_height="wrap_content" android:id="@+id/ai_project_summary" />
-                    <LinearLayout android:id="@+id/ai_custom_command_group" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:visibility="gone">
-                        <com.google.android.material.textfield.TextInputLayout android:id="@+id/ai_custom_command_input_layout" style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox" android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="@string/ai_custom_command_hint" app:boxCornerRadiusBottomEnd="14dp" app:boxCornerRadiusBottomStart="14dp" app:boxCornerRadiusTopEnd="14dp" app:boxCornerRadiusTopStart="14dp">
-                            <com.google.android.material.textfield.TextInputEditText android:id="@+id/ai_custom_command_input" android:layout_width="match_parent" android:layout_height="wrap_content" android:fontFamily="monospace" android:singleLine="true" android:textColor="@color/ai_text" android:textSize="13sp" />
-                        </com.google.android.material.textfield.TextInputLayout>
-                    </LinearLayout>
-
                     <TextView android:text="Account" android:textColor="@color/ai_text" android:textSize="13sp" android:textStyle="bold" android:layout_marginTop="20dp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
                     <com.google.android.material.button.MaterialButton android:id="@+id/ai_login_button" style="@style/Widget.MaterialComponents.Button.OutlinedButton" android:layout_width="match_parent" android:layout_height="46dp" android:layout_marginTop="8dp" android:text="@string/ai_sign_in" android:textAllCaps="false" app:cornerRadius="14dp" app:strokeColor="@color/ai_border" app:icon="@drawable/ic_ai_login" />
                     <TextView android:id="@+id/ai_setup_status" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="12dp" android:gravity="center" android:textColor="@color/ai_text_muted" android:textSize="12sp" />
@@ -185,21 +177,10 @@
                     </LinearLayout>
 
                     <com.google.android.material.button.MaterialButton android:id="@+id/ai_start_button" android:layout_width="match_parent" android:layout_height="52dp" android:layout_marginTop="20dp" android:text="@string/ai_continue" android:textAllCaps="false" app:cornerRadius="16dp" android:backgroundTint="@color/ai_accent" />
-                    <LinearLayout android:layout_width="0dp" android:layout_height="0dp" android:visibility="gone"><com.google.android.material.button.MaterialButton android:id="@+id/ai_install_button" android:layout_width="0dp" android:layout_height="0dp" android:visibility="gone" /><com.google.android.material.button.MaterialButton android:id="@+id/ai_check_button" android:layout_width="0dp" android:layout_height="0dp" android:visibility="gone" /></LinearLayout>
                 </LinearLayout>
             </androidx.core.widget.NestedScrollView>
 
             <LinearLayout android:id="@+id/ai_chat_page" android:layout_width="match_parent" android:layout_height="match_parent" android:background="@drawable/bg_gradient_main" android:orientation="vertical" android:visibility="gone">
-                <LinearLayout android:layout_width="match_parent" android:layout_height="48dp" android:gravity="center_vertical" android:paddingStart="12dp" android:paddingEnd="12dp" android:background="@android:color/transparent">
-                    <ImageButton android:id="@+id/ai_chat_back" android:layout_width="36dp" android:layout_height="36dp" android:background="?attr/selectableItemBackgroundBorderless" android:src="@drawable/ic_ai_attach" app:tint="@color/ai_text" android:rotation="180" />
-                    <ImageView android:id="@+id/ai_chat_provider_icon" android:layout_width="28dp" android:layout_height="28dp" android:src="@drawable/ic_provider_openai" android:background="@drawable/bg_ai_harness_badge" android:padding="4dp" android:layout_marginStart="8dp" />
-                    <LinearLayout android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:orientation="vertical" android:layout_marginStart="8dp">
-                        <TextView android:id="@+id/ai_chat_provider_name" android:text="OpenAI" android:textColor="@color/ai_text" android:textSize="13sp" android:textStyle="bold" android:layout_width="wrap_content" android:layout_height="wrap_content" />
-                        <TextView android:id="@+id/ai_chat_provider_model" android:text="gpt-4o" android:textColor="@color/ai_text_muted" android:textSize="11sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
-                    </LinearLayout>
-                    <com.google.android.material.button.MaterialButton android:text="New session" android:textAllCaps="false" android:textSize="11sp" app:cornerRadius="12dp" android:layout_width="wrap_content" android:layout_height="32dp" android:minWidth="0dp" android:paddingStart="10dp" android:paddingEnd="10dp" android:backgroundTint="@color/ai_accent" />
-                    <ImageButton android:layout_width="32dp" android:layout_height="32dp" android:background="?attr/selectableItemBackgroundBorderless" android:src="@drawable/ic_ai_menu" app:tint="@color/ai_text" />
-                </LinearLayout>
 
                 <androidx.core.widget.NestedScrollView android:id="@+id/ai_conversation_scroll" android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" android:clipToPadding="false" android:fillViewport="true" android:paddingStart="14dp" android:paddingEnd="14dp" android:paddingBottom="12dp">
                     <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:paddingTop="12dp">
@@ -214,7 +195,6 @@
                         <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:layout_marginTop="12dp" android:gravity="center">
                             <TextView android:id="@+id/ai_suggestion_project_plan" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:background="@drawable/bg_ai_suggestion" android:padding="12dp" android:text="Create a project plan\nfor this repo" android:textColor="@color/ai_text" android:textSize="12sp" android:clickable="true" android:focusable="true" />
                             <TextView android:id="@+id/ai_suggestion_fix_tests" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:layout_marginStart="8dp" android:background="@drawable/bg_ai_suggestion" android:padding="12dp" android:text="Fix a bug\nand run tests" android:textColor="@color/ai_text" android:textSize="12sp" android:clickable="true" android:focusable="true" />
-                            <TextView android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:layout_marginStart="8dp" android:background="@drawable/bg_ai_suggestion" android:padding="12dp" android:text="Audit this\ncodebase" android:textColor="@color/ai_text" android:textSize="12sp" />
                         </LinearLayout>
 
                         <TextView android:id="@+id/ai_empty_chat_hint" android:layout_width="48dp" android:layout_height="48dp" android:background="@drawable/bg_ai_harness_badge" android:gravity="center" android:text="◯" android:textColor="@color/ai_text" android:visibility="gone" />
@@ -301,7 +281,5 @@
                 <LinearLayout android:id="@+id/ai_archived_runs" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:layout_marginTop="4dp" android:visibility="gone" />
             </LinearLayout>
         </ScrollView>
-        <com.google.android.material.textfield.TextInputLayout style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox.ExposedDropdownMenu" android:layout_width="0dp" android:layout_height="0dp" android:visibility="gone"><AutoCompleteTextView android:id="@+id/ai_harness_picker" android:layout_width="match_parent" android:layout_height="wrap_content" /></com.google.android.material.textfield.TextInputLayout>
-        <TextView android:id="@+id/ai_recent_card" android:layout_width="0dp" android:layout_height="0dp" android:visibility="gone" />
     </LinearLayout>
 </androidx.drawerlayout.widget.DrawerLayout>

@@ -126,9 +126,6 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     private TerminalView mTerminalView;
     private TextView mSetupTitle;
     private TextView mSetupModelDisplay;
-    private android.widget.ImageView mChatProviderIcon;
-    private TextView mChatProviderName;
-    private TextView mChatProviderModel;
 
     private AiProviderConfig mProviderConfig;
     private AiProviderProfile mSelectedProfile;
@@ -315,9 +312,6 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mTerminalView = findViewById(R.id.ai_terminal_view);
         mSetupTitle = findViewById(R.id.ai_setup_title);
         mSetupModelDisplay = findViewById(R.id.ai_model_display);
-        mChatProviderIcon = findViewById(R.id.ai_chat_provider_icon);
-        mChatProviderName = findViewById(R.id.ai_chat_provider_name);
-        mChatProviderModel = findViewById(R.id.ai_chat_provider_model);
         mWorkspaceInput.setText(TermuxConstants.TERMUX_HOME_DIR_PATH);
     }
 
@@ -331,7 +325,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     private void setupChrome() {
         mChatTitle.setText("Mobile Hermes");
         if (mMenuButton != null) mMenuButton.setOnClickListener(view -> { if (mDrawer != null) mDrawer.openDrawer(findViewById(R.id.ai_drawer_panel)); });
-        if (mSettingsButton != null) mSettingsButton.setOnClickListener(view -> startNewSession());
+        if (mSettingsButton != null) mSettingsButton.setOnClickListener(view -> startActivity(new android.content.Intent(this, com.termux.app.activities.SettingsActivity.class)));
         if (mStopButton != null) mStopButton.setVisibility(View.GONE);
         if (mTerminalCard != null) mTerminalCard.setVisibility(View.GONE);
         View navHome = findViewById(R.id.nav_home);
@@ -340,12 +334,15 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         View navProviders = findViewById(R.id.nav_providers);
         View navSettings = findViewById(R.id.nav_settings);
         if (navHome != null) navHome.setOnClickListener(v -> showFeaturedProviders());
-        if (navSessions != null) navSessions.setOnClickListener(v -> { if (mDrawer != null) mDrawer.openDrawer(findViewById(R.id.ai_drawer_panel)); });
+        if (navSessions != null) navSessions.setOnClickListener(v -> {
+            mSessionsExpanded = true;
+            mProvidersExpanded = false;
+            applySectionState();
+            if (mDrawer != null) mDrawer.openDrawer(findViewById(R.id.ai_drawer_panel));
+        });
         if (navShell != null) navShell.setOnClickListener(v -> openShell());
         if (navProviders != null) navProviders.setOnClickListener(v -> showProviderDirectory());
         if (navSettings != null) navSettings.setOnClickListener(v -> startActivity(new android.content.Intent(this, com.termux.app.activities.SettingsActivity.class)));
-        View back = findViewById(R.id.ai_chat_back);
-        if (back != null) back.setOnClickListener(v -> onBackPressed());
         View setupBack = findViewById(R.id.ai_setup_back);
         if (setupBack != null) setupBack.setOnClickListener(v -> { showFeaturedProviders(); });
         setupDrawerSections();
@@ -953,9 +950,6 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         String model = TextUtils.isEmpty(mSelectedModel) ? mSelectedProfile.defaultModel : mSelectedModel;
         if (mModelButton != null) mModelButton.setText(model);
         if (mSetupModelDisplay != null) mSetupModelDisplay.setText(model);
-        if (mChatProviderModel != null) mChatProviderModel.setText(model);
-        if (mChatProviderName != null) mChatProviderName.setText(mSelectedProfile.name);
-        if (mChatProviderIcon != null) mChatProviderIcon.setImageResource(iconForProvider(mSelectedProfile.id));
         if (mSetupTitle != null) mSetupTitle.setText("Setup " + mSelectedProfile.name);
         if (mReasoningButton != null) mReasoningButton.setText(TextUtils.isEmpty(mSelectedEffort) ? "Reasoning auto" : "Reasoning " + mSelectedEffort);
         if (mApprovalButton != null) mApprovalButton.setText(APPROVAL_NEVER.equals(mSelectedApproval) ? "No approvals" : "Ask approvals");
