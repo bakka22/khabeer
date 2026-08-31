@@ -224,16 +224,18 @@ private void restoreLatestActiveRun() {
                 if (!isFailed) {
                     RunContext ctx = adoptRun(r);
                     mViewed = ctx;
-                    boolean fresh = System.currentTimeMillis() - r.updatedAt < AUTO_CONTINUE_FRESHNESS_MS;
-                    if (r.state == AiRunStateMachine.State.CANCELED || r.state == AiRunStateMachine.State.COMPLETED) {
-                        try {
-                            ctx.stateMachine.transition(AiRunStateMachine.State.STARTING);
-                            ctx.stateMachine.transition(AiRunStateMachine.State.CONNECTING);
-                            ctx.stateMachine.transition(AiRunStateMachine.State.RUNNING);
-                            r.state = AiRunStateMachine.State.RUNNING;
-                        } catch (Exception ignored) {}
+                    // A run persisted as RUNNING/WAITING_APPROVAL has no live
+                    // worker in this process — it died with the old process.
+                    // Show it honestly as interrupted; sendPrompt still
+                    // continues it with full context.
+                    if (!isTerminal(ctx)) {
+                        r.state = AiRunStateMachine.State.CANCELED;
+                        ctx.record.state = AiRunStateMachine.State.CANCELED;
+                        persistRun(ctx);
                     }
-                    if (fresh && r.activeTurnToken != null) mDatabase.setResumePending(r.id, true);
+                    if (r.activeTurnToken != null
+                        && System.currentTimeMillis() - r.updatedAt < AUTO_CONTINUE_FRESHNESS_MS)
+                        mDatabase.setResumePending(r.id, true);
                 }
             }
         } catch (Exception ignored) {}
@@ -314,18 +316,14 @@ public void resumeRun(String runId) {
         boolean fresh = mRuns.get(runId) == null;
         if (r.archived) mDatabase.setRunArchived(runId, false);
         RunContext ctx = adoptRun(r);
-        if (fresh) {
-            // Not live in this process: rebuild the session context so the
-            // transcript and route come back exactly as persisted.
-            try {
-                ctx.stateMachine.transition(AiRunStateMachine.State.STARTING);
-                ctx.stateMachine.transition(AiRunStateMachine.State.CONNECTING);
-                ctx.stateMachine.transition(AiRunStateMachine.State.RUNNING);
-            } catch (Exception ignored) {}
+        if (fresh && !isTerminal(ctx)) {
+            // The persisted run has no live worker here — previous process
+            // died mid-turn. Show interrupted; the next prompt continues it.
+            r.state = AiRunStateMachine.State.CANCELED;
+            ctx.record.state = AiRunStateMachine.State.CANCELED;
         }
         mViewed = ctx;
         mDatabase.setResumePending(runId, false);
-        r.state = AiRunStateMachine.State.RUNNING;
         persistRun(ctx);
         emit("session/resumed", json("sessionId", runId));
         for (Listener listener : new ArrayList<>(mListeners)) listener.onRunChanged(copyRun(r));
@@ -637,7 +635,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         ctx().steerText = null;
         emit("turn/started", new JSONObject());
         transition(AiRunStateMachine.State.RUNNING);
-        emit("item/agentMessage/delta", json("text", "Thinking…"));
+
         if (ctx() != null) mDatabase.appendMessage(ctx().record.id, "user", prompt);
 
         JSONArray input;

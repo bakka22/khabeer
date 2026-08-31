@@ -1788,6 +1788,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             String role = row.optString("role");
             String content = row.optString("content");
             if (TextUtils.isEmpty(content) || content.trim().isEmpty()) continue;
+            if ("Thinking…".equals(content.trim()) || "Thinking...".equals(content.trim())) continue; // legacy placeholder rows
             if ("user".equals(role)) {
                 addUserMessage(content);
                 rendered++;
