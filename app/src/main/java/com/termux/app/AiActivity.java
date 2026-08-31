@@ -544,8 +544,6 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     private void pickSessionProvider() {
         mPickingSessionProvider = true;
         showProviderDirectory();
-        mHomeTitle.setText("Choose a provider for this session");
-        mHomeBody.setText("Pick a provider, configure it if needed, then Continue to bind it to this session only.");
     }
 
     /** Setup page in session-picking mode: UI-level selection only — nothing
@@ -603,11 +601,13 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     private void showProviderDirectory() {
         mShowingProviderDirectory = true;
         mProviderGrid.removeAllViews();
-        mHomeTitle.setText("More providers");
-        mHomeBody.setText("Hermes provider registry. Adapters marked “coming next” are listed honestly until their native request/auth flow is implemented.");
+        mHomeTitle.setText(mPickingSessionProvider ? "Choose a provider for this session" : "More providers");
+        mHomeBody.setText(mPickingSessionProvider
+            ? "Pick a provider, configure it if needed, then Continue to bind it to this session only."
+            : "Hermes provider registry. Adapters marked “coming next” are listed honestly until their native request/auth flow is implemented.");
         for (AiProviderProfile profile : AiProviderProfile.PROFILES) {
             boolean featured = "openai".equals(profile.id) || "anthropic".equals(profile.id) || "opencode".equals(profile.id);
-            if (!featured) mProviderGrid.addView(createProviderTile(profile));
+            if (!featured || mPickingSessionProvider) mProviderGrid.addView(createProviderTile(profile));
         }
         mHomePanel.setVisibility(View.VISIBLE);
         mSetupPanel.setVisibility(View.GONE);
