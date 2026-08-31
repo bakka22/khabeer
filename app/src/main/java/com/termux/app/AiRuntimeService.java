@@ -1519,34 +1519,51 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         AiProviderProfile profile = AiProviderProfile.find(record.harnessId);
         if (profile == null) return;
         if (!mTitleBusy.compareAndSet(false, true)) return;
+        android.util.Log.d("AiTitles", "generating for " + runId + " provider=" + profile.id);
         Thread t = new Thread(() -> {
             try {
                 JSONArray history = mDatabase.getTranscript(runId, 4);
                 String firstUser = null;
-                String firstAssistant = null;
                 for (int i = 0; i < history.length(); i++) {
                     JSONObject row = history.optJSONObject(i);
-                    if (row == null) continue;
-                    if (firstUser == null && "user".equals(row.optString("role"))) firstUser = row.optString("content");
-                    if (firstAssistant == null && "assistant".equals(row.optString("role"))) firstAssistant = row.optString("content");
+                    if (row != null && "user".equals(row.optString("role"))) { firstUser = row.optString("content"); break; }
                 }
                 if (TextUtils.isEmpty(firstUser)) return;
+
+                // Short opening message: it IS the title, no model call.
+                if (firstUser.length() <= 50) {
+                    String direct = bound(firstUser);
+                    if (TextUtils.isEmpty(direct)) return;
+                    AiDatabase.RunRecord fresh = mDatabase.getRun(runId);
+                    if (fresh == null || "ai".equals(fresh.titleSource)) return;
+                    fresh.title = direct;
+                    fresh.titleSource = "message";
+                    mDatabase.saveRun(fresh);
+                    AiDatabase.RunRecord copy = copyRun(fresh);
+                    mHandler.post(() -> {
+                        for (Listener listener : new ArrayList<>(mListeners)) listener.onRunChanged(copy);
+                    });
+                    return;
+                }
+
+                // Longer openings get summarized. Route to the free keyless
+                // model first; fall back to the session's configured model.
                 String baseUrl = mProviderConfig.getBaseUrl(profile);
                 String apiKey = mProviderConfig.getApiKey(profile);
-                String model = TextUtils.isEmpty(record.lastResolvedModel)
-                    ? mProviderConfig.getModel(profile) : record.lastResolvedModel;
+                String model = "big-pickle";
+                if (TextUtils.isEmpty(model)) model = mProviderConfig.getModel(profile);
+                if (TextUtils.isEmpty(model)) model = record.lastResolvedModel;
+                if (TextUtils.isEmpty(model)) model = profile.defaultModel;
 
                 JSONArray messages = new JSONArray()
                     .put(json("role", "system", "content",
-                        "You name chat sessions. Reply with a 3-6 word title that captures the task. No quotes, no punctuation at the end."))
-                    .put(json("role", "user", "content",
-                        "User: " + bound(firstUser) + "\nAssistant: " + bound(firstAssistant == null ? "(no reply yet)" : firstAssistant)
-                            + "\n\nTitle:"));
+                        "You name chat sessions. Summarize the user's opening message as a title of 50 characters or less. Reply with the title only."))
+                    .put(json("role", "user", "content", bound(firstUser) + "\n\nTitle:"));
 
                 JSONObject body = new JSONObject()
                     .put("model", model)
                     .put("messages", messages)
-                    .put("max_tokens", 24)
+                    .put("max_tokens", 200)
                     .put("temperature", 0.3);
                 HttpURLConnection connection = (HttpURLConnection) new URL(chatCompletionsUrl(baseUrl)).openConnection();
                 connection.setRequestMethod("POST");
@@ -1559,14 +1576,29 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
                     output.write(body.toString().getBytes(StandardCharsets.UTF_8));
                 }
                 int code = connection.getResponseCode();
+                android.util.Log.d("AiTitles", "http " + code + " model=" + model);
                 if (code < 200 || code >= 300) return;
                 JSONObject response = new JSONObject(readFully(connection.getInputStream()));
                 JSONArray choices = response.optJSONArray("choices");
                 JSONObject choice = choices == null ? null : choices.optJSONObject(0);
                 JSONObject message = choice == null ? null : choice.optJSONObject("message");
-                String title = message == null ? "" : message.optString("content", "").replace("\"", "").trim();
-                if (TextUtils.isEmpty(title) || title.length() > 80) return;
-                title = title.split("\n")[0].trim();
+                String title = message == null ? "" : message.optString("content", "");
+                if (TextUtils.isEmpty(title) || "null".equals(title))
+                    title = message.optString("reasoning_content", "");
+                title = title.replace("\"", "").trim();
+                android.util.Log.d("AiTitles", "raw title=[" + title + "]");
+                if (TextUtils.isEmpty(title)) return;
+                // Enforce the 50-character title budget.
+                if (title.length() > 50) {
+                    String[] words = title.split("\\s+");
+                    StringBuilder cut = new StringBuilder();
+                    for (String w : words) {
+                        if (cut.length() + w.length() + 1 > 47) break;
+                        if (cut.length() > 0) cut.append(' ');
+                        cut.append(w);
+                    }
+                    title = cut.length() > 0 ? cut.toString() : title.substring(0, 47);
+                }
                 if (TextUtils.isEmpty(title)) return;
 
                 AiDatabase.RunRecord fresh = mDatabase.getRun(runId);
@@ -1578,7 +1610,8 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
                 mHandler.post(() -> {
                     for (Listener listener : new ArrayList<>(mListeners)) listener.onRunChanged(copy);
                 });
-            } catch (Exception ignored) {
+            } catch (Exception e) {
+                android.util.Log.d("AiTitles", "titler failed", e);
             } finally {
                 mTitleBusy.set(false);
             }
@@ -1589,11 +1622,15 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
 
     /** Backfill: name older sessions that only carry a first-message title. */
     public void backfillSessionTitles() {
-        for (AiDatabase.RunRecord run : mDatabase.getSessions(10)) {
-            if (!"ai".equals(run.titleSource)) {
-                generateSessionTitleAsync(run.id);
-                return; // one at a time; the page refresh keeps pulling
-            }
+        // Heal the historical bug that stored the literal string "null" as an
+        // AI title: those rows become untitled again and get a real name.
+        try {
+            mDatabase.getWritableDatabase().execSQL(
+                "UPDATE runs SET title = NULL, title_source = NULL WHERE title_source = 'ai' AND (title = 'null' OR title IS NULL)");
+        } catch (Exception ignored) {}
+        for (AiDatabase.RunRecord run : mDatabase.getUntitledSessions(10)) {
+            generateSessionTitleAsync(run.id);
+            return; // one at a time; the page refresh keeps pulling
         }
     }
 
