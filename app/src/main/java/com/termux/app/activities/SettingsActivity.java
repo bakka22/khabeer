@@ -59,6 +59,15 @@ public class SettingsActivity extends AppCompatActivity {
 
             setPreferencesFromResource(R.xml.root_preferences, rootKey);
 
+            Preference appearance = findPreference("ai_theme_mode");
+            if (appearance != null) {
+                appearance.setOnPreferenceChangeListener((preference, newValue) -> {
+                    // Recreate all live activities so the mode flips instantly.
+                    com.termux.app.AiThemeMode.apply(requireContext());
+                    return true;
+                });
+            }
+
             new Thread() {
                 @Override
                 public void run() {

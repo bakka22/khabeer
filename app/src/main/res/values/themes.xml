@@ -68,6 +68,17 @@
         <item name="materialAlertDialogTheme">@style/AiMaterialAlertDialog</item>
         <item name="bottomSheetDialogTheme">@style/AiBottomSheetDialog</item>
         <item name="actionBarTheme">@style/AiActionBarTheme</item>
+        <item name="android:alertDialogTheme">@style/AiFrameworkAlertDialog</item>
+    </style>
+
+    <!-- Framework alert (preference ListPreference etc.) — the Material
+         dialog overlay does not reach these. -->
+    <style name="AiFrameworkAlertDialog" parent="ThemeOverlay.AppCompat.Dialog.Alert">
+        <item name="android:windowBackground">@drawable/bg_ai_composer</item>
+        <item name="android:textColorPrimary">@color/ai_text</item>
+        <item name="android:textColor">@color/ai_text</item>
+        <item name="colorAccent">@color/ai_accent</item>
+        <item name="android:colorAccent">@color/ai_accent</item>
     </style>
 
     <style name="AiActionBarTheme" parent="ThemeOverlay.MaterialComponents.Dark.ActionBar">
