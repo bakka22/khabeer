@@ -75,6 +75,7 @@ public final class AiRuntimeService extends Service {
 
     private AiDatabase mDatabase;
     private MobileHermesToolExecutor mToolExecutor;
+    private AiProviderConfig mProviderConfig;
     private AiDatabase.RunRecord mActiveRun;
     private AiRunStateMachine mStateMachine;
     private Thread mWorker;
@@ -97,6 +98,7 @@ public final class AiRuntimeService extends Service {
     public void onCreate() {
         super.onCreate();
         mDatabase = new AiDatabase(this);
+        mProviderConfig = new AiProviderConfig(this);
         mToolExecutor = new MobileHermesToolExecutor(this);
         createNotificationChannel();
         startForeground(NOTIFICATION_ID, buildNotification());
@@ -351,12 +353,28 @@ public final class AiRuntimeService extends Service {
         } catch (Exception ignored) {}
     }
 
-    public void sendPrompt(String prompt, String providerId, String baseUrl, String apiKey, String model,
-                           @Nullable String effort, @Nullable String approvalPolicy) {
+    public void sendPrompt(String prompt, @Nullable String effort, @Nullable String approvalPolicy) {
         if (mActiveRun == null) {
             notifyError(null, "No active native agent session.");
             return;
         }
+        // Session-authoritative resolution (Hermes _restore_session_model):
+        // provider, model and credentials come from the session row and the
+        // provider registry, never from ambient UI state — sessions carry
+        // their own provider identity.
+        AiProviderProfile profile = AiProviderProfile.find(mActiveRun.harnessId);
+        if (profile == null) {
+            notifyError(mActiveRun.id, "Session provider is not available.");
+            return;
+        }
+        String model = TextUtils.isEmpty(mActiveRun.modelOverride)
+            ? mProviderConfig.getModel(profile) : mActiveRun.modelOverride;
+        if (TextUtils.isEmpty(model)) model = profile.defaultModel;
+        mActiveRun.lastResolvedModel = model;
+        String baseUrl = mProviderConfig.getBaseUrl(profile);
+        String apiKey = mProviderConfig.getApiKey(profile);
+        String providerId = profile.id;
+
         if (!isTerminalState() && mWorker != null && mWorker.isAlive()) {
             if (handleBusyInput(prompt, providerId, baseUrl, apiKey, model, effort, approvalPolicy)) return;
             mStopRequested = true;
@@ -373,7 +391,33 @@ public final class AiRuntimeService extends Service {
         mStopRequested = false;
         mSteerText = null;
         prompt = applyInterruptScaffold(prompt);
+        persistRun();
         runTurn(providerId, baseUrl, apiKey, mActiveRun.workspace, prompt, model, effort, approvalPolicy);
+    }
+
+    /** Session-scoped /model switch (Hermes _persist_model_switch_to_session):
+     * the model lives on the session row so resume restores it. */
+    public void setSessionModel(String model) {
+        if (mActiveRun == null || TextUtils.isEmpty(model)) return;
+        mActiveRun.modelOverride = model;
+        mActiveRun.lastResolvedModel = model;
+        persistRun();
+        emit("session/model", json("sessionId", mActiveRun.id, "model", model));
+    }
+
+    /** Session-scoped provider switch (Hermes model_config.gateway_runtime):
+     * the session keeps its transcript but subsequent turns run on the new
+     * provider; the model resets to that provider's default. */
+    public void setSessionProvider(String providerId) {
+        if (mActiveRun == null || TextUtils.isEmpty(providerId)) return;
+        AiProviderProfile profile = AiProviderProfile.find(providerId);
+        if (profile == null || profile.terminalOnly || !profile.implemented) return;
+        mActiveRun.harnessId = profile.id;
+        mActiveRun.modelOverride = mProviderConfig.getModel(profile);
+        if (TextUtils.isEmpty(mActiveRun.modelOverride)) mActiveRun.modelOverride = profile.defaultModel;
+        mActiveRun.lastResolvedModel = mActiveRun.modelOverride;
+        persistRun();
+        emit("session/provider", json("sessionId", mActiveRun.id, "provider", profile.id));
     }
 
     /**

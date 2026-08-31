@@ -715,12 +715,14 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mSuggestionStrip.setVisibility(View.GONE);
         mStreamingAgentBubble = null;
         mStopButton.setVisibility(View.VISIBLE);
-        String apiKey = mProviderConfig.getApiKey(profile);
-        String baseUrl = mProviderConfig.getBaseUrl(profile);
-        String model = TextUtils.isEmpty(mSelectedModel) ? profile.defaultModel : mSelectedModel;
         if (mHasNativeSession) {
-            mRuntimeService.sendPrompt(prompt, profile.id, baseUrl, apiKey, model, clean(mSelectedEffort), mSelectedApproval);
+            // Session-authoritative: provider/model/credentials resolve from
+            // the session row inside the service (Hermes session model).
+            mRuntimeService.sendPrompt(prompt, clean(mSelectedEffort), mSelectedApproval);
         } else {
+            String apiKey = mProviderConfig.getApiKey(profile);
+            String baseUrl = mProviderConfig.getBaseUrl(profile);
+            String model = TextUtils.isEmpty(mSelectedModel) ? profile.defaultModel : mSelectedModel;
             mRuntimeService.startAgent(profile.id, baseUrl, apiKey, workspace, prompt, model, clean(mSelectedEffort), mSelectedApproval);
         }
     }
@@ -899,6 +901,9 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         if (cleanModel.isEmpty()) cleanModel = profile.defaultModel;
         mSelectedModel = cleanModel;
         mProviderConfig.setModel(profile, cleanModel);
+        // Session-scoped /model switch (Hermes _persist_model_switch_to_session):
+        // the model lives on the session row so resume restores this choice.
+        if (mRuntimeService != null && mHasNativeSession) mRuntimeService.setSessionModel(cleanModel);
         syncControlLabels();
         setStatus("Model selected: " + cleanModel, false);
     }
