@@ -62,8 +62,13 @@ public class SettingsActivity extends AppCompatActivity {
             Preference appearance = findPreference("ai_theme_mode");
             if (appearance != null) {
                 appearance.setOnPreferenceChangeListener((preference, newValue) -> {
-                    // Recreate all live activities so the mode flips instantly.
-                    com.termux.app.AiThemeMode.apply(requireContext());
+                    // Apply from the NEW value directly: the listener fires
+                    // before the preference is persisted, and setDefaultNightMode
+                    // recreates all live activities instantly.
+                    boolean light = "light".equals(newValue);
+                    androidx.appcompat.app.AppCompatDelegate.setDefaultNightMode(light
+                        ? androidx.appcompat.app.AppCompatDelegate.MODE_NIGHT_NO
+                        : androidx.appcompat.app.AppCompatDelegate.MODE_NIGHT_YES);
                     return true;
                 });
             }
