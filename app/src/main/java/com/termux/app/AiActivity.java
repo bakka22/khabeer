@@ -1198,9 +1198,20 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
 
     private void showModelDialog() {
         if (mSelectedProfile == null) return;
-        AiProviderProfile profile = mSelectedProfile;
-        String baseUrl = mProviderConfig.getBaseUrl(profile);
-        String apiKey = mProviderConfig.getApiKey(profile);
+        final AiProviderProfile profile = mSelectedProfile;
+        String resolvedBaseUrl = mProviderConfig.getBaseUrl(profile);
+        String resolvedApiKey = mProviderConfig.getApiKey(profile);
+        // Session-scoped: a session bound to an OpenCode route lists THAT
+        // route's models, not the globally selected route's.
+        if (mHasNativeSession && mRuntimeService != null && "opencode".equals(profile.id)) {
+            AiDatabase.RunRecord viewed = mRuntimeService.getActiveRun();
+            if (viewed != null && !TextUtils.isEmpty(viewed.route)) {
+                resolvedBaseUrl = AiProviderConfig.ocRouteUrl(viewed.route);
+                resolvedApiKey = mProviderConfig.getOpenCodeRouteKey(viewed.route);
+            }
+        }
+        final String baseUrl = resolvedBaseUrl;
+        final String apiKey = resolvedApiKey;
         MaterialAlertDialogBuilder loadingBuilder = new MaterialAlertDialogBuilder(this)
             .setTitle("Loading models")
             .setMessage("Fetching " + profile.name + " models from " + AiModelCatalog.modelsUrl(baseUrl) + "…")
@@ -1226,13 +1237,14 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
 
     private void showModelListDialog(AiProviderProfile profile, List<String> models) {
         ArrayList<String> items = new ArrayList<>();
-        items.add("Default (" + profile.defaultModel + ")");
+        String defaultModel = sessionDefaultModel(profile);
+        items.add("Default (" + defaultModel + ")");
         items.add("Enter model ID manually…");
         items.addAll(models);
         new MaterialAlertDialogBuilder(this)
             .setTitle(profile.name + " models")
             .setItems(items.toArray(new String[0]), (dialog, which) -> {
-                if (which == 0) setSelectedModel(profile, profile.defaultModel);
+                if (which == 0) setSelectedModel(profile, defaultModel);
                 else if (which == 1) showManualModelDialog(profile);
                 else setSelectedModel(profile, items.get(which));
             })
@@ -1260,6 +1272,15 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             .setPositiveButton(R.string.ai_continue, (dialog, which) ->
                 setSelectedModel(profile, model.getText().toString()))
             .show();
+    }
+
+    private String sessionDefaultModel(AiProviderProfile profile) {
+        if (mHasNativeSession && mRuntimeService != null && "opencode".equals(profile.id)) {
+            AiDatabase.RunRecord viewed = mRuntimeService.getActiveRun();
+            if (viewed != null && !TextUtils.isEmpty(viewed.route))
+                return AiProviderConfig.ocRouteDefaultModel(viewed.route);
+        }
+        return profile.defaultModel;
     }
 
     private void setSelectedModel(AiProviderProfile profile, String model) {
