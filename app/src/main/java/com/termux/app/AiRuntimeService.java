@@ -649,7 +649,8 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         HermesInterruptManager.clearCurrentThread();
         HermesInterruptManager.setInterrupt(false, Thread.currentThread().getId(), null);
         // A continuation after CANCELED needs a fresh machine (FSM has no CANCELED->RUNNING).
-        if (ctx() == null || ctx().stateMachine.getState() == AiRunStateMachine.State.CANCELED) {
+        if (ctx() == null || ctx().stateMachine.getState() == AiRunStateMachine.State.CANCELED
+            || ctx().stateMachine.getState() == AiRunStateMachine.State.CREATED) {
             ctx().stateMachine = new AiRunStateMachine();
             try { ctx().stateMachine.transition(AiRunStateMachine.State.STARTING); ctx().stateMachine.transition(AiRunStateMachine.State.CONNECTING); } catch (Exception ignored) {}
             ctx().record.state = AiRunStateMachine.State.STARTING;
