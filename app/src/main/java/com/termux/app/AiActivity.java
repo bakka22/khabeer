@@ -113,6 +113,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     private LinearLayout mSessionsList;
     private MaterialButton mProviderButton;
     private boolean mPickingSessionProvider;
+    private com.google.android.material.button.MaterialButton mUseSavedConfigButton;
     private LinearLayout mArchivedRuns;
     private View mProvidersHeader;
     private View mSessionsHeader;
@@ -563,6 +564,33 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             ? "Provider configured. Continue binds it to this session."
             : "Configuration needed: add an API key for this provider.");
         mProviderStatus.setTextColor(color(ready ? R.color.ai_success : R.color.ai_warning));
+
+        // Saved credentials? Offer a one-tap bind without re-entering config.
+        if (ready) {
+            if (mUseSavedConfigButton == null) {
+                mUseSavedConfigButton = new com.google.android.material.button.MaterialButton(this);
+                mUseSavedConfigButton.setText("Use saved configuration");
+                mUseSavedConfigButton.setIconResource(R.drawable.ic_ai_check);
+                mUseSavedConfigButton.setIconTint(android.content.res.ColorStateList.valueOf(0xFFFFFFFF));
+                mUseSavedConfigButton.setTextColor(0xFFFFFFFF);
+                mUseSavedConfigButton.setAllCaps(false);
+                mUseSavedConfigButton.setBackgroundTintList(android.content.res.ColorStateList.valueOf(color(R.color.ai_accent)));
+                mUseSavedConfigButton.setCornerRadius(dp(14));
+                mUseSavedConfigButton.setOnClickListener(view -> applySessionProviderChoice());
+            }
+            ViewGroup summaryCard = (ViewGroup) mSelectedProviderIcon.getParent();
+            ViewGroup parent = summaryCard == null ? null : (ViewGroup) summaryCard.getParent();
+            if (parent != null && mUseSavedConfigButton.getParent() == null) {
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                lp.setMargins(0, dp(10), 0, 0);
+                mUseSavedConfigButton.setLayoutParams(lp);
+                parent.addView(mUseSavedConfigButton, parent.indexOfChild(summaryCard) + 1);
+            }
+            if (mUseSavedConfigButton.getParent() != null) mUseSavedConfigButton.setVisibility(View.VISIBLE);
+        } else if (mUseSavedConfigButton != null) {
+            mUseSavedConfigButton.setVisibility(View.GONE);
+        }
         showSetupPage();
     }
 
