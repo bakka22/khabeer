@@ -23,19 +23,15 @@ import com.termux.shared.termux.settings.preferences.TermuxWidgetAppSharedPrefer
 import com.termux.shared.android.AndroidUtils;
 import com.termux.shared.termux.TermuxConstants;
 import com.termux.shared.termux.TermuxUtils;
-import com.termux.shared.activity.media.AppCompatActivityUtils;
-import com.termux.shared.theme.NightMode;
 
 public class SettingsActivity extends AppCompatActivity {
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        // The AI Appearance switch (Dark/Light) drives these screens; the
+        // termux night-mode preference governs the terminal experience only.
         com.termux.app.AiThemeMode.apply(this);
         super.onCreate(savedInstanceState);
-
-        AppCompatActivityUtils.setNightMode(this, NightMode.getAppNightMode().getName(), true);
-        // The AI appearance switch wins over the termux night-mode preference.
-        com.termux.app.AiThemeMode.apply(this);
 
         setContentView(R.layout.activity_settings);
         if (savedInstanceState == null) {
@@ -45,8 +41,8 @@ public class SettingsActivity extends AppCompatActivity {
                 .commit();
         }
 
-        AppCompatActivityUtils.setToolbar(this, com.termux.shared.R.id.toolbar);
-        AppCompatActivityUtils.setShowBackButtonInActionBar(this, true);
+        com.termux.shared.activity.media.AppCompatActivityUtils.setToolbar(this, com.termux.shared.R.id.toolbar);
+        com.termux.shared.activity.media.AppCompatActivityUtils.setShowBackButtonInActionBar(this, true);
     }
 
     @Override
