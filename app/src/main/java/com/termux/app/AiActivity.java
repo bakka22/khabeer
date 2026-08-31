@@ -1270,6 +1270,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             rebuildTranscript(run.id);
         }
         refreshRecentRuns();
+        if (mSessionsPage != null && mSessionsPage.getVisibility() == View.VISIBLE) refreshSessionsPage();
     }
 
     @Override

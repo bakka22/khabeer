@@ -107,15 +107,17 @@ public final class AiDatabase extends SQLiteOpenHelper {
 
     @Override
     public void onConfigure(SQLiteDatabase db) {
-        db.enableWriteAheadLogging();
+        // Rollback journal instead of WAL: the runtime is SIGKILLed often
+        // (force-stops, MIUI), and stale WAL sidecars kept reverting reads
+        // to pre-title pages. A single-file journal cannot disagree with
+        // itself; write volume here is tiny.
+        try { db.execSQL("PRAGMA journal_mode=TRUNCATE"); } catch (Exception ignored) {}
         db.setForeignKeyConstraintsEnabled(true);
     }
 
     @Override
     public void onOpen(SQLiteDatabase db) {
-        try { db.execSQL("PRAGMA journal_mode=WAL"); } catch (Exception ignored) {}
         try { db.execSQL("PRAGMA synchronous=NORMAL"); } catch (Exception ignored) {}
-        try { db.execSQL("PRAGMA journal_size_limit=67108864"); } catch (Exception ignored) {}
     }
 
     @Override
@@ -158,7 +160,6 @@ public final class AiDatabase extends SQLiteOpenHelper {
         }
         if (oldVersion < 4) {
             db.execSQL("CREATE INDEX IF NOT EXISTS runs_resume_pending ON runs(resume_pending)");
-            try { db.execSQL("PRAGMA journal_mode=WAL"); } catch (Exception ignored) {}
         }
         if (oldVersion < 5) {
             try { db.execSQL("ALTER TABLE runs ADD COLUMN archived INTEGER DEFAULT 0"); } catch (Exception ignored) {}
