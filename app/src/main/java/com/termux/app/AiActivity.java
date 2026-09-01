@@ -609,6 +609,11 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             showOpenCodeSetupPage(true);
             return;
         }
+        if ("openai-codex".equals(profile.id)) {
+            mSelectedProfile = profile;
+            showCodexLoginDialog(true);
+            return;
+        }
         mSelectedProfile = profile;
         mSelectedModel = mProviderConfig.getModel(profile);
         if ("opencode".equals(profile.id) && (TextUtils.isEmpty(mSelectedModel) || "gpt-4o".equals(mSelectedModel))) mSelectedModel = "big-pickle";
@@ -2129,6 +2134,10 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             if (userInitiated) showOpenCodeSetupPage(false);
             return;
         }
+        if ("openai-codex".equals(mSelectedProfile.id)) {
+            if (userInitiated) showCodexLoginDialog(false);
+            return;
+        }
         if (userInitiated || mSetupPanel.getVisibility() == View.VISIBLE) showSetupPage();
     }
 
@@ -2336,6 +2345,11 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     private void showModelDialog() {
         if (mSelectedProfile == null) return;
         final AiProviderProfile profile = mSelectedProfile;
+        // Codex model listing needs the account header — dedicated fetcher.
+        if ("openai-codex".equals(profile.id)) {
+            fetchCodexModelsAndPick(profile, false);
+            return;
+        }
         String resolvedBaseUrl = mProviderConfig.getBaseUrl(profile);
         String resolvedApiKey = mProviderConfig.getApiKey(profile);
         // Session-scoped: a session bound to an OpenCode route lists THAT
@@ -2372,8 +2386,198 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         }, "katheer-model-catalog").start();
     }
 
-    private void showModelListDialog(AiProviderProfile profile, List<String> models) {
-        ArrayList<String> items = new ArrayList<>();
+    // ------------------------------------------------------------------
+    // ChatGPT / Codex subscription sign-in (device code — katheer port of
+    // the reference codex login: request user code, user types it at
+    // auth.openai.com/codex/device, poll, exchange, store Keystore secrets)
+    // ------------------------------------------------------------------
+
+    private volatile boolean mCodexLoginCancelled;
+
+    private void showCodexLoginDialog(boolean sessionMode) {
+        AiProviderProfile profile = AiProviderProfile.find("openai-codex");
+        if (profile == null) return;
+        mCodexLoginCancelled = false;
+        boolean signedIn = mProviderConfig.hasProviderLogin("openai-codex");
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(22), dp(10), dp(22), 0);
+
+        TextView status = new TextView(this);
+        status.setText(signedIn
+            ? "Signed in to ChatGPT. You can re-authenticate or pick a Codex model."
+            : "Sign in with your ChatGPT Plus/Pro account to use Codex models. A browser window opens; you type a short code.");
+        status.setTextColor(color(R.color.ai_text));
+        status.setTextSize(13);
+        box.addView(status);
+
+        TextView codeView = new TextView(this);
+        codeView.setTypeface(Typeface.MONOSPACE);
+        codeView.setTextSize(26);
+        codeView.setLetterSpacing(0.2f);
+        codeView.setTextColor(color(R.color.ai_accent));
+        codeView.setPadding(0, dp(16), 0, dp(4));
+        codeView.setVisibility(View.GONE);
+        box.addView(codeView);
+
+        TextView hint = new TextView(this);
+        hint.setText("Open  " + ProviderLogin.CODEX_DEVICE_URL + "  and enter the code above.");
+        hint.setTextColor(color(R.color.ai_text_muted));
+        hint.setTextSize(11);
+        hint.setVisibility(View.GONE);
+        box.addView(hint);
+
+        MaterialButton openBrowser = new MaterialButton(this);
+        openBrowser.setText("Open " + ProviderLogin.CODEX_DEVICE_URL.replaceAll("https://", ""));
+        openBrowser.setAllCaps(false);
+        openBrowser.setTextColor(0xFFFFFFFF);
+        openBrowser.setBackgroundTintList(android.content.res.ColorStateList.valueOf(color(R.color.ai_accent)));
+        openBrowser.setCornerRadius(dp(10));
+        openBrowser.setEnabled(false);
+        openBrowser.setAlpha(0.5f);
+        LinearLayout.LayoutParams browserLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        browserLp.topMargin = dp(12);
+        openBrowser.setLayoutParams(browserLp);
+        openBrowser.setOnClickListener(v -> {
+            try {
+                startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(ProviderLogin.CODEX_DEVICE_URL))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            } catch (Exception e) {
+                showError("No browser available.");
+            }
+        });
+        box.addView(openBrowser);
+
+        MaterialButton chooseModel = new MaterialButton(this);
+        chooseModel.setText("Choose Codex model");
+        chooseModel.setAllCaps(false);
+        chooseModel.setTextColor(color(R.color.ai_text));
+        chooseModel.setStrokeColor(android.content.res.ColorStateList.valueOf(color(R.color.ai_border)));
+        chooseModel.setBackgroundTintList(android.content.res.ColorStateList.valueOf(color(R.color.ai_surface)));
+        chooseModel.setCornerRadius(dp(10));
+        LinearLayout.LayoutParams modelLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        modelLp.topMargin = dp(8);
+        chooseModel.setLayoutParams(modelLp);
+        chooseModel.setVisibility(signedIn ? View.VISIBLE : View.GONE);
+        chooseModel.setOnClickListener(v -> fetchCodexModelsAndPick(profile, sessionMode));
+        box.addView(chooseModel);
+
+        MaterialButton signIn = new MaterialButton(this);
+        signIn.setText(signedIn ? "Re-authenticate" : "Sign in with ChatGPT");
+        signIn.setAllCaps(false);
+        signIn.setTextColor(color(R.color.ai_text));
+        signIn.setStrokeColor(android.content.res.ColorStateList.valueOf(color(R.color.ai_border)));
+        signIn.setBackgroundTintList(android.content.res.ColorStateList.valueOf(color(R.color.ai_surface)));
+        signIn.setCornerRadius(dp(10));
+        LinearLayout.LayoutParams signInLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        signInLp.topMargin = dp(8);
+        signIn.setLayoutParams(signInLp);
+        box.addView(signIn);
+
+        final androidx.appcompat.app.AlertDialog[] dialogHolder = new androidx.appcompat.app.AlertDialog[1];
+        signIn.setOnClickListener(v -> {
+            if (mCodexLoginCancelled) mCodexLoginCancelled = false;
+            signIn.setEnabled(false);
+            signIn.setText("Waiting for authorization…");
+            status.setText("Requesting a device code…");
+            status.setTextColor(color(R.color.ai_text_muted));
+            new Thread(() -> {
+                try {
+                    JSONObject code = ProviderLogin.codexRequestDeviceCode();
+                    String userCode = code.optString("user_code", "");
+                    String deviceAuthId = code.optString("device_auth_id", "");
+                    int interval = Math.max(3, code.optInt("interval", 5));
+                    runOnUiThread(() -> {
+                        codeView.setText(userCode);
+                        codeView.setVisibility(View.VISIBLE);
+                        hint.setVisibility(View.VISIBLE);
+                        openBrowser.setEnabled(true);
+                        openBrowser.setAlpha(1f);
+                        status.setText("Type this code in the browser to authorize katheer.");
+                    });
+                    long deadline = System.currentTimeMillis() + 15 * 60_000L;
+                    while (System.currentTimeMillis() < deadline && !mCodexLoginCancelled) {
+                        try { Thread.sleep(interval * 1000L); } catch (InterruptedException ie) { return; }
+                        if (mCodexLoginCancelled) return;
+                        JSONObject poll = ProviderLogin.codexPollDeviceCode(deviceAuthId, userCode);
+                        if (!poll.optBoolean("authorized")) continue;
+                        JSONObject tokens = ProviderLogin.codexExchange(
+                            poll.optString("authorization_code"), poll.optString("code_verifier"));
+                        String access = tokens.optString("access_token", "");
+                        String refresh = tokens.optString("refresh_token", "");
+                        if (TextUtils.isEmpty(access)) throw new Exception("Sign-in returned no access token.");
+                        mProviderConfig.setProviderToken("openai-codex", access);
+                        if (!TextUtils.isEmpty(refresh)) mProviderConfig.setProviderRefresh("openai-codex", refresh);
+                        JSONObject state = new JSONObject();
+                        String accountId = ProviderLogin.codexAccountId(access);
+                        if (!TextUtils.isEmpty(accountId)) state.put("account_id", accountId);
+                        state.put("obtained_at", System.currentTimeMillis());
+                        mProviderConfig.setProviderState("openai-codex", state.toString());
+                        if (mCodexLoginCancelled) return;
+                        runOnUiThread(() -> {
+                            status.setText("Signed in to ChatGPT ✓");
+                            if (dialogHolder[0] != null && dialogHolder[0].isShowing()) dialogHolder[0].dismiss();
+                            if (sessionMode) {
+                                mRuntimeService.setSessionProvider(profile.id);
+                                showChatPage();
+                            } else {
+                                showChatPage();
+                            }
+                            fetchCodexModelsAndPick(profile, sessionMode);
+                            setStatus("Signed in to ChatGPT.", false);
+                        });
+                        return;
+                    }
+                    if (!mCodexLoginCancelled)
+                        runOnUiThread(() -> {
+                            status.setText("Timed out waiting for authorization — try again.");
+                            status.setTextColor(color(R.color.ai_warning));
+                            signIn.setEnabled(true);
+                            signIn.setText("Sign in with ChatGPT");
+                        });
+                } catch (Exception e) {
+                    final String message = e.getMessage() == null ? e.toString() : e.getMessage();
+                    if (mCodexLoginCancelled) return;
+                    runOnUiThread(() -> {
+                        status.setText("Sign-in failed: " + message);
+                        status.setTextColor(color(R.color.ai_warning));
+                        signIn.setEnabled(true);
+                        signIn.setText("Sign in with ChatGPT");
+                    });
+                }
+            }, "codex-login").start();
+        });
+
+        dialogHolder[0] = new MaterialAlertDialogBuilder(this)
+            .setTitle("ChatGPT (Codex) sign-in")
+            .setView(box)
+            .setNegativeButton(android.R.string.cancel, (dialog, which) -> mCodexLoginCancelled = true)
+            .show();
+    }
+
+    private void fetchCodexModelsAndPick(AiProviderProfile profile, boolean sessionMode) {
+        setStatus("Loading Codex models…", false);
+        new Thread(() -> {
+            try {
+                String token = mProviderConfig.getProviderToken("openai-codex");
+                List<String> models = AiModelCatalog.fetch(profile, ProviderLogin.CODEX_BASE_URL, token,
+                    ProviderLogin.codexAccountId(token));
+                runOnUiThread(() -> showModelListDialog(profile, models));
+            } catch (Exception e) {
+                final String message = e.getMessage() == null ? e.toString() : e.getMessage();
+                runOnUiThread(() -> {
+                    setStatus("Codex model list failed: " + message, true);
+                    showManualModelDialog(profile);
+                });
+            }
+        }, "codex-models").start();
+    }
+
+    private void showModelListDialog(AiProviderProfile profile, List<String> models) {        ArrayList<String> items = new ArrayList<>();
         String defaultModel = sessionDefaultModel(profile);
         items.add("Default (" + defaultModel + ")");
         items.add("Enter model ID manually…");

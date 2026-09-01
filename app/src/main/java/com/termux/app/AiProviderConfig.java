@@ -207,6 +207,43 @@ public final class AiProviderConfig {
         setSecret("mcp_refresh_" + (serverName == null ? "" : serverName), token);
     }
 
+    // ---- Provider login tokens (device-code / OAuth providers), Keystore-encrypted ----
+
+    public String getProviderToken(String providerId) {
+        return getSecret("ptoken_" + (providerId == null ? "" : providerId));
+    }
+
+    public void setProviderToken(String providerId, String token) {
+        setSecret("ptoken_" + (providerId == null ? "" : providerId), token);
+    }
+
+    public String getProviderRefresh(String providerId) {
+        return getSecret("prefresh_" + (providerId == null ? "" : providerId));
+    }
+
+    public void setProviderRefresh(String providerId, String token) {
+        setSecret("prefresh_" + (providerId == null ? "" : providerId), token);
+    }
+
+    /** Free-form login state JSON (account id, region, endpoints, expiry...). */
+    public String getProviderState(String providerId) {
+        return getSecret("pstate_" + (providerId == null ? "" : providerId));
+    }
+
+    public void setProviderState(String providerId, String json) {
+        setSecret("pstate_" + (providerId == null ? "" : providerId), json);
+    }
+
+    public boolean hasProviderLogin(String providerId) {
+        return !TextUtils.isEmpty(getProviderToken(providerId));
+    }
+
+    public void clearProviderLogin(String providerId) {
+        setProviderToken(providerId, null);
+        setProviderRefresh(providerId, null);
+        setProviderState(providerId, null);
+    }
+
     private String getSecret(String storageKey) {
         String encoded = mPrefs.getString(storageKey, "");
         if (TextUtils.isEmpty(encoded)) return null;

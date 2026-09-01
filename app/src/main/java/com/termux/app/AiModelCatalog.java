@@ -2,6 +2,8 @@ package com.termux.app;
 
 import android.text.TextUtils;
 
+import androidx.annotation.Nullable;
+
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -22,6 +24,17 @@ public final class AiModelCatalog {
     }
 
     public static List<String> fetch(AiProviderProfile profile, String baseUrl, String apiKey) throws Exception {
+        return fetch(profile, baseUrl, apiKey, null);
+    }
+
+    /** Codex model catalogs need the ChatGPT account header or the backend
+     *  answers HTTP 200 with an empty model list. */
+    public static List<String> fetch(AiProviderProfile profile, String baseUrl, String apiKey,
+                                     @Nullable String codexAccountId) throws Exception {
+        if (profile != null && "openai-codex".equals(profile.id)) {
+            JSONObject catalog = ProviderLogin.fetchCodexModels(apiKey, codexAccountId);
+            return parseCodexModels(catalog);
+        }
         String url = modelsUrl(baseUrl);
         if (TextUtils.isEmpty(url)) throw new IllegalArgumentException("Provider has no model catalog URL.");
 
@@ -52,6 +65,29 @@ public final class AiModelCatalog {
         }
         if (clean.endsWith("/")) clean = clean.substring(0, clean.length() - 1);
         return clean + "/models";
+    }
+
+    private static List<String> parseCodexModels(JSONObject catalog) {
+        List<String> models = new ArrayList<>();
+        List<long[]> priorities = new ArrayList<>();
+        JSONArray entries = catalog.optJSONArray("models");
+        if (entries != null) {
+            for (int i = 0; i < entries.length(); i++) {
+                JSONObject entry = entries.optJSONObject(i);
+                if (entry == null) continue;
+                String slug = entry.optString("slug", "");
+                if (TextUtils.isEmpty(slug)) continue;
+                if ("hidden".equals(entry.optString("visibility", ""))) continue;
+                models.add(slug);
+                priorities.add(new long[]{entry.optLong("priority", Long.MAX_VALUE / 2)});
+            }
+        }
+        List<Integer> order = new ArrayList<>();
+        for (int i = 0; i < models.size(); i++) order.add(i);
+        order.sort((a, b) -> Long.compare(priorities.get(a)[0], priorities.get(b)[0]));
+        List<String> sorted = new ArrayList<>();
+        for (int index : order) sorted.add(models.get(index));
+        return sorted;
     }
 
     private static List<String> parseModels(String json) throws Exception {

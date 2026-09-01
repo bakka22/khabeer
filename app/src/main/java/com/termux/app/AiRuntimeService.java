@@ -697,6 +697,10 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
                 executeChatCompletionsTurn(ctx, providerId, baseUrl, apiKey, workspace, prompt, model, approvalPolicy);
                 return;
             }
+            if ("openai-codex".equals(providerId)) {
+                executeCodexTurn(ctx, workspace, prompt, model, effort, approvalPolicy);
+                return;
+            }
             for (int step = 0; step < MAX_MODEL_STEPS && !ctx().stopRequested && !KatheerInterruptManager.isInterrupted(); step++) {
                 JSONObject response = callResponsesApiWithRetry(providerId, baseUrl, apiKey, model, effort, input);
                 JSONArray outputs = response.optJSONArray("output");
@@ -824,8 +828,411 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         try { transition(target); } catch (Exception ignored) {}
     }
 
-    private JSONObject callResponsesApiWithRetry(String providerId, String baseUrl, String apiKey, String model, @Nullable String effort, JSONArray input) throws Exception {
+    // ------------------------------------------------------------------
+    // Codex (ChatGPT subscription) runtime — Responses API over the
+    // chatgpt.com backend with device-code login tokens.
+    // ------------------------------------------------------------------
+
+    private static final long CODEX_REFRESH_SKEW_MS = 120_000;
+    private final Object mCodexAuthLock = new Object();
+
+    /** Raised on 401/403 from the Codex backend so the caller can force one
+     *  refresh+retry before surfacing the error (mirrors the reference
+     *  one-retry-per-turn rule). */
+    private static final class CodexAuthRequired extends Exception {
+        final String staleToken;
+        CodexAuthRequired(String staleToken, String message) { super(message); this.staleToken = staleToken; }
+    }
+
+    private void executeCodexTurn(RunContext ctx, String workspace, String prompt, String model,
+                                  @Nullable String effort, @Nullable String approvalPolicy) throws Exception {
+        JSONArray input;
+        try {
+            refreshSystemMessage();
+            sanitizeReplayHistory();
+            ctx().chatMessages.put(json("role", "user", "content", prompt));
+            if (ctx() != null) { ctx().record.chatMessagesJson = ctx().chatMessages.toString(); persistRun(); }
+            input = toCodexResponsesInput(ctx().chatMessages);
+        } catch (Exception e) {
+            input = new JSONArray();
+            input.put(new JSONObject().put("role", "user")
+                .put("content", new JSONArray().put(new JSONObject().put("type", "input_text").put("text", prompt))));
+        }
+
+        try {
+            for (int step = 0; step < MAX_MODEL_STEPS && !ctx().stopRequested && !KatheerInterruptManager.isInterrupted(); step++) {
+                JSONObject response = callCodexApiWithRetry(model, effort, input);
+                JSONArray outputs = response.optJSONArray("output");
+                boolean hasToolCall = false;
+                if (outputs != null) {
+                    for (int i = 0; i < outputs.length(); i++) {
+                        JSONObject item = outputs.optJSONObject(i);
+                        if (item == null) continue;
+                        String type = item.optString("type");
+                        if ("message".equals(type)) {
+                            emitMessage(item);
+                            String text = extractMessageText(item);
+                            if (!TextUtils.isEmpty(text)) {
+                                try {
+                                    JSONObject assistantMessage = new JSONObject().put("role", "assistant").put("content", text);
+                                    captureCodexReplayItems(outputs, assistantMessage);
+                                    ctx().chatMessages.put(assistantMessage);
+                                    if (ctx() != null) { ctx().record.chatMessagesJson = ctx().chatMessages.toString(); persistRun(); }
+                                } catch (Exception ignored) {}
+                            }
+                        } else if (isReasoningType(type)) {
+                            emitReasoningItem(item);
+                        } else if ("function_call".equals(type)) {
+                            hasToolCall = true;
+                            try {
+                                ctx().chatMessages.put(new JSONObject()
+                                    .put("role", "assistant")
+                                    .put("tool_calls", new JSONArray().put(new JSONObject()
+                                        .put("id", item.optString("call_id", item.optString("id")))
+                                        .put("type", "function")
+                                        .put("function", new JSONObject()
+                                            .put("name", item.optString("name"))
+                                            .put("arguments", item.optString("arguments", "{}"))))));
+                                if (ctx() != null) { ctx().record.chatMessagesJson = ctx().chatMessages.toString(); persistRun(); }
+                            } catch (Exception ignored) {}
+                            JSONObject toolResult = executeToolCall(item, workspace, approvalPolicy);
+                            String output = toolResult.optString("output", "");
+                            try {
+                                ctx().chatMessages.put(new JSONObject()
+                                    .put("role", "tool")
+                                    .put("tool_call_id", item.optString("call_id", item.optString("id")))
+                                    .put("content", output));
+                                if (ctx() != null) { ctx().record.chatMessagesJson = ctx().chatMessages.toString(); persistRun(); }
+                            } catch (Exception ignored) {}
+                            // The ChatGPT Codex backend requires the model's
+                            // function_call item echoed before its output
+                            // (openai.com tolerates the omission; chatgpt.com
+                            // answers 400 "No tool call found for function
+                            // call output").
+                            JSONObject echo = new JSONObject()
+                                .put("type", "function_call")
+                                .put("call_id", item.optString("call_id", item.optString("id")))
+                                .put("name", item.optString("name"))
+                                .put("arguments", item.optString("arguments", "{}"));
+                            input.put(echo);
+                            input.put(toolResult);
+                        }
+                    }
+                }
+                if (!hasToolCall) {
+                    completeRun();
+                    return;
+                }
+            }
+            if (!ctx().stopRequested && !KatheerInterruptManager.isInterrupted()) failRun("The Codex agent reached its tool-step limit before finishing.");
+            else { ctx().lastTurnInterrupted = true; clearActiveTurn(); }
+            drainQueueIfNeeded(ctx);
+        } catch (Exception e) {
+            if (!ctx().stopRequested && !KatheerInterruptManager.isInterrupted()) failRun(e.getMessage() == null ? e.toString() : e.getMessage());
+            else { emit("turn/interrupted", json("reason", "cancel")); ctx().lastTurnInterrupted = true; clearActiveTurn(); }
+        }
+    }
+
+    private JSONObject callCodexApiWithRetry(String model, @Nullable String effort, JSONArray input) throws Exception {
+        int authRetries = 0;
         int maxRetries = 3;
+        for (int attempt = 0; ; attempt++) {
+            try {
+                return callCodexApi(model, effort, input);
+            } catch (CodexAuthRequired e) {
+                if (authRetries++ > 0) throw new IllegalStateException(e.getMessage());
+                codexForceRefresh(e.staleToken);
+                attempt--; // auth retry doesn't consume a backoff attempt
+                continue;
+            } catch (Exception e) {
+                String msg = e.getMessage() == null ? "" : e.getMessage();
+                boolean retryable = msg.contains("HTTP 429") || msg.contains("HTTP 5");
+                if (attempt < maxRetries && retryable && !ctx().stopRequested) {
+                    long backoff = KatheerRetry.jitteredBackoff(attempt, 1000, 8000);
+                    try { Thread.sleep(backoff); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); throw ie; }
+                    continue;
+                }
+                throw e;
+            }
+        }
+    }
+
+    private JSONObject callCodexApi(String model, @Nullable String effort, JSONArray input) throws Exception {
+        JSONObject creds = codexCredentials();
+        String token = creds.getString("token");
+        String accountId = creds.optString("accountId", null);
+
+        JSONObject body = new JSONObject()
+            .put("model", model)
+            .put("instructions", systemInstructions())
+            .put("input", input)
+            .put("store", false)
+            .put("stream", true);
+        JSONArray tools = modelTools(false);
+        if (tools.length() > 0) {
+            body.put("tools", tools).put("tool_choice", "auto").put("parallel_tool_calls", true);
+        }
+        if (!TextUtils.isEmpty(effort)) {
+            body.put("reasoning", new JSONObject().put("effort", codexEffort(effort)).put("summary", "auto"));
+        } else {
+            // gpt-5.6 Codex models are reasoning models — always send a
+            // valid effort level (the backend 500s on missing reasoning
+            // for some sessions; "medium" matches the reference default).
+            body.put("reasoning", new JSONObject().put("effort", "medium").put("summary", "auto"));
+        }
+        body.put("include", new JSONArray().put("reasoning.encrypted_content"));
+
+        HttpURLConnection connection = (HttpURLConnection) new URL(ProviderLogin.CODEX_BASE_URL + "/responses").openConnection();
+        connection.setRequestMethod("POST");
+        connection.setConnectTimeout(MODEL_CONNECT_TIMEOUT_MS);
+        connection.setReadTimeout(MODEL_READ_TIMEOUT_MS);
+        connection.setDoOutput(true);
+        connection.setRequestProperty("Content-Type", "application/json");
+        connection.setRequestProperty("Accept", "text/event-stream");
+        connection.setRequestProperty("Authorization", "Bearer " + token);
+        connection.setRequestProperty("originator", "katheer-agent");
+        connection.setRequestProperty("User-Agent", "KatheerAgent/1.0");
+        connection.setRequestProperty("x-client-request-id", java.util.UUID.randomUUID().toString());
+        if (!TextUtils.isEmpty(accountId)) connection.setRequestProperty("ChatGPT-Account-Id", accountId);
+        try (OutputStream output = connection.getOutputStream()) {
+            output.write(body.toString().getBytes(StandardCharsets.UTF_8));
+        }
+        int code = connection.getResponseCode();
+        if (code == 401 || code == 403) {
+            String error = readFully(connection.getErrorStream());
+            throw new CodexAuthRequired(token, "ChatGPT rejected the session token (HTTP " + code + ")");
+        }
+        InputStream stream = code >= 200 && code < 300 ? connection.getInputStream() : connection.getErrorStream();
+        String text = readFully(stream);
+        if (code < 200 || code >= 300)
+            throw new IllegalStateException("Codex request failed with HTTP " + code + ": " + text);
+        return parseCodexStream(text);
+    }
+
+    /** Assembles the final Responses output array from the SSE event stream:
+     *  output_item.done events carry the full items; the terminal
+     *  response.completed event is preferred when it carries a non-empty
+     *  output (backend occasionally nulls it, hence the fallback). */
+    private JSONObject parseCodexStream(String sse) throws Exception {
+        java.util.SortedMap<Integer, JSONObject> items = new java.util.TreeMap<>();
+        JSONArray completedOutput = null;
+        String failure = null;
+        String[] lines = sse.split("\n");
+        for (String line : lines) {
+            line = line.trim();
+            if (!line.startsWith("data:")) continue;
+            String payload = line.substring(5).trim();
+            if (payload.isEmpty() || "[DONE]".equals(payload)) continue;
+            JSONObject event;
+            try { event = new JSONObject(payload); } catch (Exception e) { continue; }
+            String type = event.optString("type", "");
+            switch (type) {
+                case "response.output_item.done": {
+                    JSONObject item = event.optJSONObject("item");
+                    if (item != null) items.put(event.optInt("output_index", items.size()), item);
+                    break;
+                }
+                case "response.completed":
+                case "response.incomplete": {
+                    JSONObject response = event.optJSONObject("response");
+                    JSONArray output = response == null ? null : response.optJSONArray("output");
+                    if (output != null && output.length() > 0) completedOutput = output;
+                    break;
+                }
+                case "response.failed": {
+                    JSONObject response = event.optJSONObject("response");
+                    JSONObject error = response == null ? null : response.optJSONObject("error");
+                    failure = error == null ? "Codex request failed" : error.optString("message", "Codex request failed");
+                    break;
+                }
+                case "error": {
+                    JSONObject error = event.optJSONObject("error");
+                    failure = error == null ? "Codex stream error" : error.optString("message", "Codex stream error");
+                    break;
+                }
+                default:
+                    break;
+            }
+        }
+        if (failure != null) throw new IllegalStateException(failure);
+        JSONArray output = new JSONArray();
+        if (completedOutput != null) {
+            for (int i = 0; i < completedOutput.length(); i++) output.put(completedOutput.opt(i));
+        } else {
+            for (JSONObject item : items.values()) output.put(item);
+        }
+        return new JSONObject().put("output", output);
+    }
+
+    /** Current Codex bearer token, refreshed when the JWT is inside the
+     *  120s expiry skew. Returns {token, accountId}. */
+    private JSONObject codexCredentials() throws Exception {
+        String token = mProviderConfig.getProviderToken("openai-codex");
+        if (TextUtils.isEmpty(token))
+            throw new IllegalStateException("Not signed in to ChatGPT. Sign in from the provider page first.");
+        long expMs = ProviderLogin.jwtExpiryEpochSeconds(token) * 1000L;
+        if (expMs == 0 || System.currentTimeMillis() > expMs - CODEX_REFRESH_SKEW_MS) {
+            token = codexForceRefresh(token);
+        }
+        return new JSONObject().put("token", token)
+            .put("accountId", ProviderLogin.codexAccountId(token) == null ? "" : ProviderLogin.codexAccountId(token));
+    }
+
+    /** Refresh under a lock; returns the fresh access token. 429 = quota
+     *  (credentials stay), terminal errors clear the login and ask for a
+     *  new sign-in. */
+    private String codexForceRefresh(String currentToken) throws Exception {
+        synchronized (mCodexAuthLock) {
+            String token = mProviderConfig.getProviderToken("openai-codex");
+            long expMs = TextUtils.isEmpty(token) ? 0 : ProviderLogin.jwtExpiryEpochSeconds(token) * 1000L;
+            if (!TextUtils.isEmpty(token) && !token.equals(currentToken)
+                && expMs > System.currentTimeMillis() + CODEX_REFRESH_SKEW_MS) {
+                return token; // another thread already refreshed
+            }
+            String refresh = mProviderConfig.getProviderRefresh("openai-codex");
+            if (TextUtils.isEmpty(refresh))
+                throw new IllegalStateException("ChatGPT session expired — sign in again from the provider page.");
+            try {
+                JSONObject tokens = ProviderLogin.codexRefresh(refresh);
+                String access = tokens.optString("access_token", "");
+                if (TextUtils.isEmpty(access)) throw new IllegalStateException("ChatGPT refresh returned no access_token.");
+                mProviderConfig.setProviderToken("openai-codex", access);
+                String rotated = tokens.optString("refresh_token", "");
+                if (!TextUtils.isEmpty(rotated)) mProviderConfig.setProviderRefresh("openai-codex", rotated);
+                return access;
+            } catch (ProviderLogin.HttpError e) {
+                if (e.code == 429) throw new IllegalStateException("ChatGPT is rate limiting token refresh — try again shortly.");
+                mProviderConfig.setProviderToken("openai-codex", null);
+                mProviderConfig.setProviderRefresh("openai-codex", null);
+                throw new IllegalStateException("ChatGPT session expired — sign in again from the provider page.");
+            }
+        }
+    }
+
+    /** Map the app's effort vocabulary onto the Codex backend's. */
+    private static String codexEffort(String effort) {
+        if ("ultra".equals(effort)) return "xhigh";
+        if ("auto".equals(effort) || TextUtils.isEmpty(effort)) return "medium";
+        return effort;
+    }
+
+    /**
+     * Codex-strict conversion of chat history into Responses input items
+     * (port of the reference codex_responses_adapter): user/assistant text
+     * uses typed content parts, assistant items replay captured reasoning
+     * (encrypted_content) and message items for cache hits, tool calls
+     * become function_call/function_call_output items.
+     */
+    private JSONArray toCodexResponsesInput(JSONArray messages) throws Exception {
+        JSONArray input = new JSONArray();
+        for (int i = 0; i < messages.length(); i++) {
+            JSONObject m = messages.optJSONObject(i);
+            if (m == null) continue;
+            String role = m.optString("role");
+            if ("system".equals(role)) continue;
+            if ("user".equals(role)) {
+                input.put(new JSONObject().put("role", "user")
+                    .put("content", new JSONArray().put(new JSONObject().put("type", "input_text").put("text", m.optString("content", "")))));
+            } else if ("assistant".equals(role)) {
+                JSONArray reasoning = m.optJSONArray("codex_reasoning_items");
+                if (reasoning != null) {
+                    for (int k = 0; k < reasoning.length(); k++) {
+                        JSONObject ri = reasoning.optJSONObject(k);
+                        if (ri != null && !TextUtils.isEmpty(ri.optString("encrypted_content"))) {
+                            JSONObject replay = new JSONObject();
+                            java.util.Iterator<String> keys = ri.keys();
+                            while (keys.hasNext()) {
+                                String key = keys.next();
+                                if (!"id".equals(key) && !"_issuer_kind".equals(key)) replay.put(key, ri.opt(key));
+                            }
+                            input.put(replay);
+                        }
+                    }
+                }
+                JSONArray messageItems = m.optJSONArray("codex_message_items");
+                if (messageItems != null && messageItems.length() > 0) {
+                    for (int k = 0; k < messageItems.length(); k++) {
+                        JSONObject mi = messageItems.optJSONObject(k);
+                        if (mi == null || !"message".equals(mi.optString("type"))) continue;
+                        JSONArray parts = new JSONArray();
+                        JSONArray content = mi.optJSONArray("content");
+                        if (content != null) {
+                            for (int p = 0; p < content.length(); p++) {
+                                JSONObject part = content.optJSONObject(p);
+                                if (part == null) continue;
+                                String type = part.optString("type", "");
+                                if ("output_text".equals(type) || "text".equals(type))
+                                    parts.put(new JSONObject().put("type", "output_text").put("text", part.optString("text", "")));
+                            }
+                        }
+                        if (parts.length() == 0) continue;
+                        input.put(new JSONObject()
+                            .put("type", "message")
+                            .put("role", "assistant")
+                            .put("status", "completed")
+                            .put("content", parts));
+                    }
+                } else {
+                    JSONArray tcs = m.optJSONArray("tool_calls");
+                    if (tcs != null && tcs.length() > 0) {
+                        String c = m.optString("content", "");
+                        if (!TextUtils.isEmpty(c)) {
+                            input.put(new JSONObject().put("type", "message").put("role", "assistant")
+                                .put("status", "completed")
+                                .put("content", new JSONArray().put(new JSONObject().put("type", "output_text").put("text", c))));
+                        }
+                        for (int k = 0; k < tcs.length(); k++) {
+                            JSONObject tc = tcs.optJSONObject(k);
+                            JSONObject fn = tc == null ? null : tc.optJSONObject("function");
+                            if (fn == null) continue;
+                            input.put(new JSONObject()
+                                .put("type", "function_call")
+                                .put("call_id", tc.optString("id"))
+                                .put("name", fn.optString("name"))
+                                .put("arguments", fn.optString("arguments", "{}")));
+                        }
+                    } else {
+                        String text = m.optString("content", "");
+                        if (TextUtils.isEmpty(text)) continue; // empty output_text parts 400 on the Codex backend
+                        input.put(new JSONObject().put("type", "message").put("role", "assistant")
+                            .put("status", "completed")
+                            .put("content", new JSONArray().put(new JSONObject().put("type", "output_text").put("text", text))));
+                    }
+                }
+            } else if ("tool".equals(role)) {
+                input.put(new JSONObject()
+                    .put("type", "function_call_output")
+                    .put("call_id", m.optString("tool_call_id"))
+                    .put("output", m.optString("content", "")));
+            }
+        }
+        return input;
+    }
+
+    /** Collects reasoning/message items worth replaying on the next turn. */
+    private void captureCodexReplayItems(JSONArray outputs, JSONObject assistantMessage) {
+        try {
+            if (outputs == null || assistantMessage == null) return;
+            JSONArray reasoning = null;
+            JSONArray messageItems = null;
+            for (int i = 0; i < outputs.length(); i++) {
+                JSONObject item = outputs.optJSONObject(i);
+                if (item == null) continue;
+                String type = item.optString("type");
+                if (isReasoningType(type) && !TextUtils.isEmpty(item.optString("encrypted_content", ""))) {
+                    if (reasoning == null) reasoning = new JSONArray();
+                    reasoning.put(item);
+                } else if ("message".equals(type) && "assistant".equals(item.optString("role"))) {
+                    if (messageItems == null) messageItems = new JSONArray();
+                    messageItems.put(item);
+                }
+            }
+            if (reasoning != null) assistantMessage.put("codex_reasoning_items", reasoning);
+            if (messageItems != null) assistantMessage.put("codex_message_items", messageItems);
+        } catch (Exception ignored) {}
+    }
+
+    private JSONObject callResponsesApiWithRetry(String providerId, String baseUrl, String apiKey, String model, @Nullable String effort, JSONArray input) throws Exception {        int maxRetries = 3;
         for (int attempt = 0; attempt <= maxRetries; attempt++) {
             try { return callResponsesApi(providerId, baseUrl, apiKey, model, effort, input); }
             catch (Exception e) {
