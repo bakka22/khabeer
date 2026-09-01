@@ -220,6 +220,109 @@ public final class ProviderLogin {
     }
 
     // ------------------------------------------------------------------
+    // Anthropic (Claude Pro/Max) — PKCE with paste-back code#state
+    // ------------------------------------------------------------------
+
+    public static final String ANTHROPIC_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+    public static final String ANTHROPIC_AUTHORIZE_URL = "https://claude.ai/oauth/authorize";
+    public static final String ANTHROPIC_REDIRECT_URI = "https://console.anthropic.com/oauth/code/callback";
+    public static final String ANTHROPIC_TOKEN_URL = "https://platform.claude.com/v1/oauth/token";
+    /** The token endpoint 429s any claude-code/ UA; axios passes. */
+    public static final String ANTHROPIC_TOKEN_UA = "axios/1.7.9";
+
+    public static String anthropicAuthorizeUrl(String codeChallenge, String state) {
+        return ANTHROPIC_AUTHORIZE_URL
+            + "?code=true&client_id=" + ANTHROPIC_CLIENT_ID
+            + "&response_type=code"
+            + "&redirect_uri=" + URLEncoder.encode(ANTHROPIC_REDIRECT_URI)
+            + "&scope=" + URLEncoder.encode("org:create_api_key user:profile user:inference")
+            + "&code_challenge=" + codeChallenge
+            + "&code_challenge_method=S256"
+            + "&state=" + state;
+    }
+
+    public static JSONObject anthropicExchange(String code, String state, String codeVerifier) throws Exception {
+        JSONObject body = new JSONObject()
+            .put("grant_type", "authorization_code")
+            .put("client_id", ANTHROPIC_CLIENT_ID)
+            .put("code", code)
+            .put("state", state)
+            .put("redirect_uri", ANTHROPIC_REDIRECT_URI)
+            .put("code_verifier", codeVerifier);
+        return httpPostJson(ANTHROPIC_TOKEN_URL, body.toString(),
+            new String[]{"Content-Type", "application/json", "Accept", "application/json", "User-Agent", ANTHROPIC_TOKEN_UA});
+    }
+
+    public static JSONObject anthropicRefresh(String refreshToken) throws Exception {
+        JSONObject body = new JSONObject()
+            .put("grant_type", "refresh_token")
+            .put("refresh_token", refreshToken)
+            .put("client_id", ANTHROPIC_CLIENT_ID);
+        return httpPostJson(ANTHROPIC_TOKEN_URL, body.toString(),
+            new String[]{"Content-Type", "application/json", "Accept", "application/json", "User-Agent", ANTHROPIC_TOKEN_UA});
+    }
+
+    // ------------------------------------------------------------------
+    // Nous Portal — device code (JSON bodies) + header-carrying refresh
+    // ------------------------------------------------------------------
+
+    public static final String NOUS_CLIENT_ID = "hermes-cli";
+    public static final String NOUS_SCOPE = "inference:invoke";
+
+    public static JSONObject nousDeviceCode() throws Exception {
+        JSONObject body = new JSONObject().put("client_id", NOUS_CLIENT_ID).put("scope", NOUS_SCOPE);
+        JSONObject response = httpPostJson(NOUS_PORTAL + "/api/oauth/device/code", body.toString(),
+            new String[]{"Content-Type", "application/json", "Accept", "application/json"});
+        if (TextUtils.isEmpty(response.optString("device_code")))
+            throw new Exception("Nous device code response missing device_code");
+        return response;
+    }
+
+    public static JSONObject nousPoll(String deviceCode) throws Exception {
+        JSONObject body = new JSONObject()
+            .put("grant_type", "urn:ietf:params:oauth:grant-type:device_code")
+            .put("client_id", NOUS_CLIENT_ID)
+            .put("device_code", deviceCode);
+        try {
+            JSONObject tokens = httpPostJson(NOUS_PORTAL + "/api/oauth/token", body.toString(),
+                new String[]{"Content-Type", "application/json", "Accept", "application/json"});
+            if (!TextUtils.isEmpty(tokens.optString("access_token")))
+                return new JSONObject().put("status", "done").put("tokens", tokens);
+            return new JSONObject().put("status", "pending");
+        } catch (HttpError e) {
+            if (e.code == 400 || e.code == 403 || e.code == 404 || e.code == 428)
+                return new JSONObject().put("status", "pending");
+            throw e;
+        }
+    }
+
+    public static JSONObject nousRefresh(String refreshToken) throws Exception {
+        JSONObject body = new JSONObject().put("grant_type", "refresh_token").put("client_id", NOUS_CLIENT_ID);
+        return httpPostJson(NOUS_PORTAL + "/api/oauth/token", body.toString(),
+            new String[]{"Content-Type", "application/json", "Accept", "application/json", "x-nous-refresh-token", refreshToken});
+    }
+
+    // ------------------------------------------------------------------
+    // GitHub Copilot — device code + internal proxy-token exchange
+    // ------------------------------------------------------------------
+
+    public static JSONObject copilotExchangeJwt(String githubToken) throws Exception {
+        java.util.Map<String, String> headers = new java.util.LinkedHashMap<>();
+        headers.put("Authorization", "token " + githubToken);
+        headers.put("Accept", "application/json");
+        headers.put("User-Agent", "GitHubCopilotChat/0.26.7");
+        headers.put("Editor-Version", "vscode/1.104.1");
+        return httpGetJson("https://api.github.com/copilot_internal/v2/token", headers);
+    }
+
+    public static final String[] COPILOT_REQUEST_HEADERS = {
+        "Editor-Version", "vscode/1.104.1",
+        "Copilot-Integration-Id", "vscode-chat",
+        "Openai-Intent", "conversation-edits",
+        "x-initiator", "agent",
+    };
+
+    // ------------------------------------------------------------------
     // Tiny HTTP layer (mirrors AiMcpRegistry's helpers, no dependency)
     // ------------------------------------------------------------------
 

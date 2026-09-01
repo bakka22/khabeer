@@ -234,6 +234,13 @@ public final class AiProviderConfig {
         setSecret("pstate_" + (providerId == null ? "" : providerId), json);
     }
 
+    /** API key or provider-login token, whichever is present. */
+    public String resolveCredential(AiProviderProfile profile) {
+        String key = getApiKey(profile);
+        if (!TextUtils.isEmpty(key)) return key;
+        return getProviderToken(profile.id);
+    }
+
     public boolean hasProviderLogin(String providerId) {
         return !TextUtils.isEmpty(getProviderToken(providerId));
     }

@@ -484,7 +484,7 @@ public void sendPrompt(String prompt, @Nullable String effort, @Nullable String 
         if (TextUtils.isEmpty(model)) model = profile.defaultModel;
         c.record.lastResolvedModel = model;
         String baseUrl = mProviderConfig.getBaseUrl(profile);
-        String apiKey = mProviderConfig.getApiKey(profile);
+        String apiKey = mProviderConfig.resolveCredential(profile);
         String providerId = profile.id;
         if ("opencode".equals(providerId)) {
             // Session-scoped route: each session carries which OpenCode route
@@ -699,6 +699,10 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
             }
             if ("openai-codex".equals(providerId)) {
                 executeCodexTurn(ctx, workspace, prompt, model, effort, approvalPolicy);
+                return;
+            }
+            if (ANTHROPIC_MESSAGES_PROVIDERS.contains(providerId)) {
+                executeAnthropicTurn(ctx, providerId, baseUrl, apiKey, workspace, prompt, model, approvalPolicy);
                 return;
             }
             for (int step = 0; step < MAX_MODEL_STEPS && !ctx().stopRequested && !KatheerInterruptManager.isInterrupted(); step++) {
@@ -1232,6 +1236,187 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         } catch (Exception ignored) {}
     }
 
+    // ------------------------------------------------------------------
+    // Anthropic Messages dialect (api.anthropic.com, MiniMax, Kimi /coding,
+    // Tencent TokenPlan). Buffered requests; tools via tool_use/tool_result.
+    // ------------------------------------------------------------------
+
+    private void executeAnthropicTurn(RunContext ctx, String providerId, String baseUrl, String apiKey,
+                                      String workspace, String prompt, String model,
+                                      @Nullable String approvalPolicy) throws Exception {
+        try {
+            refreshSystemMessage();
+            sanitizeReplayHistory();
+            ctx().chatMessages.put(json("role", "user", "content", prompt));
+            if (ctx() != null) { ctx().record.chatMessagesJson = ctx().chatMessages.toString(); persistRun(); }
+        } catch (Exception ignored) {}
+
+        try {
+            for (int step = 0; step < MAX_MODEL_STEPS && !ctx().stopRequested && !KatheerInterruptManager.isInterrupted(); step++) {
+                JSONObject response = callAnthropicApi(providerId, baseUrl, apiKey, model, ctx().chatMessages);
+                JSONArray content = response.optJSONArray("content");
+                StringBuilder textBuilder = new StringBuilder();
+                JSONArray toolCalls = new JSONArray();
+                if (content != null) {
+                    for (int i = 0; i < content.length(); i++) {
+                        JSONObject block = content.optJSONObject(i);
+                        if (block == null) continue;
+                        String type = block.optString("type");
+                        if ("text".equals(type)) {
+                            textBuilder.append(block.optString("text", ""));
+                        } else if ("tool_use".equals(type)) {
+                            JSONObject input = block.optJSONObject("input");
+                            toolCalls.put(new JSONObject()
+                                .put("id", block.optString("id"))
+                                .put("type", "function")
+                                .put("function", new JSONObject()
+                                    .put("name", block.optString("name"))
+                                    .put("arguments", input == null ? "{}" : input.toString())));
+                        }
+                    }
+                }
+                String text = textBuilder.toString();
+                boolean hasToolCalls = toolCalls.length() > 0;
+                if (!TextUtils.isEmpty(text)) {
+                    emit("item/agentMessage/delta", json("text", text));
+                }
+                JSONObject assistantMessage = new JSONObject().put("role", "assistant").put("content", text);
+                if (hasToolCalls) assistantMessage.put("tool_calls", toolCalls);
+                ctx().chatMessages.put(assistantMessage);
+                if (ctx() != null) { ctx().record.chatMessagesJson = ctx().chatMessages.toString(); persistRun(); }
+
+                if (!hasToolCalls) {
+                    completeRun();
+                    clearActiveTurn();
+                    drainQueueIfNeeded(ctx);
+                    return;
+                }
+                for (int i = 0; i < toolCalls.length(); i++) {
+                    JSONObject toolCall = toolCalls.optJSONObject(i);
+                    if (toolCall == null) continue;
+                    JSONObject toolResult = executeChatToolCall(toolCall, workspace, approvalPolicy);
+                    ctx().chatMessages.put(toolResult);
+                    if (ctx() != null) { ctx().record.chatMessagesJson = ctx().chatMessages.toString(); persistRun(); }
+                }
+            }
+            if (!ctx().stopRequested && !KatheerInterruptManager.isInterrupted())
+                failRun("The Anthropic-dialect agent reached its tool-step limit before finishing.");
+            else { ctx().lastTurnInterrupted = true; clearActiveTurn(); }
+            drainQueueIfNeeded(ctx);
+        } catch (Exception e) {
+            if (!ctx().stopRequested && !KatheerInterruptManager.isInterrupted()) failRun(e.getMessage() == null ? e.toString() : e.getMessage());
+            else { emit("turn/interrupted", json("reason", "cancel")); ctx().lastTurnInterrupted = true; clearActiveTurn(); }
+        }
+    }
+
+    /** OAuth tokens (sk-ant-oat…, JWTs, cc-…) authenticate with Bearer and
+     *  the OAuth beta headers; API keys use x-api-key (reference rule). */
+    private static boolean isAnthropicOAuthToken(String key) {
+        if (TextUtils.isEmpty(key)) return false;
+        if (key.startsWith("sk-ant-api")) return false;
+        return key.startsWith("sk-ant-") || key.startsWith("cc-") || key.startsWith("eyJ");
+    }
+
+    private String anthropicMessagesUrl(String baseUrl) {
+        String clean = baseUrl == null ? "" : baseUrl.trim();
+        if (clean.endsWith("/messages")) return clean;
+        if (clean.endsWith("/")) clean = clean.substring(0, clean.length() - 1);
+        return clean + "/v1/messages";
+    }
+
+    private JSONObject callAnthropicApi(String providerId, String baseUrl, String apiKey, String model,
+                                        JSONArray messages) throws Exception {
+        boolean oauth = isAnthropicOAuthToken(apiKey);
+        JSONObject body = new JSONObject()
+            .put("model", model)
+            .put("max_tokens", 8192)
+            .put("stream", false)
+            .put("system", systemInstructions())
+            .put("messages", toAnthropicMessages(messages));
+        JSONArray flatTools = modelTools(false);
+        JSONArray tools = new JSONArray();
+        for (int i = 0; i < flatTools.length(); i++) {
+            JSONObject tool = flatTools.optJSONObject(i);
+            if (tool == null) continue;
+            tools.put(new JSONObject()
+                .put("name", tool.optString("name"))
+                .put("description", tool.optString("description"))
+                .put("input_schema", tool.optJSONObject("parameters")));
+        }
+        if (tools.length() > 0) {
+            body.put("tools", tools).put("tool_choice", new JSONObject().put("type", "auto"));
+        }
+
+        HttpURLConnection connection = (HttpURLConnection) new URL(anthropicMessagesUrl(baseUrl)).openConnection();
+        connection.setRequestMethod("POST");
+        connection.setConnectTimeout(MODEL_CONNECT_TIMEOUT_MS);
+        connection.setReadTimeout(MODEL_READ_TIMEOUT_MS);
+        connection.setDoOutput(true);
+        connection.setRequestProperty("Content-Type", "application/json");
+        connection.setRequestProperty("Accept", "application/json");
+        if (oauth) {
+            connection.setRequestProperty("Authorization", "Bearer " + apiKey);
+            connection.setRequestProperty("anthropic-beta", "claude-code-20250219,oauth-2025-04-20");
+            connection.setRequestProperty("User-Agent", "claude-code/2.1.74 (external, cli)");
+            connection.setRequestProperty("x-app", "cli");
+        } else {
+            connection.setRequestProperty("x-api-key", apiKey == null ? "" : apiKey);
+            connection.setRequestProperty("anthropic-version", "2023-06-01");
+        }
+        try (OutputStream output = connection.getOutputStream()) {
+            output.write(body.toString().getBytes(StandardCharsets.UTF_8));
+        }
+        int code = connection.getResponseCode();
+        InputStream stream = code >= 200 && code < 300 ? connection.getInputStream() : connection.getErrorStream();
+        String text = readFully(stream);
+        if (code < 200 || code >= 300)
+            throw new IllegalStateException("Provider request failed with HTTP " + code + ": " + text);
+        return new JSONObject(text);
+    }
+
+    /** Chat-style history → Anthropic messages; tool_calls become tool_use
+     *  blocks and tool results become user tool_result blocks. */
+    private JSONArray toAnthropicMessages(JSONArray messages) throws Exception {
+        JSONArray out = new JSONArray();
+        for (int i = 0; i < messages.length(); i++) {
+            JSONObject m = messages.optJSONObject(i);
+            if (m == null) continue;
+            String role = m.optString("role");
+            if ("system".equals(role)) continue;
+            if ("user".equals(role)) {
+                out.put(new JSONObject().put("role", "user")
+                    .put("content", new JSONArray().put(new JSONObject().put("type", "text").put("text", m.optString("content", "")))));
+            } else if ("assistant".equals(role)) {
+                JSONArray blocks = new JSONArray();
+                String c = m.optString("content", "");
+                if (!TextUtils.isEmpty(c)) blocks.put(new JSONObject().put("type", "text").put("text", c));
+                JSONArray tcs = m.optJSONArray("tool_calls");
+                if (tcs != null) {
+                    for (int k = 0; k < tcs.length(); k++) {
+                        JSONObject tc = tcs.optJSONObject(k);
+                        JSONObject fn = tc == null ? null : tc.optJSONObject("function");
+                        if (fn == null) continue;
+                        JSONObject input;
+                        try { input = new JSONObject(fn.optString("arguments", "{}")); } catch (Exception e) { input = new JSONObject(); }
+                        blocks.put(new JSONObject()
+                            .put("type", "tool_use")
+                            .put("id", tc.optString("id"))
+                            .put("name", fn.optString("name"))
+                            .put("input", input));
+                    }
+                }
+                if (blocks.length() > 0) out.put(new JSONObject().put("role", "assistant").put("content", blocks));
+            } else if ("tool".equals(role)) {
+                out.put(new JSONObject().put("role", "user")
+                    .put("content", new JSONArray().put(new JSONObject()
+                        .put("type", "tool_result")
+                        .put("tool_use_id", m.optString("tool_call_id"))
+                        .put("content", m.optString("content", "")))));
+            }
+        }
+        return out;
+    }
+
     private JSONObject callResponsesApiWithRetry(String providerId, String baseUrl, String apiKey, String model, @Nullable String effort, JSONArray input) throws Exception {        int maxRetries = 3;
         for (int attempt = 0; attempt <= maxRetries; attempt++) {
             try { return callResponsesApi(providerId, baseUrl, apiKey, model, effort, input); }
@@ -1364,6 +1549,10 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         connection.setRequestProperty("Accept", "text/event-stream");
         if (!TextUtils.isEmpty(apiKey)) connection.setRequestProperty("Authorization", "Bearer " + apiKey);
         connection.setRequestProperty("X-Title", "Termux katheer");
+        if ("github-copilot".equals(providerId)) {
+            for (int i = 0; i < ProviderLogin.COPILOT_REQUEST_HEADERS.length; i += 2)
+                connection.setRequestProperty(ProviderLogin.COPILOT_REQUEST_HEADERS[i], ProviderLogin.COPILOT_REQUEST_HEADERS[i + 1]);
+        }
         try (OutputStream output = connection.getOutputStream()) {
             output.write(body.toString().getBytes(StandardCharsets.UTF_8));
         }
@@ -1549,8 +1738,20 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
     }
 
     private boolean usesChatCompletions(String providerId) {
-        return "opencode".equals(providerId);
+        return CHAT_COMPLETIONS_PROVIDERS.contains(providerId);
     }
+
+    /** Providers that speak OpenAI chat completions (katheer dialect table:
+     * most aggregators and OpenAI-compatible clouds; openai/openrouter/xai
+     * speak Responses, anthropic-family speak Messages). */
+    private static final java.util.Set<String> CHAT_COMPLETIONS_PROVIDERS = new java.util.HashSet<>(java.util.Arrays.asList(
+        "opencode", "deepseek", "gemini", "zai", "alibaba", "huggingface", "nvidia",
+        "ollama-cloud", "fireworks", "novita", "ai-gateway", "kilocode", "gmi",
+        "arcee", "xiaomi", "tencent-tokenhub", "lmstudio", "nous", "github-copilot"));
+
+    /** Providers speaking the native Anthropic Messages dialect. */
+    private static final java.util.Set<String> ANTHROPIC_MESSAGES_PROVIDERS = new java.util.HashSet<>(java.util.Arrays.asList(
+        "anthropic", "minimax", "tencent-tokenplan", "kimi-coding"));
 
     private String chatCompletionsUrl(String baseUrl) {
         String clean = baseUrl == null ? "" : baseUrl.trim();

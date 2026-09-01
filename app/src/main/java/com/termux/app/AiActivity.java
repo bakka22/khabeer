@@ -614,6 +614,12 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             showCodexLoginDialog(true);
             return;
         }
+        if ("nous".equals(profile.id) || "github-copilot".equals(profile.id) || "qwen-oauth".equals(profile.id)
+            || "anthropic".equals(profile.id) || "xai".equals(profile.id)) {
+            mSelectedProfile = profile;
+            showProviderLoginChooser(profile, true);
+            return;
+        }
         mSelectedProfile = profile;
         mSelectedModel = mProviderConfig.getModel(profile);
         if ("opencode".equals(profile.id) && (TextUtils.isEmpty(mSelectedModel) || "gpt-4o".equals(mSelectedModel))) mSelectedModel = "big-pickle";
@@ -2138,7 +2144,42 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             if (userInitiated) showCodexLoginDialog(false);
             return;
         }
+        if ("nous".equals(mSelectedProfile.id) || "github-copilot".equals(mSelectedProfile.id)
+            || "qwen-oauth".equals(mSelectedProfile.id)) {
+            if (userInitiated) showProviderLoginChooser(mSelectedProfile, false);
+            return;
+        }
+        if ("anthropic".equals(mSelectedProfile.id) || "xai".equals(mSelectedProfile.id)) {
+            if (userInitiated) showProviderLoginChooser(mSelectedProfile, false);
+            return;
+        }
         if (userInitiated || mSetupPanel.getVisibility() == View.VISIBLE) showSetupPage();
+    }
+
+    /** Providers that support both an API key and a subscription login get a
+     *  chooser; login-only providers go straight to their flow. */
+    private void showProviderLoginChooser(AiProviderProfile profile, boolean sessionMode) {
+        boolean loginOnly = "nous".equals(profile.id) || "github-copilot".equals(profile.id) || "qwen-oauth".equals(profile.id);
+        if (loginOnly) {
+            if ("qwen-oauth".equals(profile.id)) showQwenPasteDialog(profile, sessionMode);
+            else showDeviceCodeLogin(profile, sessionMode);
+            return;
+        }
+        String loginLabel = "anthropic".equals(profile.id) ? "Sign in with Claude (Pro/Max)" : "Sign in with " + profile.name;
+        new MaterialAlertDialogBuilder(this)
+            .setTitle(profile.name)
+            .setItems(new String[]{
+                "Use an API key",
+                loginLabel,
+                "Cancel"
+            }, (dialog, which) -> {
+                if (which == 0) showApiKeyDialog();
+                else if (which == 1) {
+                    if ("anthropic".equals(profile.id)) showAnthropicPkceLogin(profile, sessionMode);
+                    else showDeviceCodeLogin(profile, sessionMode);
+                }
+            })
+            .show();
     }
 
     private void showSetupPage() {
@@ -2232,7 +2273,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             // the session row inside the service (katheer session model).
             mRuntimeService.sendPrompt(prompt, clean(mSelectedEffort), mSelectedApproval);
         } else {
-            String apiKey = mProviderConfig.getApiKey(profile);
+            String apiKey = mProviderConfig.resolveCredential(profile);
             String baseUrl = mProviderConfig.getBaseUrl(profile);
             String model = TextUtils.isEmpty(mSelectedModel) ? profile.defaultModel : mSelectedModel;
             mRuntimeService.startAgent(profile.id, baseUrl, apiKey, workspace, prompt, model, clean(mSelectedEffort), mSelectedApproval);
@@ -2351,7 +2392,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             return;
         }
         String resolvedBaseUrl = mProviderConfig.getBaseUrl(profile);
-        String resolvedApiKey = mProviderConfig.getApiKey(profile);
+        String resolvedApiKey = mProviderConfig.resolveCredential(profile);
         // Session-scoped: a session bound to an OpenCode route lists THAT
         // route's models, not the globally selected route's.
         if (mHasNativeSession && mRuntimeService != null && "opencode".equals(profile.id)) {
@@ -2575,6 +2616,368 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
                 });
             }
         }, "codex-models").start();
+    }
+
+    // ------------------------------------------------------------------
+    // Generic device-code login (xAI, Nous, Copilot) — RFC 8628 port
+    // ------------------------------------------------------------------
+
+    private interface DeviceFlow {
+        /** Returns {user_code, verification_uri?, device_code, interval?}. */
+        JSONObject start() throws Exception;
+
+        /** Returns {status: "pending"|"done", tokens?: {...}}. */
+        JSONObject poll(JSONObject start) throws Exception;
+
+        /** Persist credentials for the provider. */
+        void finish(JSONObject tokens) throws Exception;
+    }
+
+    private DeviceFlow deviceFlowFor(String providerId) {
+        switch (providerId) {
+            case "xai":
+                return new DeviceFlow() {
+                    @Override public JSONObject start() throws Exception {
+                        java.util.Map<String, String> form = new java.util.LinkedHashMap<>();
+                        form.put("client_id", ProviderLogin.XAI_CLIENT_ID);
+                        form.put("scope", ProviderLogin.XAI_SCOPE);
+                        return ProviderLogin.deviceCodeRequest("https://auth.x.ai/oauth2/device/code", form);
+                    }
+                    @Override public JSONObject poll(JSONObject start) throws Exception {
+                        java.util.Map<String, String> form = new java.util.LinkedHashMap<>();
+                        form.put("grant_type", "urn:ietf:params:oauth:grant-type:device_code");
+                        form.put("device_code", start.optString("device_code"));
+                        form.put("client_id", ProviderLogin.XAI_CLIENT_ID);
+                        return ProviderLogin.deviceCodePoll(ProviderLogin.XAI_TOKEN_URL, form);
+                    }
+                    @Override public void finish(JSONObject tokens) throws Exception {
+                        storeProviderLogin("xai", tokens);
+                    }
+                };
+            case "nous":
+                return new DeviceFlow() {
+                    @Override public JSONObject start() throws Exception { return ProviderLogin.nousDeviceCode(); }
+                    @Override public JSONObject poll(JSONObject start) throws Exception {
+                        return ProviderLogin.nousPoll(start.optString("device_code"));
+                    }
+                    @Override public void finish(JSONObject tokens) throws Exception {
+                        storeProviderLogin("nous", tokens);
+                    }
+                };
+            case "github-copilot":
+                return new DeviceFlow() {
+                    @Override public JSONObject start() throws Exception {
+                        java.util.Map<String, String> form = new java.util.LinkedHashMap<>();
+                        form.put("client_id", ProviderLogin.COPILOT_CLIENT_ID);
+                        form.put("scope", "read:user");
+                        return ProviderLogin.deviceCodeRequest("https://github.com/login/device/code", form);
+                    }
+                    @Override public JSONObject poll(JSONObject start) throws Exception {
+                        java.util.Map<String, String> form = new java.util.LinkedHashMap<>();
+                        form.put("grant_type", "urn:ietf:params:oauth:grant-type:device_code");
+                        form.put("device_code", start.optString("device_code"));
+                        form.put("client_id", ProviderLogin.COPILOT_CLIENT_ID);
+                        return ProviderLogin.deviceCodePoll("https://github.com/login/oauth/access_token", form);
+                    }
+                    @Override public void finish(JSONObject tokens) throws Exception {
+                        // The GitHub token alone can't call the model API —
+                        // exchange it for the short-lived Copilot proxy JWT.
+                        JSONObject jwt = ProviderLogin.copilotExchangeJwt(tokens.optString("access_token", ""));
+                        mProviderConfig.setProviderToken("github-copilot", jwt.optString("token", ""));
+                        mProviderConfig.setProviderRefresh("github-copilot", tokens.optString("access_token", ""));
+                        JSONObject state = new JSONObject()
+                            .put("expires_at", jwt.optLong("expires_at", 0))
+                            .put("obtained_at", System.currentTimeMillis());
+                        mProviderConfig.setProviderState("github-copilot", state.toString());
+                    }
+                };
+            default:
+                throw new IllegalArgumentException("No device flow for " + providerId);
+        }
+    }
+
+    private void storeProviderLogin(String providerId, JSONObject tokens) throws Exception {
+        String access = tokens.optString("access_token", "");
+        if (TextUtils.isEmpty(access)) throw new Exception("Login returned no access token.");
+        mProviderConfig.setProviderToken(providerId, access);
+        String refresh = tokens.optString("refresh_token", "");
+        if (!TextUtils.isEmpty(refresh)) mProviderConfig.setProviderRefresh(providerId, refresh);
+        JSONObject state = new JSONObject().put("obtained_at", System.currentTimeMillis());
+        mProviderConfig.setProviderState(providerId, state.toString());
+    }
+
+    private void showDeviceCodeLogin(AiProviderProfile profile, boolean sessionMode) {
+        final DeviceFlow flow = deviceFlowFor(profile.id);
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(22), dp(10), dp(22), 0);
+
+        TextView status = new TextView(this);
+        status.setText("Start the sign-in, then approve katheer in your browser.");
+        status.setTextColor(color(R.color.ai_text));
+        status.setTextSize(13);
+        box.addView(status);
+
+        TextView codeView = new TextView(this);
+        codeView.setTypeface(Typeface.MONOSPACE);
+        codeView.setTextSize(24);
+        codeView.setLetterSpacing(0.15f);
+        codeView.setTextColor(color(R.color.ai_accent));
+        codeView.setPadding(0, dp(14), 0, dp(4));
+        codeView.setVisibility(View.GONE);
+        box.addView(codeView);
+
+        TextView uriView = new TextView(this);
+        uriView.setTextColor(color(R.color.ai_text_muted));
+        uriView.setTextSize(11);
+        uriView.setVisibility(View.GONE);
+        box.addView(uriView);
+
+        MaterialButton openBrowser = new MaterialButton(this);
+        openBrowser.setText("Open the authorization page");
+        openBrowser.setAllCaps(false);
+        openBrowser.setTextColor(0xFFFFFFFF);
+        openBrowser.setBackgroundTintList(android.content.res.ColorStateList.valueOf(color(R.color.ai_accent)));
+        openBrowser.setCornerRadius(dp(10));
+        openBrowser.setEnabled(false);
+        openBrowser.setAlpha(0.5f);
+        LinearLayout.LayoutParams browserLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        browserLp.topMargin = dp(12);
+        openBrowser.setLayoutParams(browserLp);
+        final String[] verificationUri = {null};
+        openBrowser.setOnClickListener(v -> {
+            String url = verificationUri[0];
+            if (TextUtils.isEmpty(url)) return;
+            try {
+                startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            } catch (Exception e) {
+                showError("No browser available.");
+            }
+        });
+        box.addView(openBrowser);
+
+        MaterialButton start = new MaterialButton(this);
+        start.setText("Sign in with " + profile.name);
+        start.setAllCaps(false);
+        start.setTextColor(color(R.color.ai_text));
+        start.setStrokeColor(android.content.res.ColorStateList.valueOf(color(R.color.ai_border)));
+        start.setBackgroundTintList(android.content.res.ColorStateList.valueOf(color(R.color.ai_surface)));
+        start.setCornerRadius(dp(10));
+        LinearLayout.LayoutParams startLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        startLp.topMargin = dp(8);
+        start.setLayoutParams(startLp);
+        box.addView(start);
+
+        final androidx.appcompat.app.AlertDialog[] dialogHolder = new androidx.appcompat.app.AlertDialog[1];
+        start.setOnClickListener(v -> {
+            start.setEnabled(false);
+            start.setText("Waiting for authorization…");
+            status.setText("Requesting a device code…");
+            new Thread(() -> {
+                try {
+                    JSONObject info = flow.start();
+                    String userCode = info.optString("user_code", "");
+                    String uri = info.optString("verification_uri_complete",
+                        info.optString("verification_uri", info.optString("verification_url", "")));
+                    int interval = Math.max(2, info.optInt("interval", 5));
+                    runOnUiThread(() -> {
+                        codeView.setText(userCode);
+                        codeView.setVisibility(View.VISIBLE);
+                        if (!TextUtils.isEmpty(uri)) {
+                            verificationUri[0] = uri;
+                            uriView.setText("Open  " + uri + "  and enter the code above.");
+                            uriView.setVisibility(View.VISIBLE);
+                            openBrowser.setEnabled(true);
+                            openBrowser.setAlpha(1f);
+                        }
+                        status.setText("Approve katheer in the browser to finish signing in.");
+                    });
+                    long deadline = System.currentTimeMillis() + 15 * 60_000L;
+                    while (System.currentTimeMillis() < deadline) {
+                        try { Thread.sleep(interval * 1000L); } catch (InterruptedException ie) { return; }
+                        JSONObject poll = flow.poll(info);
+                        String pollStatus = poll.optString("status", "pending");
+                        if ("pending".equals(pollStatus)) continue;
+                        if ("slow_down".equals(pollStatus)) { interval += 5; continue; }
+                        if (!"done".equals(pollStatus))
+                            throw new Exception("Sign-in did not complete (" + pollStatus + ").");
+                        flow.finish(poll.optJSONObject("tokens"));
+                        runOnUiThread(() -> {
+                            if (dialogHolder[0] != null && dialogHolder[0].isShowing()) dialogHolder[0].dismiss();
+                            finishProviderLogin(profile, sessionMode);
+                        });
+                        return;
+                    }
+                    runOnUiThread(() -> {
+                        status.setText("Timed out waiting for authorization — try again.");
+                        status.setTextColor(color(R.color.ai_warning));
+                        start.setEnabled(true);
+                        start.setText("Sign in with " + profile.name);
+                    });
+                } catch (Exception e) {
+                    final String message = e.getMessage() == null ? e.toString() : e.getMessage();
+                    runOnUiThread(() -> {
+                        status.setText("Sign-in failed: " + message);
+                        status.setTextColor(color(R.color.ai_warning));
+                        start.setEnabled(true);
+                        start.setText("Sign in with " + profile.name);
+                    });
+                }
+            }, "device-login-" + profile.id).start();
+        });
+
+        dialogHolder[0] = new MaterialAlertDialogBuilder(this)
+            .setTitle(profile.name + " sign-in")
+            .setView(box)
+            .setNegativeButton(android.R.string.cancel, null)
+            .show();
+    }
+
+    /** After a successful login: bind the session (session mode), open chat,
+     *  and offer the model picker. */
+    private void finishProviderLogin(AiProviderProfile profile, boolean sessionMode) {
+        if (sessionMode) {
+            mRuntimeService.setSessionProvider(profile.id);
+            showChatPage();
+        } else {
+            selectProvider(profile, false);
+            showChatPage();
+        }
+        setStatus("Signed in to " + profile.name + ".", false);
+        fetchProviderModelsAndPick(profile);
+    }
+
+    private void fetchProviderModelsAndPick(AiProviderProfile profile) {
+        new Thread(() -> {
+            try {
+                List<String> models = AiModelCatalog.fetch(profile, mProviderConfig.getBaseUrl(profile),
+                    mProviderConfig.resolveCredential(profile));
+                runOnUiThread(() -> showModelListDialog(profile, models));
+            } catch (Exception ignored) {
+                // Model listing is best-effort; the manual entry dialog covers the rest.
+            }
+        }, "provider-models").start();
+    }
+
+    // ------------------------------------------------------------------
+    // Claude Pro/Max PKCE sign-in (paste-back code#state — the reference
+    // flow's redirect target is a desktop console page, so no loopback)
+    // ------------------------------------------------------------------
+
+    private void showAnthropicPkceLogin(AiProviderProfile profile, boolean sessionMode) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(22), dp(10), dp(22), 0);
+
+        TextView status = new TextView(this);
+        status.setText("1. Open the sign-in page and approve Claude.\n2. Copy the code shown at the end (it looks like ABcd…#tr-s…).\n3. Paste it below.");
+        status.setTextColor(color(R.color.ai_text));
+        status.setTextSize(13);
+        box.addView(status);
+
+        EditText codeInput = new EditText(this);
+        codeInput.setSingleLine(true);
+        codeInput.setHint("code#state");
+        codeInput.setInputType(InputType.TYPE_CLASS_TEXT);
+        LinearLayout.LayoutParams codeLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        codeLp.topMargin = dp(12);
+        codeInput.setLayoutParams(codeLp);
+        box.addView(codeInput);
+
+        MaterialButton open = new MaterialButton(this);
+        open.setText("Open claude.ai sign-in");
+        open.setAllCaps(false);
+        open.setTextColor(0xFFFFFFFF);
+        open.setBackgroundTintList(android.content.res.ColorStateList.valueOf(color(R.color.ai_accent)));
+        open.setCornerRadius(dp(10));
+        LinearLayout.LayoutParams openLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        openLp.topMargin = dp(10);
+        open.setLayoutParams(openLp);
+        final String[] authorizeUrl = {null};
+        open.setOnClickListener(v -> {
+            if (authorizeUrl[0] == null) return;
+            try {
+                startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(authorizeUrl[0])).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            } catch (Exception e) {
+                showError("No browser available.");
+            }
+        });
+        box.addView(open);
+
+        final androidx.appcompat.app.AlertDialog[] dialogHolder = new androidx.appcompat.app.AlertDialog[1];
+        final String verifier = base64UrlRandom(32);
+        final String state = base64UrlRandom(16);
+        final String challenge;
+        try {
+            challenge = base64Url(MessageDigest.getInstance("SHA-256").digest(verifier.getBytes(StandardCharsets.US_ASCII)));
+        } catch (Exception e) {
+            showError("PKCE setup failed: " + e.getMessage());
+            return;
+        }
+        authorizeUrl[0] = ProviderLogin.anthropicAuthorizeUrl(challenge, state);
+
+        dialogHolder[0] = new MaterialAlertDialogBuilder(this)
+            .setTitle("Claude sign-in")
+            .setView(box)
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton("Finish sign-in", (dialog, which) -> {
+                String pasted = codeInput.getText().toString().trim();
+                String code = pasted.contains("#") ? pasted.substring(0, pasted.indexOf('#')) : pasted;
+                String pastedState = pasted.contains("#") ? pasted.substring(pasted.indexOf('#') + 1) : "";
+                if (TextUtils.isEmpty(code)) {
+                    showError("Paste the code from the browser first.");
+                    return;
+                }
+                new Thread(() -> {
+                    try {
+                        if (!TextUtils.isEmpty(pastedState) && !pastedState.equals(state))
+                            throw new Exception("state mismatch — start over.");
+                        JSONObject tokens = ProviderLogin.anthropicExchange(code, state, verifier);
+                        storeProviderLogin("anthropic", tokens);
+                        runOnUiThread(() -> {
+                            if (dialogHolder[0] != null && dialogHolder[0].isShowing()) dialogHolder[0].dismiss();
+                            finishProviderLogin(profile, sessionMode);
+                        });
+                    } catch (Exception e) {
+                        final String message = e.getMessage() == null ? e.toString() : e.getMessage();
+                        runOnUiThread(() -> showError("Claude sign-in failed: " + message));
+                    }
+                }, "anthropic-pkce").start();
+            })
+            .show();
+    }
+
+    // ------------------------------------------------------------------
+    // Qwen OAuth: the reference implementation reuses the Qwen CLI's
+    // credential file; on mobile we accept a pasted credential JSON.
+    // ------------------------------------------------------------------
+
+    private void showQwenPasteDialog(AiProviderProfile profile, boolean sessionMode) {
+        EditText paste = new EditText(this);
+        paste.setSingleLine(false);
+        paste.setMinLines(3);
+        paste.setHint("{\"access_token\": \"…\", \"refresh_token\": \"…\"}");
+        new MaterialAlertDialogBuilder(this)
+            .setTitle("Qwen OAuth credentials")
+            .setMessage("Sign in with 'qwen auth qwen-oauth' on a computer, then paste the contents of ~/.qwen/oauth_creds.json here.")
+            .setView(paste)
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton("Save", (dialog, which) -> {
+                try {
+                    JSONObject creds = new JSONObject(paste.getText().toString().trim());
+                    String access = creds.optString("access_token", "");
+                    if (TextUtils.isEmpty(access)) throw new Exception("No access_token in the pasted JSON.");
+                    storeProviderLogin("qwen-oauth", creds);
+                    finishProviderLogin(profile, sessionMode);
+                } catch (Exception e) {
+                    showError("Invalid credentials: " + (e.getMessage() == null ? e.toString() : e.getMessage()));
+                }
+            })
+            .show();
     }
 
     private void showModelListDialog(AiProviderProfile profile, List<String> models) {        ArrayList<String> items = new ArrayList<>();
