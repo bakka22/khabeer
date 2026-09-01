@@ -793,7 +793,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
 
     /** Skills & extensions page (Hermes skills): list installed skills, toggle
      * them, and read the full SKILL.md. The skills root is
-     * $HOME/.hermes/skills — drop a folder with a SKILL.md in there (or sync
+     * $HOME/.termuxAI/skills — drop a folder with a SKILL.md in there (or sync
      * one from a desktop Hermes install) and it appears here. */
     private void showExtensionsPage() {
         if (mExtensionsPage == null) return;
@@ -820,7 +820,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mExtensionsList.addView(title);
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("Procedural memory for the agent (Hermes skills). The model sees each skill's name and description, and loads the full instructions with skill_view when relevant. Scripts run through the terminal tool.");
+        subtitle.setText("Procedural memory for the agent. The model sees each skill's name and description, and loads the full instructions with skill_view when relevant. Scripts run through the terminal tool.");
         subtitle.setTextColor(color(R.color.ai_text_muted));
         subtitle.setTextSize(12);
         subtitle.setPadding(0, 0, 0, dp(10));
@@ -835,7 +835,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         toolbar.setLayoutParams(toolbarLp);
 
         TextView pathHint = new TextView(this);
-        pathHint.setText("$HOME/.hermes/skills");
+        pathHint.setText("$HOME/.termuxAI/skills");
         pathHint.setTextColor(color(R.color.ai_text_muted));
         pathHint.setTextSize(11);
         pathHint.setTypeface(Typeface.MONOSPACE);
@@ -874,7 +874,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         }
         if (!anyVisible) {
             TextView empty = new TextView(this);
-            empty.setText("No skills installed. Skills live in $HOME/.hermes/skills — one folder per skill with a SKILL.md inside.");
+            empty.setText("No skills installed. Skills live in $HOME/.termuxAI/skills — one folder per skill with a SKILL.md inside.");
             empty.setTextColor(color(R.color.ai_text_muted));
             empty.setTextSize(13);
             empty.setPadding(0, dp(6), 0, dp(16));
@@ -1197,7 +1197,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         text.addView(title);
 
         TextView body = new TextView(this);
-        body.setText("Agent skills (Hermes SKILL.md) — enable, disable, review");
+        body.setText("Agent skills (SKILL.md) — enable, disable, review");
         body.setTextColor(color(R.color.ai_text_muted));
         body.setTextSize(11);
         text.addView(body);

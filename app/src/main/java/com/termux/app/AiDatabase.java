@@ -315,6 +315,20 @@ public final class AiDatabase extends SQLiteOpenHelper {
         return out;
     }
 
+    /** One-time hygiene: older builds persisted the final chat reply twice
+     * (once via the agentMessage/delta emit, once via an explicit append), so
+     * rebuilt transcripts showed every chat reply doubled. Collapses each run
+     * of identical consecutive assistant rows to its first row. */
+    public synchronized void dedupeAssistantMessages() {
+        try {
+            getWritableDatabase().execSQL("DELETE FROM messages WHERE id IN ("
+                + "SELECT m.id FROM messages m WHERE m.role='assistant' AND trim(m.content) != ''"
+                + " AND EXISTS (SELECT 1 FROM messages p WHERE p.session_id = m.session_id AND p.id < m.id"
+                + " AND p.role='assistant' AND p.content = m.content"
+                + " AND NOT EXISTS (SELECT 1 FROM messages g WHERE g.session_id = m.session_id AND g.id > p.id AND g.id < m.id)))");
+        } catch (Exception ignored) {}
+    }
+
     public synchronized void markTurnLease(String sessionKey, String token, int generation) {
         ContentValues v = new ContentValues();
         v.put("session_key", sessionKey);

@@ -31,8 +31,8 @@ import java.util.TreeSet;
  *
  * A skill is a directory containing SKILL.md (YAML frontmatter + markdown
  * body) plus optional support dirs (references/templates/assets/scripts).
- * Skills live at $HOME/.hermes/skills — the same layout desktop Hermes uses,
- * so skills can be synced between the phone and a desktop install with git.
+ * Skills live at $HOME/.termuxAI/skills — one folder per skill, optionally
+ * grouped by a category folder, so they can be synced with git.
  *
  * Progressive disclosure: only a name+description index reaches the system
  * prompt; the full SKILL.md is loaded on demand through skill_view. Scripts
@@ -89,6 +89,11 @@ public final class AiSkillRegistry {
     // ------------------------------------------------------------------
 
     public static File skillsRoot() {
+        return new File(TermuxConstants.TERMUX_HOME_DIR_PATH, ".termuxAI/skills");
+    }
+
+    /** Pre-rename location; migrated once to the .termuxAI root. */
+    private static File legacySkillsRoot() {
         return new File(TermuxConstants.TERMUX_HOME_DIR_PATH, ".hermes/skills");
     }
 
@@ -559,11 +564,43 @@ public final class AiSkillRegistry {
     public static void seedFromAssets(Context context) {
         try {
             File root = skillsRoot();
+            // One-time migration: move the old $HOME/.hermes/skills tree to
+            // $HOME/.termuxAI/skills, preserving user-added skills.
+            File legacy = legacySkillsRoot();
+            if (legacy.isDirectory() && !root.exists()) {
+                root.getParentFile().mkdirs();
+                if (!legacy.renameTo(root)) {
+                    // Rename across mount points fails; fall back to a copy.
+                    copyDir(legacy, root);
+                }
+            }
             root.mkdirs();
             String[] top = context.getAssets().list("skills");
             if (top == null) return;
             for (String entry : top) copyAssetDir(context, "skills/" + entry, new File(root, entry));
             invalidate();
+        } catch (Exception ignored) {}
+    }
+
+    private static void copyDir(File source, File target) {
+        try {
+            File[] children = source.listFiles();
+            if (children == null) return;
+            target.mkdirs();
+            for (File child : children) {
+                File childTarget = new File(target, child.getName());
+                if (child.isDirectory()) copyDir(child, childTarget);
+                else copyFile(child, childTarget);
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private static void copyFile(File source, File target) {
+        try (FileInputStream in = new FileInputStream(source);
+             FileOutputStream out = new FileOutputStream(target)) {
+            byte[] buffer = new byte[8192];
+            int read;
+            while ((read = in.read(buffer)) != -1) out.write(buffer, 0, read);
         } catch (Exception ignored) {}
     }
 

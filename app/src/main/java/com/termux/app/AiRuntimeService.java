@@ -210,11 +210,12 @@ public final class AiRuntimeService extends Service {
         mToolExecutor = new MobileHermesToolExecutor(this);
         createNotificationChannel();
         startForeground(NOTIFICATION_ID, buildNotification());
-        // Seed bundled skills into $HOME/.hermes/skills (existing files win).
+        // Seed bundled skills into $HOME/.termuxAI/skills (existing files win).
         Thread seeder = new Thread(() -> AiSkillRegistry.seedFromAssets(this), "skill-seeder");
         seeder.setDaemon(true);
         seeder.start();
         try { mDatabase.recoverInterruptedTurns(); } catch (Exception ignored) {}
+        try { mDatabase.dedupeAssistantMessages(); } catch (Exception ignored) {}
         restoreLatestActiveRun();
     }
 
@@ -863,7 +864,9 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
             if (ctx() != null) { ctx().record.chatMessagesJson = ctx().chatMessages.toString(); persistRun(); }
 
             if (!hasToolCalls) {
-                if (ctx() != null) mDatabase.appendMessage(ctx().record.id, "assistant", content);
+                // The full reply is already persisted exactly once by emit()
+                // (item/agentMessage/delta) — appending it here as well made
+                // every chat reply appear twice after a transcript rebuild.
                 completeRun();
                 clearActiveTurn();
                 drainQueueIfNeeded(ctx);
