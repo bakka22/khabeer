@@ -880,6 +880,276 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             empty.setPadding(0, dp(6), 0, dp(16));
             mExtensionsList.addView(empty);
         }
+        buildMcpSection();
+    }
+
+    /** MCP servers section (Streamable HTTP, phase 2): list, add, edit,
+     * test, enable, remove. Tool calls on untrusted servers gate through the
+     * approval dialog at dispatch time. */
+    private void buildMcpSection() {
+        TextView title = new TextView(this);
+        title.setText("MCP servers");
+        title.setTextColor(color(R.color.ai_text));
+        title.setTextSize(18);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        title.setPadding(0, dp(24), 0, dp(4));
+        mExtensionsList.addView(title);
+
+        TextView subtitle = new TextView(this);
+        subtitle.setText("Remote tools via Model Context Protocol (Streamable HTTP). The agent calls them like built-in tools under mcp__server__tool names. Untrusted servers ask before every call.");
+        subtitle.setTextColor(color(R.color.ai_text_muted));
+        subtitle.setTextSize(12);
+        subtitle.setPadding(0, 0, 0, dp(10));
+        mExtensionsList.addView(subtitle);
+
+        if (mRuntimeService == null || !mRuntimeBound) {
+            TextView waiting = new TextView(this);
+            waiting.setText("Runtime still starting — MCP management unlocks when it is bound.");
+            waiting.setTextColor(color(R.color.ai_text_muted));
+            waiting.setTextSize(12);
+            waiting.setPadding(0, dp(4), 0, dp(12));
+            mExtensionsList.addView(waiting);
+            return;
+        }
+
+        MaterialButton add = new MaterialButton(this);
+        add.setText("Add server");
+        add.setTextSize(12);
+        add.setAllCaps(false);
+        add.setTextColor(0xFFFFFFFF);
+        add.setBackgroundTintList(android.content.res.ColorStateList.valueOf(color(R.color.ai_accent)));
+        add.setCornerRadius(dp(10));
+        LinearLayout.LayoutParams addLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        addLp.setMargins(0, 0, 0, dp(12));
+        add.setLayoutParams(addLp);
+        add.setOnClickListener(v -> showMcpServerDialog(null));
+        mExtensionsList.addView(add);
+
+        java.util.List<AiDatabase.McpServerRecord> servers = mRuntimeService.getMcpServers();
+        if (servers.isEmpty()) {
+            TextView empty = new TextView(this);
+            empty.setText("No MCP servers configured. Examples: https://mcp.deepwiki.com/mcp (keyless), https://mcp.context7.com/mcp (keyless).");
+            empty.setTextColor(color(R.color.ai_text_muted));
+            empty.setTextSize(12);
+            empty.setPadding(0, dp(2), 0, dp(12));
+            mExtensionsList.addView(empty);
+        }
+        for (AiDatabase.McpServerRecord server : servers) {
+            mExtensionsList.addView(createMcpServerCard(server));
+        }
+    }
+
+    private View createMcpServerCard(AiDatabase.McpServerRecord server) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(14), dp(14), dp(14), dp(14));
+        card.setBackgroundResource(R.drawable.bg_provider_card);
+        card.setClickable(true);
+        card.setFocusable(true);
+        card.setOnLongClickListener(v -> { confirmMcpServerRemove(server); return true; });
+        LinearLayout.LayoutParams cardLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        cardLp.setMargins(0, 0, 0, dp(12));
+        card.setLayoutParams(cardLp);
+
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        card.addView(header);
+
+        LinearLayout text = new LinearLayout(this);
+        text.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams textLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        header.addView(text, textLp);
+
+        TextView nameView = new TextView(this);
+        nameView.setText(server.name);
+        nameView.setTextColor(color(R.color.ai_text));
+        nameView.setTextSize(15);
+        nameView.setTypeface(Typeface.DEFAULT_BOLD);
+        text.addView(nameView);
+
+        TextView urlView = new TextView(this);
+        urlView.setText(server.url == null ? "" : oneLine(server.url, 48));
+        urlView.setTextColor(color(R.color.ai_text_muted));
+        urlView.setTextSize(11);
+        urlView.setTypeface(Typeface.MONOSPACE);
+        urlView.setPadding(0, dp(2), 0, 0);
+        text.addView(urlView);
+
+        boolean connected = "connected".equals(server.lastStatus);
+        boolean failed = server.lastStatus != null && server.lastStatus.startsWith("failed");
+        TextView status = new TextView(this);
+        int toolCount = 0;
+        try {
+            JSONArray cached = server.lastToolsJson == null ? null : new JSONArray(server.lastToolsJson);
+            toolCount = cached == null ? 0 : cached.length();
+        } catch (Exception ignored) {}
+        String statusText = !server.enabled ? "disabled"
+            : connected ? "connected · " + toolCount + " tools" + ("trusted".equals(server.trust) ? " · trusted" : "")
+            : failed ? server.lastStatus
+            : server.lastStatus == null ? "not tested yet" : server.lastStatus;
+        status.setText(statusText);
+        status.setTextColor(color(!server.enabled || failed ? R.color.ai_warning
+            : connected ? R.color.ai_success : R.color.ai_text_muted));
+        status.setTextSize(11);
+        status.setPadding(0, dp(4), 0, 0);
+        text.addView(status);
+
+        android.widget.Switch toggle = new android.widget.Switch(this);
+        toggle.setChecked(server.enabled);
+        toggle.setThumbTintList(android.content.res.ColorStateList.valueOf(color(R.color.ai_accent)));
+        toggle.setOnClickListener(v -> {
+            boolean enable = !server.enabled;
+            AiDatabase.McpServerRecord fresh = mRuntimeService.getMcpServer(server.name);
+            if (fresh != null) {
+                fresh.enabled = enable;
+                fresh.lastStatus = enable ? fresh.lastStatus : "disabled";
+                mRuntimeService.saveMcpServer(fresh);
+                mRuntimeService.refreshMcpServer(server.name);
+                setStatus(enable ? "MCP '" + server.name + "' enabled." : "MCP '" + server.name + "' disabled.", false);
+            }
+            refreshExtensionsPage();
+        });
+        header.addView(toggle);
+
+        LinearLayout buttons = new LinearLayout(this);
+        buttons.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams buttonsLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        buttonsLp.setMargins(0, dp(8), 0, 0);
+        buttons.setLayoutParams(buttonsLp);
+
+        MaterialButton test = new MaterialButton(this);
+        test.setText("Test");
+        test.setTextSize(12);
+        test.setAllCaps(false);
+        test.setStrokeColor(android.content.res.ColorStateList.valueOf(color(R.color.ai_border)));
+        test.setBackgroundTintList(android.content.res.ColorStateList.valueOf(color(R.color.ai_surface)));
+        test.setTextColor(color(R.color.ai_text));
+        test.setCornerRadius(dp(10));
+        test.setOnClickListener(v -> {
+            setStatus("Testing MCP '" + server.name + "'…", false);
+            mRuntimeService.testMcpServer(server.name);
+        });
+        buttons.addView(test);
+
+        MaterialButton edit = new MaterialButton(this);
+        edit.setText("Edit");
+        edit.setTextSize(12);
+        edit.setAllCaps(false);
+        edit.setStrokeColor(android.content.res.ColorStateList.valueOf(color(R.color.ai_border)));
+        edit.setBackgroundTintList(android.content.res.ColorStateList.valueOf(color(R.color.ai_surface)));
+        edit.setTextColor(color(R.color.ai_text));
+        edit.setCornerRadius(dp(10));
+        LinearLayout.LayoutParams editLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        editLp.setMargins(dp(8), 0, 0, 0);
+        edit.setLayoutParams(editLp);
+        edit.setOnClickListener(v -> showMcpServerDialog(server.name));
+        buttons.addView(edit);
+
+        card.addView(buttons);
+        card.setOnClickListener(v -> showMcpServerDialog(server.name));
+        return card;
+    }
+
+    private void confirmMcpServerRemove(AiDatabase.McpServerRecord server) {
+        new MaterialAlertDialogBuilder(this)
+            .setTitle("Remove MCP server")
+            .setMessage("Remove '" + server.name + "' and its saved token? Its tools stop being offered to the agent.")
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton("Remove", (dialog, which) -> {
+                mRuntimeService.deleteMcpServer(server.name);
+                mRuntimeService.onMcpServerDeleted(server.name);
+                refreshExtensionsPage();
+            })
+            .show();
+    }
+
+    /** Add/edit dialog for an MCP server (Streamable HTTP). */
+    private void showMcpServerDialog(@Nullable String existingName) {
+        AiDatabase.McpServerRecord existing = existingName == null ? null : mRuntimeService.getMcpServer(existingName);
+        LinearLayout form = new LinearLayout(this);
+        form.setOrientation(LinearLayout.VERTICAL);
+        int pad = dp(20);
+
+        EditText nameInput = new EditText(this);
+        nameInput.setSingleLine(true);
+        nameInput.setHint("Name (e.g. deepwiki)");
+        nameInput.setText(existing == null ? "" : existing.name);
+        nameInput.setEnabled(existing == null);
+        nameInput.setTextColor(color(R.color.ai_text));
+
+        EditText urlInput = new EditText(this);
+        urlInput.setSingleLine(true);
+        urlInput.setHint("https://server.example/mcp");
+        urlInput.setText(existing == null ? "" : existing.url == null ? "" : existing.url);
+        urlInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        urlInput.setTextColor(color(R.color.ai_text));
+
+        android.widget.CheckBox useToken = new android.widget.CheckBox(this);
+        useToken.setText("Authorization: Bearer token");
+        useToken.setTextColor(color(R.color.ai_text));
+        useToken.setChecked(existing != null && "header".equals(existing.authType));
+
+        EditText tokenInput = new EditText(this);
+        tokenInput.setSingleLine(true);
+        tokenInput.setHint("Bearer token (stored encrypted)");
+        tokenInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        tokenInput.setText(existing == null || !"header".equals(existing.authType)
+            ? "" : mProviderConfig.getMcpServerToken(existing.name));
+        tokenInput.setTextColor(color(R.color.ai_text));
+        tokenInput.setVisibility(useToken.isChecked() ? View.VISIBLE : View.GONE);
+        useToken.setOnCheckedChangeListener((b, checked) -> tokenInput.setVisibility(checked ? View.VISIBLE : View.GONE));
+
+        android.widget.CheckBox trusted = new android.widget.CheckBox(this);
+        trusted.setText("Trusted — skip approval for this server's tools");
+        trusted.setTextColor(color(R.color.ai_text));
+        trusted.setChecked(existing != null && "trusted".equals(existing.trust));
+
+        TextView warning = new TextView(this);
+        warning.setText("Only add servers you trust. Untrusted servers ask for approval on every tool call.");
+        warning.setTextColor(color(R.color.ai_text_muted));
+        warning.setTextSize(11);
+        warning.setPadding(0, dp(6), 0, 0);
+
+        form.addView(nameInput, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        form.addView(urlInput, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        form.addView(useToken);
+        form.addView(tokenInput);
+        form.addView(trusted);
+        form.addView(warning);
+
+        new MaterialAlertDialogBuilder(this)
+            .setTitle(existing == null ? "Add MCP server" : "Edit " + existing.name)
+            .setView(form)
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton("Save", (dialog, which) -> {
+                String name = nameInput.getText().toString().trim().replaceAll("[^A-Za-z0-9_-]", "_").toLowerCase();
+                String url = urlInput.getText().toString().trim();
+                if (name.isEmpty() || !url.startsWith("http")) {
+                    showError("MCP server needs a name and an http(s) URL.");
+                    return;
+                }
+                AiDatabase.McpServerRecord record = existing == null ? new AiDatabase.McpServerRecord() : existing;
+                record.name = name;
+                record.url = url;
+                boolean withToken = useToken.isChecked();
+                record.authType = withToken ? "header" : "none";
+                record.trust = trusted.isChecked() ? "trusted" : "untrusted";
+                if (record.lastStatus != null && record.lastStatus.startsWith("failed")) record.lastStatus = null;
+                mRuntimeService.saveMcpServer(record);
+                mProviderConfig.setMcpServerToken(name, withToken ? tokenInput.getText().toString().trim() : null);
+                mRuntimeService.refreshMcpServer(name);
+                setStatus("MCP '" + name + "' saved. Testing…", false);
+                mUiHandler.postDelayed(() -> {
+                    refreshExtensionsPage();
+                    mRuntimeService.testMcpServer(name);
+                }, 200);
+            })
+            .show();
     }
 
     private View createSkillCard(AiSkillRegistry.Skill skill, boolean disabled) {
@@ -1783,6 +2053,14 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             appendToolOutput(payload.optString("text"));
         } else if (method.contains("requestApproval")) {
             showApproval(payload);
+        } else if ("mcp/status".equals(method)) {
+            if (mExtensionsPage != null && mExtensionsPage.getVisibility() == View.VISIBLE) {
+                String server = payload == null ? "" : payload.optString("server", "");
+                setStatus(payload != null && payload.optBoolean("ok")
+                    ? "MCP '" + server + "' connected."
+                    : "MCP '" + server + "' failed: " + payload.optString("error", ""), !payload.optBoolean("ok"));
+                refreshExtensionsPage();
+            }
         } else {
             appendEvent(method, payload.toString());
         }

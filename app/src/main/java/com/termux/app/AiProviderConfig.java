@@ -185,6 +185,18 @@ public final class AiProviderConfig {
             model == null ? "" : model.trim()).apply();
     }
 
+    // ---- MCP server auth tokens (header auth), Keystore-encrypted ----
+
+    private static final String KEY_MCP_TOKEN = "mcp_token_";
+
+    public String getMcpServerToken(String serverName) {
+        return getSecret(KEY_MCP_TOKEN + (serverName == null ? "" : serverName));
+    }
+
+    public void setMcpServerToken(String serverName, String token) {
+        setSecret(KEY_MCP_TOKEN + (serverName == null ? "" : serverName), token);
+    }
+
     private String getSecret(String storageKey) {
         String encoded = mPrefs.getString(storageKey, "");
         if (TextUtils.isEmpty(encoded)) return null;

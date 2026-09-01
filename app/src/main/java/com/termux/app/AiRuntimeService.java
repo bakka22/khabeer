@@ -76,6 +76,7 @@ public final class AiRuntimeService extends Service {
     private AiDatabase mDatabase;
     private MobileHermesToolExecutor mToolExecutor;
     private AiProviderConfig mProviderConfig;
+    private AiMcpRegistry mMcpRegistry;
     /** Live sessions: each runs its own turns on its own worker thread, with
      * its own state machine and transcript — parallel sessions at once. */
     private final Map<String, RunContext> mRuns = new HashMap<>();
@@ -208,12 +209,16 @@ public final class AiRuntimeService extends Service {
         mDatabase = new AiDatabase(this);
         mProviderConfig = new AiProviderConfig(this);
         mToolExecutor = new MobileHermesToolExecutor(this);
+        mMcpRegistry = new AiMcpRegistry(mProviderConfig);
         createNotificationChannel();
         startForeground(NOTIFICATION_ID, buildNotification());
         // Seed bundled skills into $HOME/.termuxAI/skills (existing files win).
         Thread seeder = new Thread(() -> AiSkillRegistry.seedFromAssets(this), "skill-seeder");
         seeder.setDaemon(true);
         seeder.start();
+        // Late-binding MCP discovery (Hermes mcp_startup): never blocks a
+        // turn; discovered tools appear in the model's array on the next one.
+        mMcpRegistry.probeStaleAsync(mDatabase);
         try { mDatabase.recoverInterruptedTurns(); } catch (Exception ignored) {}
         try { mDatabase.dedupeAssistantMessages(); } catch (Exception ignored) {}
         restoreLatestActiveRun();
@@ -1208,14 +1213,24 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
                 .put("parameters", flat.getJSONObject("parameters")));
     }
 
-    /** Every tool the model can call: terminal + skills (Hermes merges all
-     * tools flat into one array — no wrapper tool). */
+    /** Every tool the model can call: terminal + skills + MCP tools (Hermes
+     * merges all tools flat into one array — no wrapper tool). */
     private JSONArray modelTools(boolean chatShape) throws Exception {
         JSONArray tools = new JSONArray();
         tools.put(chatShape ? terminalToolForChat() : terminalTool());
         if (AiSkillRegistry.promptSection() != null) {
             tools.put(chatShape ? chatShape(skillsListTool()) : skillsListTool());
             tools.put(chatShape ? chatShape(skillViewTool()) : skillViewTool());
+        }
+        if (mMcpRegistry != null) {
+            for (AiMcpRegistry.ToolDef def : mMcpRegistry.toolsForModel(mDatabase)) {
+                JSONObject flat = new JSONObject()
+                    .put("type", "function")
+                    .put("name", def.registryName)
+                    .put("description", TextUtils.isEmpty(def.description) ? "MCP tool." : def.description)
+                    .put("parameters", def.inputSchema);
+                tools.put(chatShape ? chatShape(flat) : flat);
+            }
         }
         return tools;
     }
@@ -1263,6 +1278,8 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         String output;
         if (isSkillsTool(name)) {
             output = runSkillsTool(name, args);
+        } else if (name != null && name.startsWith(AiMcpRegistry.TOOL_PREFIX)) {
+            output = runMcpToolCall(name, args, approvalPolicy);
         } else if (!"terminal".equals(name)) {
             output = new JSONObject().put("error", "Unknown tool: " + name).toString();
         } else {
@@ -1291,6 +1308,8 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         String output;
         if (isSkillsTool(name)) {
             output = runSkillsTool(name, args);
+        } else if (name != null && name.startsWith(AiMcpRegistry.TOOL_PREFIX)) {
+            output = runMcpToolCall(name, args, approvalPolicy);
         } else if (!"terminal".equals(name)) {
             output = new JSONObject().put("error", "Unknown tool: " + name).toString();
         } else {
@@ -1344,6 +1363,114 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         } catch (Exception e) {
             return "{\"success\":false,\"error\":\"skill tool error\"}";
         }
+    }
+
+    /**
+     * MCP tool dispatch (Hermes mcp tool handlers). Untrusted servers gate
+     * through the approval dialog BEFORE any network call — fail-closed, the
+     * same trust model Hermes applies to write-capable tools.
+     */
+    private String runMcpToolCall(String registryName, JSONObject args, @Nullable String approvalPolicy) {
+        AiMcpRegistry.ToolDef def = mMcpRegistry.findTool(registryName);
+        if (def == null) {
+            return skillsToolError("Unknown MCP tool: " + registryName
+                + ". Re-test the server in Skills & extensions to refresh its tool list.");
+        }
+        AiDatabase.McpServerRecord server = mDatabase.getMcpServer(def.serverName);
+        if (server == null) {
+            return skillsToolError("MCP server '" + def.serverName + "' is not configured anymore.");
+        }
+        emit("tool/callStarted", json("name", registryName, "command", def.serverName + " → " + def.toolName));
+
+        if (!"trusted".equals(server.trust) && !"never".equals(approvalPolicy)) {
+            String summary = def.serverName + " → " + def.toolName + "\n" + truncateForApproval(args.toString());
+            boolean approved;
+            try {
+                approved = requestApproval(summary, server.url);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return skillsToolError("MCP call interrupted.");
+            }
+            if (!approved) {
+                String denied = skillsToolError("User denied the MCP tool call.");
+                emit("item/commandExecution/outputDelta", json("text", "denied", "command", def.toolName));
+                return denied;
+            }
+        }
+
+        String output = mMcpRegistry.callTool(mDatabase, server, def.toolName, args, server.timeoutSeconds);
+        emit("item/commandExecution/outputDelta", json("text", mcpResultSummary(output), "command", def.toolName));
+        return output;
+    }
+
+    private String truncateForApproval(String text) {
+        if (text == null) return "";
+        return text.length() <= 300 ? text : text.substring(0, 299) + "…";
+    }
+
+    private String mcpResultSummary(String output) {
+        try {
+            JSONObject result = new JSONObject(output);
+            if (result.has("error")) {
+                String error = result.optString("error", "failed");
+                return "error → " + (error.length() > 200 ? error.substring(0, 199) + "…" : error);
+            }
+            String body = result.optString("result", "");
+            return "(" + body.length() + " chars)";
+        } catch (Exception e) {
+            return "done";
+        }
+    }
+
+    /** UI: fire-and-forget probe of one server; status lands in the DB and
+     * reaches the page via the mcp/status listener event. */
+    public void testMcpServer(String name) {
+        AiDatabase.McpServerRecord server = mDatabase.getMcpServer(name);
+        if (server == null || mMcpRegistry == null) return;
+        Thread thread = new Thread(() -> {
+            String error = mMcpRegistry.probe(mDatabase, server);
+            JSONObject payload = new JSONObject();
+            try {
+                payload.put("server", name);
+                payload.put("ok", error == null);
+                if (error != null) payload.put("error", error);
+            } catch (Exception ignored) {}
+            mHandler.post(() -> {
+                for (Listener listener : new ArrayList<>(mListeners))
+                    listener.onProtocolEvent(null, "mcp/status", payload);
+            });
+        }, "mcp-test");
+        thread.setDaemon(true);
+        thread.start();
+    }
+
+    /** UI: a server was added/edited/enabled — drop cached state and probe. */
+    public void refreshMcpServer(String name) {
+        if (mMcpRegistry == null) return;
+        mMcpRegistry.dropServer(name);
+        mMcpRegistry.probeStaleAsync(mDatabase);
+    }
+
+    /** UI: a server was removed — drop cached state. */
+    public void onMcpServerDeleted(String name) {
+        if (mMcpRegistry != null) mMcpRegistry.dropServer(name);
+    }
+
+    public java.util.List<AiDatabase.McpServerRecord> getMcpServers() {
+        return mDatabase.getMcpServers();
+    }
+
+    @Nullable
+    public AiDatabase.McpServerRecord getMcpServer(String name) {
+        return mDatabase.getMcpServer(name);
+    }
+
+    public void saveMcpServer(AiDatabase.McpServerRecord record) {
+        mDatabase.saveMcpServer(record);
+    }
+
+    public void deleteMcpServer(String name) {
+        mDatabase.deleteMcpServer(name);
     }
 
     /** Short UI-facing summary — the full tool JSON goes to the model, not the bubble. */

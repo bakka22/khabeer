@@ -19,7 +19,7 @@ import java.util.List;
 public final class AiDatabase extends SQLiteOpenHelper {
 
     private static final String DATABASE_NAME = "termux_ai_runtime.db";
-    private static final int DATABASE_VERSION = 7;
+    private static final int DATABASE_VERSION = 8;
 
     public static final class RunRecord {
         public String id;
@@ -55,6 +55,95 @@ public final class AiDatabase extends SQLiteOpenHelper {
     @Override
     public void onCreate(SQLiteDatabase db) {
         createV4Schema(db);
+        createV8Schema(db);
+    }
+
+    private void createV8Schema(SQLiteDatabase db) {
+        db.execSQL("CREATE TABLE IF NOT EXISTS mcp_servers (" +
+            "name TEXT PRIMARY KEY," +
+            "url TEXT," +
+            "auth_type TEXT DEFAULT 'none'," +
+            "timeout_seconds INTEGER DEFAULT 60," +
+            "enabled INTEGER DEFAULT 1," +
+            "trust TEXT DEFAULT 'untrusted'," +
+            "last_status TEXT," +
+            "last_tools_json TEXT," +
+            "updated_at INTEGER DEFAULT 0)");
+    }
+
+    /** One MCP server configuration (Streamable HTTP transport). Auth tokens
+     * never live here — they are Keystore-encrypted via AiProviderConfig. */
+    public static final class McpServerRecord {
+        public String name;
+        public String url;
+        public String authType = "none";   // none | header
+        public int timeoutSeconds = 60;
+        public boolean enabled = true;
+        public String trust = "untrusted"; // untrusted | trusted
+        public String lastStatus;          // connected | disabled | failed: <msg>
+        public String lastToolsJson;       // cached tool list JSON
+        public long updatedAt;
+    }
+
+    public synchronized java.util.List<McpServerRecord> getMcpServers() {
+        java.util.List<McpServerRecord> out = new ArrayList<>();
+        Cursor c = getReadableDatabase().query("mcp_servers", null, null, null, null, null, "name ASC");
+        try { while (c.moveToNext()) out.add(mcpServerFromCursor(c)); } finally { c.close(); }
+        return out;
+    }
+
+    @Nullable
+    public synchronized McpServerRecord getMcpServer(String name) {
+        if (name == null) return null;
+        Cursor c = getReadableDatabase().query("mcp_servers", null, "name=?", new String[]{name}, null, null, null);
+        try { return c.moveToFirst() ? mcpServerFromCursor(c) : null; } finally { c.close(); }
+    }
+
+    private McpServerRecord mcpServerFromCursor(Cursor c) {
+        McpServerRecord r = new McpServerRecord();
+        r.name = c.getString(c.getColumnIndexOrThrow("name"));
+        r.url = c.getString(c.getColumnIndexOrThrow("url"));
+        r.authType = c.getString(c.getColumnIndexOrThrow("auth_type"));
+        r.timeoutSeconds = c.getInt(c.getColumnIndexOrThrow("timeout_seconds"));
+        r.enabled = c.getInt(c.getColumnIndexOrThrow("enabled")) == 1;
+        r.trust = c.getString(c.getColumnIndexOrThrow("trust"));
+        r.lastStatus = c.getString(c.getColumnIndexOrThrow("last_status"));
+        r.lastToolsJson = c.getString(c.getColumnIndexOrThrow("last_tools_json"));
+        r.updatedAt = c.getLong(c.getColumnIndexOrThrow("updated_at"));
+        return r;
+    }
+
+    public synchronized void saveMcpServer(McpServerRecord r) {
+        ContentValues v = new ContentValues();
+        v.put("name", r.name);
+        v.put("url", r.url);
+        v.put("auth_type", r.authType);
+        v.put("timeout_seconds", r.timeoutSeconds);
+        v.put("enabled", r.enabled ? 1 : 0);
+        v.put("trust", r.trust);
+        v.put("last_status", r.lastStatus);
+        v.put("last_tools_json", r.lastToolsJson);
+        v.put("updated_at", System.currentTimeMillis());
+        getWritableDatabase().insertWithOnConflict("mcp_servers", null, v, SQLiteDatabase.CONFLICT_REPLACE);
+    }
+
+    public synchronized void deleteMcpServer(String name) {
+        getWritableDatabase().delete("mcp_servers", "name=?", new String[]{name});
+    }
+
+    public synchronized void setMcpServerEnabled(String name, boolean enabled) {
+        ContentValues v = new ContentValues();
+        v.put("enabled", enabled ? 1 : 0);
+        v.put("updated_at", System.currentTimeMillis());
+        getWritableDatabase().update("mcp_servers", v, "name=?", new String[]{name});
+    }
+
+    public synchronized void setMcpServerStatus(String name, String status, @Nullable String toolsJson) {
+        ContentValues v = new ContentValues();
+        v.put("last_status", status);
+        if (toolsJson != null) v.put("last_tools_json", toolsJson);
+        v.put("updated_at", System.currentTimeMillis());
+        getWritableDatabase().update("mcp_servers", v, "name=?", new String[]{name});
     }
 
     private void createV4Schema(SQLiteDatabase db) {
@@ -171,6 +260,9 @@ public final class AiDatabase extends SQLiteOpenHelper {
         }
         if (oldVersion < 7) {
             try { db.execSQL("ALTER TABLE runs ADD COLUMN route TEXT"); } catch (Exception ignored) {}
+        }
+        if (oldVersion < 8) {
+            createV8Schema(db);
         }
         if (oldVersion < 6) {
             // Title provenance (Hermes title_source): 'message' = derived from
