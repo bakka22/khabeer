@@ -107,6 +107,9 @@ public final class AiRuntimeService extends Service {
         volatile boolean stopRequested;
         volatile boolean lastTurnInterrupted;
         String steerText;
+        /** skill_view repeat-view dedup: "name|file" -> "mtime:size" (Hermes
+         * repeat-view dedup — unchanged re-reads return a stub, not content). */
+        final HashMap<String, String> skillViewCache = new HashMap<>();
 
         RunContext(AiDatabase.RunRecord record) { this.record = record; }
     }
@@ -207,6 +210,10 @@ public final class AiRuntimeService extends Service {
         mToolExecutor = new MobileHermesToolExecutor(this);
         createNotificationChannel();
         startForeground(NOTIFICATION_ID, buildNotification());
+        // Seed bundled skills into $HOME/.hermes/skills (existing files win).
+        Thread seeder = new Thread(() -> AiSkillRegistry.seedFromAssets(this), "skill-seeder");
+        seeder.setDaemon(true);
+        seeder.start();
         try { mDatabase.recoverInterruptedTurns(); } catch (Exception ignored) {}
         restoreLatestActiveRun();
     }
@@ -664,8 +671,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
 
         JSONArray input;
         try {
-            if (ctx().chatMessages == null)
-                ctx().chatMessages = new JSONArray().put(json("role", "system", "content", systemInstructions()));
+            refreshSystemMessage();
             sanitizeReplayHistory();
             ctx().chatMessages.put(json("role", "user", "content", prompt));
             if (ctx() != null) { ctx().record.chatMessagesJson = ctx().chatMessages.toString(); persistRun(); }
@@ -829,7 +835,8 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
     private void executeChatCompletionsTurn(RunContext ctx, String providerId, String baseUrl, String apiKey, String workspace,
                                             String prompt, String model, @Nullable String approvalPolicy) throws Exception {
         if (ctx().chatMessages == null)
-            ctx().chatMessages = new JSONArray().put(json("role", "system", "content", systemInstructions()));
+            ctx().chatMessages = new JSONArray();
+        refreshSystemMessage();
         sanitizeReplayHistory();
         ctx().chatMessages.put(json("role", "user", "content", prompt));
         if (ctx() != null) { ctx().record.chatMessagesJson = ctx().chatMessages.toString(); persistRun(); }
@@ -925,7 +932,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         JSONObject body = new JSONObject()
             .put("model", model)
             .put("messages", messages)
-            .put("tools", new JSONArray().put(terminalToolForChat()))
+            .put("tools", modelTools(true))
             .put("tool_choice", "auto")
             .put("stream", true);
 
@@ -959,7 +966,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         JSONObject body = new JSONObject()
             .put("model", model)
             .put("messages", messages)
-            .put("tools", new JSONArray().put(terminalToolForChat()))
+            .put("tools", modelTools(true))
             .put("tool_choice", "auto");
 
         HttpURLConnection connection = (HttpURLConnection) new URL(chatCompletionsUrl(baseUrl)).openConnection();
@@ -1139,7 +1146,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
             .put("model", model)
             .put("instructions", systemInstructions())
             .put("input", input)
-            .put("tools", new JSONArray().put(terminalTool()))
+            .put("tools", modelTools(false))
             .put("tool_choice", "auto");
         if (!TextUtils.isEmpty(effort)) body.put("reasoning", new JSONObject().put("effort", effort));
 
@@ -1185,22 +1192,60 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
     }
 
     private JSONObject terminalToolForChat() throws Exception {
+        return chatShape(terminalTool());
+    }
+
+    /** Wraps a flat Responses-style tool schema into the chat-completions nested shape. */
+    private JSONObject chatShape(JSONObject flat) throws Exception {
         return new JSONObject()
             .put("type", "function")
             .put("function", new JSONObject()
-                .put("name", "terminal")
-                .put("description", "Run one shell command in the selected Termux project folder. Use this for file inspection, builds, tests, package commands, and local automation.")
-                .put("parameters", new JSONObject()
-                    .put("type", "object")
-                    .put("additionalProperties", false)
-                    .put("properties", new JSONObject()
-                        .put("command", new JSONObject()
-                            .put("type", "string")
-                            .put("description", "The shell command to run."))
-                        .put("timeout_seconds", new JSONObject()
-                            .put("type", "integer")
-                            .put("description", "Timeout from 1 to 1200 seconds.")))
-                    .put("required", new JSONArray().put("command"))));
+                .put("name", flat.getString("name"))
+                .put("description", flat.getString("description"))
+                .put("parameters", flat.getJSONObject("parameters")));
+    }
+
+    /** Every tool the model can call: terminal + skills (Hermes merges all
+     * tools flat into one array — no wrapper tool). */
+    private JSONArray modelTools(boolean chatShape) throws Exception {
+        JSONArray tools = new JSONArray();
+        tools.put(chatShape ? terminalToolForChat() : terminalTool());
+        if (AiSkillRegistry.promptSection() != null) {
+            tools.put(chatShape ? chatShape(skillsListTool()) : skillsListTool());
+            tools.put(chatShape ? chatShape(skillViewTool()) : skillViewTool());
+        }
+        return tools;
+    }
+
+    private JSONObject skillsListTool() throws Exception {
+        return new JSONObject()
+            .put("type", "function")
+            .put("name", "skills_list")
+            .put("description", "List available skills (name + description). Use skill_view(name) to load full content.")
+            .put("parameters", new JSONObject()
+                .put("type", "object")
+                .put("properties", new JSONObject()
+                    .put("category", new JSONObject()
+                        .put("type", "string")
+                        .put("description", "Optional category filter to narrow results")))
+                .put("required", new JSONArray()));
+    }
+
+    private JSONObject skillViewTool() throws Exception {
+        return new JSONObject()
+            .put("type", "function")
+            .put("name", "skill_view")
+            .put("description", "Skills allow for loading information about specific tasks and workflows, as well as scripts and templates. Load a skill's full content or access its linked files (references, templates, scripts). First call returns SKILL.md content plus a 'linked_files' object showing available references/templates/scripts. To access those, call again with file_path.")
+            .put("parameters", new JSONObject()
+                .put("type", "object")
+                .put("properties", new JSONObject()
+                    .put("name", new JSONObject()
+                        .put("type", "string")
+                        .put("description", "The skill name (use skills_list to see available skills)."))
+                    .put("file_path", new JSONObject()
+                        .put("type", "string")
+                        .put("description", "OPTIONAL: Path to a linked file within the skill (e.g., 'references/api.md', 'templates/config.yaml', 'scripts/validate.py'). Omit to get the main SKILL.md content.")))
+                .put("required", new JSONArray().put("name")));
     }
 
     private JSONObject executeChatToolCall(JSONObject toolCall, String workspace,
@@ -1213,7 +1258,9 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         int timeout = args.optInt("timeout_seconds", DEFAULT_TOOL_TIMEOUT_SECONDS);
 
         String output;
-        if (!"terminal".equals(name)) {
+        if (isSkillsTool(name)) {
+            output = runSkillsTool(name, args);
+        } else if (!"terminal".equals(name)) {
             output = new JSONObject().put("error", "Unknown tool: " + name).toString();
         } else {
             emit("tool/callStarted", json("name", name, "command", command));
@@ -1238,24 +1285,80 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         String command = args.optString("command", "");
         int timeout = args.optInt("timeout_seconds", DEFAULT_TOOL_TIMEOUT_SECONDS);
 
-        if (!"terminal".equals(name)) {
-            return functionOutput(callId, new JSONObject().put("error", "Unknown tool: " + name).toString());
-        }
+        String output;
+        if (isSkillsTool(name)) {
+            output = runSkillsTool(name, args);
+        } else if (!"terminal".equals(name)) {
+            output = new JSONObject().put("error", "Unknown tool: " + name).toString();
+        } else {
+            emit("tool/callStarted", json("name", name, "command", command));
+            emit("item/commandExecution/outputDelta",
+                json("text", "$ " + command + "\n", "command", command));
 
-        emit("tool/callStarted", json("name", name, "command", command));
-        emit("item/commandExecution/outputDelta",
-            json("text", "$ " + command + "\n", "command", command));
+            boolean approved = "never".equals(approvalPolicy) || requestApproval(command, workspace);
+            if (!approved) {
+                output = new JSONObject().put("error", "User denied terminal command.").toString();
+                emit("item/commandExecution/outputDelta", json("text", output + "\n", "command", command));
+                return functionOutput(callId, output);
+            }
 
-        boolean approved = "never".equals(approvalPolicy) || requestApproval(command, workspace);
-        if (!approved) {
-            String output = new JSONObject().put("error", "User denied terminal command.").toString();
+            output = mToolExecutor.runCommand(workspace, command, timeout);
             emit("item/commandExecution/outputDelta", json("text", output + "\n", "command", command));
-            return functionOutput(callId, output);
         }
-
-        String output = mToolExecutor.runCommand(workspace, command, timeout);
-        emit("item/commandExecution/outputDelta", json("text", output + "\n", "command", command));
         return functionOutput(callId, output);
+    }
+
+    private boolean isSkillsTool(String name) {
+        return "skills_list".equals(name) || "skill_view".equals(name);
+    }
+
+    /** Skills tools run locally (no approval, no shell): read-only filesystem access. */
+    private String runSkillsTool(String name, JSONObject args) {
+        String displayName = "skill_view".equals(name)
+            ? args.optString("name", "skill_view") : "skills_list";
+        emit("tool/callStarted", json("name", name, "command", displayName));
+        String output;
+        try {
+            if ("skills_list".equals(name)) {
+                String category = args.optString("category", "");
+                output = AiSkillRegistry.listTool(TextUtils.isEmpty(category) ? null : category);
+            } else {
+                String filePath = args.has("file_path") && !args.isNull("file_path")
+                    ? args.optString("file_path") : null;
+                output = AiSkillRegistry.viewTool(args.optString("name", ""),
+                    filePath, ctx() == null ? null : ctx().skillViewCache);
+            }
+        } catch (Exception e) {
+            output = skillsToolError("skill tool failed: " + e.getMessage());
+        }
+        emit("item/commandExecution/outputDelta", json("text", skillsToolSummary(name, output), "command", displayName));
+        return output;
+    }
+
+    private String skillsToolError(String message) {
+        try {
+            return new JSONObject().put("success", false).put("error", message).toString();
+        } catch (Exception e) {
+            return "{\"success\":false,\"error\":\"skill tool error\"}";
+        }
+    }
+
+    /** Short UI-facing summary — the full tool JSON goes to the model, not the bubble. */
+    private String skillsToolSummary(String name, String output) {
+        try {
+            JSONObject result = new JSONObject(output);
+            if (!result.optBoolean("success", false)) {
+                String error = result.optString("error", "failed");
+                return name + " → " + (error.length() > 200 ? error.substring(0, 199) + "…" : error);
+            }
+            if (result.optBoolean("dedup", false)) return name + " → unchanged (already in context)";
+            if ("skills_list".equals(name)) return name + " → " + result.optInt("count", 0) + " skills";
+            String loaded = result.optString("name", "");
+            String content = result.optString("content", "");
+            return name + " → " + loaded + " (" + content.length() + " chars)";
+        } catch (Exception e) {
+            return name + " → done";
+        }
     }
 
     private boolean requestApproval(String command, String workspace) throws InterruptedException {
@@ -1385,9 +1488,39 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
     }
 
     private String systemInstructions() {
-        return "You are a native mobile agent running inside Termux on Android. "
-            + "Use the terminal tool deliberately, explain what you are doing, and prefer small inspect-before-change steps. "
-            + "Never claim a command succeeded unless the terminal output confirms it.";
+        StringBuilder sb = new StringBuilder();
+        sb.append("You are a native mobile agent running inside Termux on Android. ")
+          .append("Use the terminal tool deliberately, explain what you are doing, and prefer small inspect-before-change steps. ")
+          .append("Never claim a command succeeded unless the terminal output confirms it.");
+        String skills = AiSkillRegistry.promptSection();
+        if (!TextUtils.isEmpty(skills)) sb.append("\n\n").append(skills);
+        return sb.toString();
+    }
+
+    /**
+     * Rebuilds the system message at the start of every turn: new skills,
+     * toggles and provider changes must reach EXISTING sessions too — the
+     * persisted transcript carries a frozen copy otherwise (Hermes rebuilds
+     * its prompt per turn behind a cache for the same reason).
+     */
+    private void refreshSystemMessage() {
+        if (ctx() == null) return;
+        try {
+            String instructions = systemInstructions();
+            JSONArray messages = ctx().chatMessages;
+            if (messages == null) {
+                ctx().chatMessages = new JSONArray().put(json("role", "system", "content", instructions));
+                return;
+            }
+            JSONObject first = messages.optJSONObject(0);
+            if (first != null && "system".equals(first.optString("role"))) {
+                first.put("content", instructions);
+            } else {
+                JSONArray updated = new JSONArray().put(json("role", "system", "content", instructions));
+                for (int i = 0; i < messages.length(); i++) updated.put(messages.opt(i));
+                ctx().chatMessages = updated;
+            }
+        } catch (Exception ignored) {}
     }
 
     private JSONObject json(String key, String value) {

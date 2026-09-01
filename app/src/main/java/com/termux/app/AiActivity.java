@@ -115,6 +115,9 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     private boolean mPickingSessionProvider;
     private com.google.android.material.button.MaterialButton mUseSavedConfigButton;
     private View mOpenCodePage;
+    private View mExtensionsPage;
+    private LinearLayout mExtensionsList;
+    private MaterialButton mExtensionsButton;
     private LinearLayout mArchivedRuns;
     private View mProvidersHeader;
     private View mSessionsHeader;
@@ -251,6 +254,12 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             }
             return;
         }
+        if (mExtensionsPage != null && mExtensionsPage.getVisibility() == View.VISIBLE) {
+            mExtensionsPage.setVisibility(View.GONE);
+            mHomePanel.setVisibility(View.VISIBLE);
+            showFeaturedProviders();
+            return;
+        }
         if (mSessionsPage != null && mSessionsPage.getVisibility() == View.VISIBLE) {
             mSessionsPage.setVisibility(View.GONE);
             mHomePanel.setVisibility(View.VISIBLE);
@@ -326,6 +335,9 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mSessionsList = findViewById(R.id.ai_sessions_list);
         mProviderButton = findViewById(R.id.ai_provider_button);
         mOpenCodePage = findViewById(R.id.ai_opencode_page);
+        mExtensionsPage = findViewById(R.id.ai_extensions_page);
+        mExtensionsList = findViewById(R.id.ai_extensions_list);
+        mExtensionsButton = findViewById(R.id.ai_extensions_button);
         mArchivedRuns = findViewById(R.id.ai_archived_runs);
         mProvidersHeader = findViewById(R.id.ai_providers_header);
         mSessionsHeader = findViewById(R.id.ai_sessions_header);
@@ -428,6 +440,10 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             openShell();
             if (mDrawer != null) mDrawer.closeDrawer(findViewById(R.id.ai_drawer_panel));
         });
+        if (mExtensionsButton != null) mExtensionsButton.setOnClickListener(view -> {
+            showExtensionsPage();
+            if (mDrawer != null) mDrawer.closeDrawer(findViewById(R.id.ai_drawer_panel));
+        });
         mTerminalButton.setOnClickListener(view -> mTerminalCard.setVisibility(View.GONE));
         mLoginButton.setOnClickListener(view -> showApiKeyDialog());
         mModelButton.setOnClickListener(view -> showModelDialog());
@@ -459,6 +475,8 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mHomePanel.setVisibility(View.GONE);
         mSetupPanel.setVisibility(View.GONE);
         mChatPage.setVisibility(View.GONE);
+        if (mOpenCodePage != null) mOpenCodePage.setVisibility(View.GONE);
+        if (mExtensionsPage != null) mExtensionsPage.setVisibility(View.GONE);
         mSessionsPage.setVisibility(View.VISIBLE);
         mChatTitle.setText("Sessions");
         refreshSessionsPage();
@@ -550,6 +568,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mSetupPanel.setVisibility(View.GONE);
         if (mSessionsPage != null) mSessionsPage.setVisibility(View.GONE);
         if (mOpenCodePage != null) mOpenCodePage.setVisibility(View.GONE);
+        if (mExtensionsPage != null) mExtensionsPage.setVisibility(View.GONE);
         setStatus("New session ready.", false);
     }
 
@@ -636,6 +655,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mSetupPanel.setVisibility(View.GONE);
         mChatPage.setVisibility(View.GONE);
         if (mSessionsPage != null) mSessionsPage.setVisibility(View.GONE);
+        if (mExtensionsPage != null) mExtensionsPage.setVisibility(View.GONE);
         mChatTitle.setText("OpenCode routes");
 
         ScrollView scroll = (ScrollView) findViewById(R.id.ai_opencode_scroll);
@@ -771,6 +791,201 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         button.setLayoutParams(lp);
     }
 
+    /** Skills & extensions page (Hermes skills): list installed skills, toggle
+     * them, and read the full SKILL.md. The skills root is
+     * $HOME/.hermes/skills — drop a folder with a SKILL.md in there (or sync
+     * one from a desktop Hermes install) and it appears here. */
+    private void showExtensionsPage() {
+        if (mExtensionsPage == null) return;
+        mHomePanel.setVisibility(View.GONE);
+        mSetupPanel.setVisibility(View.GONE);
+        mChatPage.setVisibility(View.GONE);
+        if (mSessionsPage != null) mSessionsPage.setVisibility(View.GONE);
+        if (mOpenCodePage != null) mOpenCodePage.setVisibility(View.GONE);
+        mChatTitle.setText("Skills & extensions");
+        refreshExtensionsPage();
+        mExtensionsPage.setVisibility(View.VISIBLE);
+    }
+
+    private void refreshExtensionsPage() {
+        if (mExtensionsList == null) return;
+        mExtensionsList.removeAllViews();
+
+        TextView title = new TextView(this);
+        title.setText("Skills");
+        title.setTextColor(color(R.color.ai_text));
+        title.setTextSize(20);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        title.setPadding(0, dp(12), 0, dp(4));
+        mExtensionsList.addView(title);
+
+        TextView subtitle = new TextView(this);
+        subtitle.setText("Procedural memory for the agent (Hermes skills). The model sees each skill's name and description, and loads the full instructions with skill_view when relevant. Scripts run through the terminal tool.");
+        subtitle.setTextColor(color(R.color.ai_text_muted));
+        subtitle.setTextSize(12);
+        subtitle.setPadding(0, 0, 0, dp(10));
+        mExtensionsList.addView(subtitle);
+
+        LinearLayout toolbar = new LinearLayout(this);
+        toolbar.setOrientation(LinearLayout.HORIZONTAL);
+        toolbar.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams toolbarLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        toolbarLp.setMargins(0, 0, 0, dp(12));
+        toolbar.setLayoutParams(toolbarLp);
+
+        TextView pathHint = new TextView(this);
+        pathHint.setText("$HOME/.hermes/skills");
+        pathHint.setTextColor(color(R.color.ai_text_muted));
+        pathHint.setTextSize(11);
+        pathHint.setTypeface(Typeface.MONOSPACE);
+        LinearLayout.LayoutParams pathLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        pathHint.setLayoutParams(pathLp);
+        toolbar.addView(pathHint);
+
+        MaterialButton refresh = new MaterialButton(this);
+        refresh.setText("Refresh");
+        refresh.setTextSize(12);
+        refresh.setAllCaps(false);
+        refresh.setStrokeColor(android.content.res.ColorStateList.valueOf(color(R.color.ai_border)));
+        refresh.setBackgroundTintList(android.content.res.ColorStateList.valueOf(color(R.color.ai_surface)));
+        refresh.setTextColor(color(R.color.ai_text));
+        refresh.setCornerRadius(dp(10));
+        refresh.setOnClickListener(v -> {
+            AiSkillRegistry.invalidate();
+            refreshExtensionsPage();
+            setStatus("Skills refreshed.", false);
+        });
+        toolbar.addView(refresh);
+        mExtensionsList.addView(toolbar);
+
+        Set<String> disabled = AiSkillRegistry.readDisabled();
+        List<AiSkillRegistry.Skill> skills = AiSkillRegistry.listSkills();
+        boolean anyVisible = false;
+        for (AiSkillRegistry.Skill skill : skills) {
+            if (!skill.platformSupported) continue;
+            anyVisible = true;
+            mExtensionsList.addView(createSkillCard(skill, disabled.contains(skill.name)));
+        }
+        for (AiSkillRegistry.Skill skill : skills) {
+            if (skill.platformSupported) continue;
+            anyVisible = true;
+            mExtensionsList.addView(createSkillCard(skill, true));
+        }
+        if (!anyVisible) {
+            TextView empty = new TextView(this);
+            empty.setText("No skills installed. Skills live in $HOME/.hermes/skills — one folder per skill with a SKILL.md inside.");
+            empty.setTextColor(color(R.color.ai_text_muted));
+            empty.setTextSize(13);
+            empty.setPadding(0, dp(6), 0, dp(16));
+            mExtensionsList.addView(empty);
+        }
+    }
+
+    private View createSkillCard(AiSkillRegistry.Skill skill, boolean disabled) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(14), dp(14), dp(14), dp(14));
+        card.setBackgroundResource(R.drawable.bg_provider_card);
+        LinearLayout.LayoutParams cardLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        cardLp.setMargins(0, 0, 0, dp(12));
+        card.setLayoutParams(cardLp);
+
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        card.addView(header);
+
+        LinearLayout text = new LinearLayout(this);
+        text.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams textLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        header.addView(text, textLp);
+
+        TextView nameView = new TextView(this);
+        nameView.setText(skill.name);
+        nameView.setTextColor(color(R.color.ai_text));
+        nameView.setTextSize(15);
+        nameView.setTypeface(Typeface.DEFAULT_BOLD);
+        text.addView(nameView);
+
+        TextView meta = new TextView(this);
+        StringBuilder metaText = new StringBuilder(skill.category);
+        if (!TextUtils.isEmpty(skill.version)) metaText.append(" · v").append(skill.version);
+        if (!skill.platformSupported) metaText.append(" · not available on Android");
+        else if (disabled) metaText.append(" · disabled");
+        meta.setText(metaText.toString());
+        meta.setTextColor(color(!skill.platformSupported || disabled ? R.color.ai_warning : R.color.ai_text_muted));
+        meta.setTextSize(11);
+        meta.setPadding(0, dp(2), 0, 0);
+        text.addView(meta);
+
+        android.widget.Switch toggle = new android.widget.Switch(this);
+        toggle.setChecked(!disabled && skill.platformSupported);
+        toggle.setEnabled(skill.platformSupported);
+        toggle.setThumbTintList(android.content.res.ColorStateList.valueOf(color(R.color.ai_accent)));
+        toggle.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            AiSkillRegistry.setEnabled(skill.name, isChecked);
+            setStatus(isChecked ? "Skill '" + skill.name + "' enabled." : "Skill '" + skill.name + "' disabled.", false);
+            refreshExtensionsPage();
+        });
+        header.addView(toggle);
+
+        if (!TextUtils.isEmpty(skill.description)) {
+            TextView desc = new TextView(this);
+            desc.setText(skill.description);
+            desc.setTextColor(color(R.color.ai_text_muted));
+            desc.setTextSize(12);
+            desc.setPadding(0, dp(6), 0, 0);
+            card.addView(desc);
+        }
+
+        card.setOnClickListener(v -> showSkillViewer(skill));
+        toggle.setOnClickListener(v -> {
+            // Let the Switch handle it; prevent the card's viewer from opening.
+        });
+        return card;
+    }
+
+    /** Renders SKILL.md with Markwon (frontmatter stripped — it is model data, not reader content). */
+    private void showSkillViewer(AiSkillRegistry.Skill skill) {
+        String content = AiSkillRegistry.viewTool(skill.name, null, null);
+        String markdown = skill.name;
+        try {
+            JSONObject result = new JSONObject(content);
+            if (result.optBoolean("success", false)) markdown = result.optString("content", "");
+            else markdown = result.optString("error", "Could not load skill.");
+        } catch (Exception ignored) {}
+        markdown = stripFrontmatterForDisplay(markdown);
+        TextView body = new TextView(this);
+        body.setTextColor(color(R.color.ai_text));
+        body.setTextSize(13);
+        body.setPadding(dp(20), dp(16), dp(20), dp(16));
+        body.setMovementMethod(android.text.method.LinkMovementMethod.getInstance());
+        try {
+            io.noties.markwon.Markwon.create(this).setMarkdown(body, markdown);
+        } catch (Exception e) {
+            body.setText(markdown);
+        }
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(body);
+        new MaterialAlertDialogBuilder(this)
+            .setTitle(skill.name)
+            .setView(scroll)
+            .setPositiveButton(android.R.string.ok, null)
+            .show();
+    }
+
+    private String stripFrontmatterForDisplay(String markdown) {
+        if (markdown == null) return "";
+        String trimmed = markdown.trim();
+        if (!trimmed.startsWith("---")) return markdown;
+        java.util.regex.Matcher matcher = java.util.regex.Pattern
+            .compile("(?m)^---\\s*$").matcher(trimmed.substring(3));
+        if (!matcher.find()) return markdown;
+        return trimmed.substring(3).substring(matcher.end()).trim();
+    }
+
     private void showFeaturedProviders() {
         mShowingProviderDirectory = false;
         mProviderGrid.removeAllViews();
@@ -781,11 +996,13 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             if (profile != null) mProviderGrid.addView(createProviderTile(profile));
         }
         mProviderGrid.addView(createMoreProvidersTile());
+        mProviderGrid.addView(createSkillsTile());
         mHomePanel.setVisibility(View.VISIBLE);
         mSetupPanel.setVisibility(View.GONE);
         mChatPage.setVisibility(View.GONE);
         if (mSessionsPage != null) mSessionsPage.setVisibility(View.GONE);
         if (mOpenCodePage != null) mOpenCodePage.setVisibility(View.GONE);
+        if (mExtensionsPage != null) mExtensionsPage.setVisibility(View.GONE);
         mChatTitle.setText("Mobile Hermes");
     }
 
@@ -804,6 +1021,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mSetupPanel.setVisibility(View.GONE);
         mChatPage.setVisibility(View.GONE);
         if (mSessionsPage != null) mSessionsPage.setVisibility(View.GONE);
+        if (mExtensionsPage != null) mExtensionsPage.setVisibility(View.GONE);
     }
 
     private MaterialCardView createProviderTile(AiProviderProfile profile) {
@@ -939,6 +1157,53 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         return card;
     }
 
+    /** Home tile into the Skills & extensions page. */
+    private MaterialCardView createSkillsTile() {
+        MaterialCardView card = new MaterialCardView(this);
+        card.setCardBackgroundColor(color(R.color.ai_surface));
+        card.setStrokeColor(color(R.color.ai_border));
+        card.setStrokeWidth(dp(1));
+        card.setRadius(dp(16));
+        card.setClickable(true);
+        card.setFocusable(true);
+        card.setOnClickListener(view -> showExtensionsPage());
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.setMargins(0, 0, 0, dp(10));
+        card.setLayoutParams(lp);
+
+        LinearLayout content = new LinearLayout(this);
+        content.setGravity(Gravity.CENTER_VERTICAL);
+        content.setPadding(dp(14), dp(14), dp(14), dp(14));
+        content.setOrientation(LinearLayout.HORIZONTAL);
+        card.addView(content);
+        android.widget.ImageView icon = new android.widget.ImageView(this);
+        icon.setImageResource(R.drawable.ic_ai_package);
+        icon.setBackgroundResource(R.drawable.bg_ai_harness_badge);
+        icon.setPadding(dp(10), dp(10), dp(10), dp(10));
+        icon.setColorFilter(color(R.color.ai_text));
+        content.addView(icon, new LinearLayout.LayoutParams(dp(48), dp(48)));
+
+        LinearLayout text = new LinearLayout(this);
+        text.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams textParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        textParams.setMargins(dp(14), 0, 0, 0);
+        content.addView(text, textParams);
+
+        TextView title = new TextView(this);
+        title.setText("Skills & extensions");
+        title.setTextColor(color(R.color.ai_text));
+        title.setTextSize(13);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        text.addView(title);
+
+        TextView body = new TextView(this);
+        body.setText("Agent skills (Hermes SKILL.md) — enable, disable, review");
+        body.setTextColor(color(R.color.ai_text_muted));
+        body.setTextSize(11);
+        text.addView(body);
+        return card;
+    }
+
     private View createProviderRow(AiProviderProfile profile) {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
@@ -1012,6 +1277,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mChatPage.setVisibility(View.GONE);
         if (mSessionsPage != null) mSessionsPage.setVisibility(View.GONE);
         if (mOpenCodePage != null) mOpenCodePage.setVisibility(View.GONE);
+        if (mExtensionsPage != null) mExtensionsPage.setVisibility(View.GONE);
     }
 
     private void showChatPage() {
@@ -1035,6 +1301,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mChatPage.setVisibility(View.VISIBLE);
         if (mSessionsPage != null) mSessionsPage.setVisibility(View.GONE);
         if (mOpenCodePage != null) mOpenCodePage.setVisibility(View.GONE);
+        if (mExtensionsPage != null) mExtensionsPage.setVisibility(View.GONE);
         syncControlLabels();
     }
 
@@ -1672,8 +1939,11 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         String command = payload == null ? "" : payload.optString("command", "");
         String name = payload == null ? "" : payload.optString("name", "terminal");
         if (TextUtils.isEmpty(name)) name = "terminal";
-        mCurrentToolBubble = startExpandableBubble("Tool call",
-            "Terminal · " + (TextUtils.isEmpty(command) ? name : oneLine(command, 96)), true);
+        boolean isSkillsTool = "skills_list".equals(name) || "skill_view".equals(name);
+        String label = isSkillsTool
+            ? name + (TextUtils.isEmpty(command) ? "" : " · " + command)
+            : "Terminal · " + (TextUtils.isEmpty(command) ? name : oneLine(command, 96));
+        mCurrentToolBubble = startExpandableBubble("Tool call", label, true);
         appendEvent("tool", TextUtils.isEmpty(command) ? name : command);
         scrollConversation();
     }
