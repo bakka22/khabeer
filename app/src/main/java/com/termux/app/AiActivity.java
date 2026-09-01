@@ -375,7 +375,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         if (navHome != null) navHome.setOnClickListener(v -> showFeaturedProviders());
         if (navSessions != null) navSessions.setOnClickListener(v -> showSessionsPage());
         if (navShell != null) navShell.setOnClickListener(v -> openChatLastActive());
-        if (navProviders != null) navProviders.setOnClickListener(v -> showProviderDirectory());
+        if (navProviders != null) navProviders.setOnClickListener(v -> showExtensionsPage());
         if (navSettings != null) navSettings.setOnClickListener(v -> startActivity(new android.content.Intent(this, com.termux.app.activities.SettingsActivity.class)));
         View setupBack = findViewById(R.id.ai_setup_back);
         if (setupBack != null) setupBack.setOnClickListener(v -> {
@@ -971,7 +971,11 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         text.addView(nameView);
 
         TextView urlView = new TextView(this);
-        urlView.setText(server.url == null ? "" : oneLine(server.url, 48));
+        String summary = "stdio".equals(server.transport)
+            ? "$ " + (server.command == null ? "" : server.command)
+                + (server.argsJson == null ? "" : " " + argsPreview(server.argsJson))
+            : server.url;
+        urlView.setText(summary == null ? "" : oneLine(summary, 52));
         urlView.setTextColor(color(R.color.ai_text_muted));
         urlView.setTextSize(11);
         urlView.setTypeface(Typeface.MONOSPACE);
@@ -1055,8 +1059,21 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         return card;
     }
 
-    private void confirmMcpServerRemove(AiDatabase.McpServerRecord server) {
-        new MaterialAlertDialogBuilder(this)
+    private String argsPreview(String argsJson) {
+        try {
+            StringBuilder sb = new StringBuilder();
+            JSONArray args = new JSONArray(argsJson);
+            for (int i = 0; i < args.length(); i++) {
+                if (sb.length() > 0) sb.append(' ');
+                sb.append(args.optString(i));
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private void confirmMcpServerRemove(AiDatabase.McpServerRecord server) {        new MaterialAlertDialogBuilder(this)
             .setTitle("Remove MCP server")
             .setMessage("Remove '" + server.name + "' and its saved token? Its tools stop being offered to the agent.")
             .setNegativeButton(android.R.string.cancel, null)
@@ -1089,8 +1106,36 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         urlInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
         urlInput.setTextColor(color(R.color.ai_text));
 
+        android.widget.CheckBox stdioBox = new android.widget.CheckBox(this);
+        stdioBox.setText("Run a local command instead (stdio, in Termux)");
+        stdioBox.setTextColor(color(R.color.ai_text));
+        stdioBox.setChecked(existing != null && "stdio".equals(existing.transport));
+
+        EditText commandInput = new EditText(this);
+        commandInput.setSingleLine(true);
+        commandInput.setHint("Command (e.g. python, node, npx)");
+        commandInput.setText(existing == null ? "" : existing.command == null ? "" : existing.command);
+        commandInput.setTextColor(color(R.color.ai_text));
+
+        EditText argsInput = new EditText(this);
+        argsInput.setSingleLine(true);
+        argsInput.setHint("Arguments, separated by spaces");
+        argsInput.setText(existing == null ? "" : argsPreview(existing.argsJson));
+        argsInput.setTextColor(color(R.color.ai_text));
+
+        View.OnClickListener transportToggle = v -> {
+            boolean stdio = stdioBox.isChecked();
+            urlInput.setVisibility(stdio ? View.GONE : View.VISIBLE);
+            commandInput.setVisibility(stdio ? View.VISIBLE : View.GONE);
+            argsInput.setVisibility(stdio ? View.VISIBLE : View.GONE);
+        };
+        stdioBox.setOnClickListener(transportToggle);
+        urlInput.setVisibility(stdioBox.isChecked() ? View.GONE : View.VISIBLE);
+        commandInput.setVisibility(stdioBox.isChecked() ? View.VISIBLE : View.GONE);
+        argsInput.setVisibility(stdioBox.isChecked() ? View.VISIBLE : View.GONE);
+
         android.widget.CheckBox useToken = new android.widget.CheckBox(this);
-        useToken.setText("Authorization: Bearer token");
+        useToken.setText("Authorization: Bearer token (HTTP servers only)");
         useToken.setTextColor(color(R.color.ai_text));
         useToken.setChecked(existing != null && "header".equals(existing.authType));
 
@@ -1117,6 +1162,9 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
 
         form.addView(nameInput, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         form.addView(urlInput, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        form.addView(stdioBox);
+        form.addView(commandInput, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        form.addView(argsInput, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         form.addView(useToken);
         form.addView(tokenInput);
         form.addView(trusted);
@@ -1129,14 +1177,36 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             .setPositiveButton("Save", (dialog, which) -> {
                 String name = nameInput.getText().toString().trim().replaceAll("[^A-Za-z0-9_-]", "_").toLowerCase();
                 String url = urlInput.getText().toString().trim();
-                if (name.isEmpty() || !url.startsWith("http")) {
-                    showError("MCP server needs a name and an http(s) URL.");
+                if (name.isEmpty()) {
+                    showError("MCP server needs a name.");
+                    return;
+                }
+                boolean stdio = stdioBox.isChecked();
+                if (!stdio && !url.startsWith("http")) {
+                    showError("An HTTP MCP server needs an http(s) URL.");
                     return;
                 }
                 AiDatabase.McpServerRecord record = existing == null ? new AiDatabase.McpServerRecord() : existing;
                 record.name = name;
-                record.url = url;
-                boolean withToken = useToken.isChecked();
+                record.transport = stdio ? "stdio" : "http";
+                if (stdio) {
+                    record.url = null;
+                    record.command = commandInput.getText().toString().trim();
+                    record.argsJson = argsToJson(argsInput.getText().toString());
+                    if (record.command.isEmpty()) {
+                        showError("A stdio server needs a command.");
+                        return;
+                    }
+                } else {
+                    if (!url.startsWith("http")) {
+                        showError("An HTTP MCP server needs an http(s) URL.");
+                        return;
+                    }
+                    record.url = url;
+                    record.command = null;
+                    record.argsJson = null;
+                }
+                boolean withToken = useToken.isChecked() && !stdio;
                 record.authType = withToken ? "header" : "none";
                 record.trust = trusted.isChecked() ? "trusted" : "untrusted";
                 if (record.lastStatus != null && record.lastStatus.startsWith("failed")) record.lastStatus = null;
@@ -1150,6 +1220,15 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
                 }, 200);
             })
             .show();
+    }
+
+    /** Splits the args line on whitespace into a JSON string array. */
+    private String argsToJson(String line) {
+        JSONArray array = new JSONArray();
+        for (String arg : (line == null ? "" : line.trim()).split("\\s+")) {
+            if (!arg.isEmpty()) array.put(arg);
+        }
+        return array.length() == 0 ? null : array.toString();
     }
 
     private View createSkillCard(AiSkillRegistry.Skill skill, boolean disabled) {
@@ -2217,10 +2296,14 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         String command = payload == null ? "" : payload.optString("command", "");
         String name = payload == null ? "" : payload.optString("name", "terminal");
         if (TextUtils.isEmpty(name)) name = "terminal";
-        boolean isSkillsTool = "skills_list".equals(name) || "skill_view".equals(name);
-        String label = isSkillsTool
-            ? name + (TextUtils.isEmpty(command) ? "" : " · " + command)
-            : "Terminal · " + (TextUtils.isEmpty(command) ? name : oneLine(command, 96));
+        String label;
+        if ("skills_list".equals(name) || "skill_view".equals(name)) {
+            label = name + (TextUtils.isEmpty(command) ? "" : " · " + command);
+        } else if (name.startsWith(AiMcpRegistry.TOOL_PREFIX)) {
+            label = "MCP · " + (TextUtils.isEmpty(command) ? name : command);
+        } else {
+            label = "Terminal · " + (TextUtils.isEmpty(command) ? name : oneLine(command, 96));
+        }
         mCurrentToolBubble = startExpandableBubble("Tool call", label, true);
         appendEvent("tool", TextUtils.isEmpty(command) ? name : command);
         scrollConversation();

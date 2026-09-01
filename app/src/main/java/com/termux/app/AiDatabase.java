@@ -4,6 +4,7 @@ import android.content.ContentValues;
 import android.content.Context;
 import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
+import android.text.TextUtils;
 import android.database.sqlite.SQLiteOpenHelper;
 
 import androidx.annotation.Nullable;
@@ -19,7 +20,7 @@ import java.util.List;
 public final class AiDatabase extends SQLiteOpenHelper {
 
     private static final String DATABASE_NAME = "termux_ai_runtime.db";
-    private static final int DATABASE_VERSION = 8;
+    private static final int DATABASE_VERSION = 9;
 
     public static final class RunRecord {
         public String id;
@@ -61,7 +62,10 @@ public final class AiDatabase extends SQLiteOpenHelper {
     private void createV8Schema(SQLiteDatabase db) {
         db.execSQL("CREATE TABLE IF NOT EXISTS mcp_servers (" +
             "name TEXT PRIMARY KEY," +
+            "transport TEXT DEFAULT 'http'," +
             "url TEXT," +
+            "command TEXT," +
+            "args_json TEXT," +
             "auth_type TEXT DEFAULT 'none'," +
             "timeout_seconds INTEGER DEFAULT 60," +
             "enabled INTEGER DEFAULT 1," +
@@ -71,11 +75,22 @@ public final class AiDatabase extends SQLiteOpenHelper {
             "updated_at INTEGER DEFAULT 0)");
     }
 
-    /** One MCP server configuration (Streamable HTTP transport). Auth tokens
-     * never live here — they are Keystore-encrypted via AiProviderConfig. */
+    private void createV9Schema(SQLiteDatabase db) {
+        try { db.execSQL("ALTER TABLE mcp_servers ADD COLUMN transport TEXT DEFAULT 'http'"); } catch (Exception ignored) {}
+        try { db.execSQL("ALTER TABLE mcp_servers ADD COLUMN command TEXT"); } catch (Exception ignored) {}
+        try { db.execSQL("ALTER TABLE mcp_servers ADD COLUMN args_json TEXT"); } catch (Exception ignored) {}
+    }
+
+    /** One MCP server configuration: transport 'http' (Streamable HTTP, url)
+     * or 'stdio' (local command spawned in the Termux environment). Auth
+     * tokens never live here — they are Keystore-encrypted via
+     * AiProviderConfig. */
     public static final class McpServerRecord {
         public String name;
+        public String transport = "http";  // http | stdio
         public String url;
+        public String command;             // stdio only
+        public String argsJson;            // stdio only, JSON array of strings
         public String authType = "none";   // none | header
         public int timeoutSeconds = 60;
         public boolean enabled = true;
@@ -102,7 +117,11 @@ public final class AiDatabase extends SQLiteOpenHelper {
     private McpServerRecord mcpServerFromCursor(Cursor c) {
         McpServerRecord r = new McpServerRecord();
         r.name = c.getString(c.getColumnIndexOrThrow("name"));
+        r.transport = c.getString(c.getColumnIndexOrThrow("transport"));
+        if (TextUtils.isEmpty(r.transport)) r.transport = "http";
         r.url = c.getString(c.getColumnIndexOrThrow("url"));
+        r.command = c.getString(c.getColumnIndexOrThrow("command"));
+        r.argsJson = c.getString(c.getColumnIndexOrThrow("args_json"));
         r.authType = c.getString(c.getColumnIndexOrThrow("auth_type"));
         r.timeoutSeconds = c.getInt(c.getColumnIndexOrThrow("timeout_seconds"));
         r.enabled = c.getInt(c.getColumnIndexOrThrow("enabled")) == 1;
@@ -116,7 +135,10 @@ public final class AiDatabase extends SQLiteOpenHelper {
     public synchronized void saveMcpServer(McpServerRecord r) {
         ContentValues v = new ContentValues();
         v.put("name", r.name);
+        v.put("transport", TextUtils.isEmpty(r.transport) ? "http" : r.transport);
         v.put("url", r.url);
+        v.put("command", r.command);
+        v.put("args_json", r.argsJson);
         v.put("auth_type", r.authType);
         v.put("timeout_seconds", r.timeoutSeconds);
         v.put("enabled", r.enabled ? 1 : 0);
@@ -263,6 +285,9 @@ public final class AiDatabase extends SQLiteOpenHelper {
         }
         if (oldVersion < 8) {
             createV8Schema(db);
+        }
+        if (oldVersion < 9) {
+            createV9Schema(db);
         }
         if (oldVersion < 6) {
             // Title provenance (Hermes title_source): 'message' = derived from

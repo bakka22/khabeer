@@ -4,39 +4,52 @@ import android.text.TextUtils;
 
 import androidx.annotation.Nullable;
 
+import com.termux.shared.termux.TermuxConstants;
+
 import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.io.File;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.io.OutputStreamWriter;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.LinkedHashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 /**
- * MCP client registry (Hermes mcp_tool.py port, Streamable HTTP slice).
+ * MCP client registry (Hermes mcp_tool.py port).
  *
- * JSON-RPC 2.0 over HttpURLConnection: initialize handshake (session kept via
- * the Mcp-Session-Id header), notifications/initialized, paginated tools/list,
- * tools/call. Responses arrive either as plain JSON or as an SSE stream —
- * both are handled. Tools are exposed to the model under flattened
- * `mcp__<server>__<tool>` names (Hermes merges MCP tools directly into the
- * main tool registry; there is no wrapper tool).
+ * Two transports, one protocol:
+ * - Streamable HTTP: JSON-RPC over HttpURLConnection; the session is kept
+ *   via the Mcp-Session-Id response header; responses arrive as plain JSON
+ *   or SSE frames — both parsed.
+ * - stdio: a local command spawned inside the Termux environment (the same
+ *   env the terminal tool uses), speaking newline-delimited JSON-RPC over
+ *   stdin/stdout. This is what makes npx/uvx/python MCP servers work
+ *   on-device (Hermes runs the same servers on the desktop).
+ *
+ * Tools are exposed to the model under flattened `mcp__<server>__<tool>`
+ * names (Hermes merges MCP tools directly into the main tool registry).
  *
  * Safety model carried over from Hermes: untrusted servers get user approval
- * per write-capable call (enforced by the service via the approval dialog);
- * results and errors are size-capped and secret-redacted before reaching the
- * model; a small circuit breaker stops hammering dead servers; name
- * normalization collisions fail closed (all colliding tools are skipped).
+ * per call (enforced by the service via the approval dialog); results and
+ * errors are size-capped and secret-redacted before reaching the model; a
+ * small circuit breaker stops hammering dead servers; name normalization
+ * collisions fail closed (all colliding tools are skipped).
  */
 public final class AiMcpRegistry {
 
@@ -60,21 +73,24 @@ public final class AiMcpRegistry {
         public JSONObject inputSchema = new JSONObject();
     }
 
-    private static final class ServerSession {
-        String sessionId;
-        int nextRequestId = 1;
-        long connectedAt;
-    }
-
     private final Object mLock = new Object();
     private final AiProviderConfig mConfig;
-    private final Map<String, ServerSession> mSessions = new HashMap<>();
+    private final Map<String, McpTransport> mTransports = new HashMap<>();
     private final Map<String, List<ToolDef>> mToolCache = new HashMap<>();
     private final Map<String, Long> mLastProbe = new HashMap<>();
     private final Map<String, long[]> mBreaker = new HashMap<>();
 
     public AiMcpRegistry(AiProviderConfig config) {
         mConfig = config;
+    }
+
+    /** One live connection to an MCP server (JSON-RPC peer). */
+    private interface McpTransport {
+        JSONObject request(String method, @Nullable JSONObject params, int timeoutMs) throws Exception;
+
+        void notify(String method) throws Exception;
+
+        void close();
     }
 
     // ------------------------------------------------------------------
@@ -128,12 +144,14 @@ public final class AiMcpRegistry {
     }
 
     public void dropServer(String name) {
+        McpTransport transport;
         synchronized (mLock) {
-            mSessions.remove(name);
+            transport = mTransports.remove(name);
             mToolCache.remove(name);
             mLastProbe.remove(name);
             mBreaker.remove(name);
         }
+        if (transport != null) transport.close();
     }
 
     public boolean hasFreshTools(String name) {
@@ -147,23 +165,14 @@ public final class AiMcpRegistry {
     // Probing / discovery
     // ------------------------------------------------------------------
 
-    /** Probe one server: fresh initialize + tools/list; persists status and
+    /** Probe one server: fresh handshake + tools/list; persists status and
      * the tool cache to the DB. Returns an error message or null on success. */
     @Nullable
     public String probe(AiDatabase db, AiDatabase.McpServerRecord server) {
         try {
-            ServerSession session = new ServerSession();
-            JSONObject initResult = rpc(server, session, null, "initialize", new JSONObject()
-                .put("protocolVersion", PROTOCOL_VERSION)
-                .put("capabilities", new JSONObject())
-                .put("clientInfo", new JSONObject().put("name", "termux-ai").put("version", "1.0")),
-                Math.min(30, Math.max(10, server.timeoutSeconds)) * 1000);
-            if (initResult == null) return "Server returned no initialize result.";
-            session.sessionId = session.sessionId; // header captured inside rpc()
-            notifyInitialized(server, session);
-            List<ToolDef> tools = listTools(server, session);
+            McpTransport transport = ensureTransport(server);
+            List<ToolDef> tools = listTools(transport, server.name);
             synchronized (mLock) {
-                mSessions.put(server.name, session);
                 mToolCache.put(server.name, tools);
                 mLastProbe.put(server.name, System.currentTimeMillis());
                 mBreaker.remove(server.name);
@@ -172,11 +181,7 @@ public final class AiMcpRegistry {
             return null;
         } catch (Exception e) {
             String message = e.getMessage() == null ? e.toString() : e.getMessage();
-            synchronized (mLock) {
-                mSessions.remove(server.name);
-                mToolCache.remove(server.name);
-                mLastProbe.remove(server.name);
-            }
+            dropTransport(server.name);
             db.setMcpServerStatus(server.name, "failed: " + truncate(message, 160), null);
             return message;
         }
@@ -221,9 +226,9 @@ public final class AiMcpRegistry {
     // Tool invocation
     // ------------------------------------------------------------------
 
-    /** tools/call with a single session-expiry retry. Returns the normalized
-     * result JSON string the model receives. Trust gating (approval) is the
-     * service's job and happens before this call. */
+    /** tools/call with a single transport-reconnect retry. Returns the
+     * normalized result JSON string the model receives. Trust gating
+     * (approval) is the service's job and happens before this call. */
     public String callTool(AiDatabase db, AiDatabase.McpServerRecord server,
                            String toolName, JSONObject args, int timeoutSeconds) {
         if (server == null) return toolError("Unknown MCP server for tool.");
@@ -234,19 +239,21 @@ public final class AiMcpRegistry {
                 + "Auto-retry in ~" + Math.max(1, remaining) + "s. Do NOT retry immediately.");
         }
         try {
-            String result = callToolOnce(db, server, toolName, args, timeoutSeconds);
+            String result = callToolOnce(server, toolName, args, timeoutSeconds);
             breakerSuccess(server.name);
             return result;
         } catch (McpSessionExpiredException e) {
-            // Re-initialize once and retry (Hermes session-expired recovery).
-            synchronized (mLock) { mSessions.remove(server.name); }
+            // Session died (HTTP 404) or the stdio process exited: rebuild
+            // the transport and retry once (Hermes session-expired recovery).
+            dropTransport(server.name);
             try {
-                String result = callToolOnce(db, server, toolName, args, timeoutSeconds);
+                String result = callToolOnce(server, toolName, args, timeoutSeconds);
                 breakerSuccess(server.name);
                 return result;
             } catch (Exception e2) {
                 breakerFailure(server.name);
-                return toolError(redact(truncate("MCP call failed after session reconnect: "
+                dropTransport(server.name);
+                return toolError(redact(truncate("MCP call failed after reconnect: "
                     + (e2.getMessage() == null ? e2.toString() : e2.getMessage()), 400)));
             }
         } catch (Exception e) {
@@ -256,116 +263,385 @@ public final class AiMcpRegistry {
         }
     }
 
-    private String callToolOnce(AiDatabase db, AiDatabase.McpServerRecord server,
+    private String callToolOnce(AiDatabase.McpServerRecord server,
                                 String toolName, JSONObject args, int timeoutSeconds) throws Exception {
-        ServerSession session = ensureSession(server);
-        JSONObject result = rpc(server, session, null, "tools/call", new JSONObject()
+        McpTransport transport = ensureTransport(server);
+        JSONObject result = transport.request("tools/call", new JSONObject()
             .put("name", toolName)
             .put("arguments", args == null ? new JSONObject() : args),
             Math.max(5, timeoutSeconds) * 1000);
         return normalizeCallResult(result);
     }
 
-    private ServerSession ensureSession(AiDatabase.McpServerRecord server) throws Exception {
+    // ------------------------------------------------------------------
+    // Transport lifecycle
+    // ------------------------------------------------------------------
+
+    /** Get (or create + handshake) the live transport for a server. */
+    private McpTransport ensureTransport(AiDatabase.McpServerRecord server) throws Exception {
         synchronized (mLock) {
-            ServerSession existing = mSessions.get(server.name);
+            McpTransport existing = mTransports.get(server.name);
             if (existing != null) return existing;
         }
-        ServerSession session = new ServerSession();
-        JSONObject result = rpc(server, session, null, "initialize", new JSONObject()
-            .put("protocolVersion", PROTOCOL_VERSION)
-            .put("capabilities", new JSONObject())
-            .put("clientInfo", new JSONObject().put("name", "termux-ai").put("version", "1.0")),
-            Math.min(30, Math.max(10, server.timeoutSeconds)) * 1000);
-        if (result == null) throw new IllegalStateException("Server returned no initialize result.");
-        notifyInitialized(server, session);
-        synchronized (mLock) { mSessions.put(server.name, session); }
-        return session;
-    }
-
-    private void notifyInitialized(AiDatabase.McpServerRecord server, ServerSession session) {
+        McpTransport created = "stdio".equals(server.transport)
+            ? new StdioTransport(server)
+            : new HttpTransport(server, mConfig == null ? null : mConfig.getMcpServerToken(server.name));
         try {
-            rpc(server, session, "notifications/initialized", null, null, 10_000);
-        } catch (Exception ignored) {}
+            JSONObject init = created.request("initialize", new JSONObject()
+                .put("protocolVersion", PROTOCOL_VERSION)
+                .put("capabilities", new JSONObject())
+                .put("clientInfo", new JSONObject().put("name", "termux-ai").put("version", "1.0")),
+                Math.min(30, Math.max(10, server.timeoutSeconds)) * 1000);
+            if (init == null) throw new IllegalStateException("Server returned no initialize result.");
+            created.notify("notifications/initialized");
+        } catch (Exception e) {
+            created.close();
+            throw e;
+        }
+        synchronized (mLock) {
+            McpTransport existing = mTransports.putIfAbsent(server.name, created);
+            if (existing != null) {
+                created.close(); // another thread won the race
+                return existing;
+            }
+            return created;
+        }
+    }
+
+    private void dropTransport(String name) {
+        McpTransport transport;
+        synchronized (mLock) {
+            transport = mTransports.remove(name);
+        }
+        if (transport != null) transport.close();
     }
 
     // ------------------------------------------------------------------
-    // JSON-RPC over Streamable HTTP
+    // HTTP transport (Streamable HTTP)
     // ------------------------------------------------------------------
 
-    @Nullable
-    private JSONObject rpc(AiDatabase.McpServerRecord server, ServerSession session,
-                           @Nullable String notification, @Nullable String method, @Nullable JSONObject params,
-                           int timeoutMs) throws Exception {
-        if (TextUtils.isEmpty(server.url)) throw new IllegalStateException("MCP server URL is missing.");
-        JSONObject body = new JSONObject().put("jsonrpc", "2.0");
-        boolean isNotification = notification != null;
-        int id = 0;
-        if (isNotification) {
-            body.put("method", notification);
-        } else {
-            synchronized (mLock) { id = session.nextRequestId++; }
-            body.put("id", id);
-            body.put("method", method);
+    private static final class HttpTransport implements McpTransport {
+        private final AiDatabase.McpServerRecord mServer;
+        private final String mToken;
+        private String mSessionId;
+        private int mNextRequestId = 1;
+
+        HttpTransport(AiDatabase.McpServerRecord server, String token) {
+            mServer = server;
+            mToken = token;
+        }
+
+        @Override
+        public JSONObject request(String method, @Nullable JSONObject params, int timeoutMs) throws Exception {
+            if (TextUtils.isEmpty(mServer.url)) throw new IllegalStateException("MCP server URL is missing.");
+            int id;
+            synchronized (this) { id = ++mNextRequestId; }
+            HttpURLConnection connection = (HttpURLConnection) new URL(mServer.url.trim()).openConnection();
+            try {
+                connection.setRequestMethod("POST");
+                connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
+                connection.setReadTimeout(Math.max(5_000, timeoutMs));
+                connection.setDoOutput(true);
+                connection.setRequestProperty("Content-Type", "application/json");
+                connection.setRequestProperty("Accept", "application/json, text/event-stream");
+                connection.setRequestProperty("MCP-Protocol-Version", PROTOCOL_VERSION);
+                if (mSessionId != null) connection.setRequestProperty("Mcp-Session-Id", mSessionId);
+                if ("header".equals(mServer.authType) && !TextUtils.isEmpty(mToken))
+                    connection.setRequestProperty("Authorization", "Bearer " + mToken);
+                JSONObject body = new JSONObject()
+                    .put("jsonrpc", "2.0")
+                    .put("id", id)
+                    .put("method", method);
+                if (params != null) body.put("params", params);
+                try (OutputStream output = connection.getOutputStream()) {
+                    output.write(body.toString().getBytes(StandardCharsets.UTF_8));
+                }
+
+                int code = connection.getResponseCode();
+                if (code == 404 && mSessionId != null) {
+                    // Streamable HTTP: 404 on a session id = session expired.
+                    throw new McpSessionExpiredException();
+                }
+                if (code == 401 || code == 403) {
+                    throw new IllegalStateException("HTTP " + code + ": authentication required or rejected. "
+                        + "Check the server's auth token. Do NOT retry until fixed.");
+                }
+                InputStream stream = code >= 200 && code < 300 ? connection.getInputStream() : connection.getErrorStream();
+                String text = readFully(stream);
+                if (code < 200 || code >= 300) {
+                    throw new IllegalStateException("HTTP " + code + ": " + AiMcpRegistry.redactStatic(truncate(text, 200)));
+                }
+                String responseSession = connection.getHeaderField("Mcp-Session-Id");
+                if (responseSession != null && !responseSession.trim().isEmpty()) mSessionId = responseSession.trim();
+                if (TextUtils.isEmpty(text.trim())) return null;
+                String contentType = connection.getContentType();
+                if (contentType != null && contentType.toLowerCase().contains("text/event-stream")) {
+                    return AiMcpRegistry.parseSseResponse(text, id);
+                }
+                return AiMcpRegistry.parseJsonRpcResponse(text, id);
+            } finally {
+                connection.disconnect();
+            }
+        }
+
+        @Override
+        public void notify(String method) throws Exception {
+            if (TextUtils.isEmpty(mServer.url)) throw new IllegalStateException("MCP server URL is missing.");
+            JSONObject body = new JSONObject().put("jsonrpc", "2.0").put("method", method);
+            HttpURLConnection connection = (HttpURLConnection) new URL(mServer.url.trim()).openConnection();
+            try {
+                connection.setRequestMethod("POST");
+                connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
+                connection.setReadTimeout(10_000);
+                connection.setDoOutput(true);
+                connection.setRequestProperty("Content-Type", "application/json");
+                connection.setRequestProperty("Accept", "application/json, text/event-stream");
+                connection.setRequestProperty("MCP-Protocol-Version", PROTOCOL_VERSION);
+                if (mSessionId != null) connection.setRequestProperty("Mcp-Session-Id", mSessionId);
+                if ("header".equals(mServer.authType) && !TextUtils.isEmpty(mToken))
+                    connection.setRequestProperty("Authorization", "Bearer " + mToken);
+                try (OutputStream output = connection.getOutputStream()) {
+                    output.write(body.toString().getBytes(StandardCharsets.UTF_8));
+                }
+                int code = connection.getResponseCode();
+                if (code < 200 || code >= 300) throw new IllegalStateException("Notification rejected with HTTP " + code);
+            } finally {
+                connection.disconnect();
+            }
+        }
+
+        @Override
+        public void close() {
+            // Stateless per request — nothing to tear down.
+        }
+
+        private String readFully(InputStream stream) throws Exception {
+            if (stream == null) return "";
+            StringBuilder builder = new StringBuilder();
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) builder.append(line).append('\n');
+            }
+            return builder.toString();
+        }
+
+        private String truncate(String text, int max) {
+            if (text == null) return "";
+            return text.length() <= max ? text : text.substring(0, max - 1) + "…";
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // stdio transport: local command inside the Termux environment
+    // ------------------------------------------------------------------
+
+    /**
+     * Spawns the server command with the same environment the terminal tool
+     * uses ($PREFIX/bin on PATH, Termux HOME) and speaks newline-delimited
+     * JSON-RPC over its stdin/stdout (the MCP stdio framing). stderr is
+     * drained to a bounded tail buffer surfaced in error messages. A dead
+     * process surfaces as McpSessionExpiredException so the caller rebuilds
+     * the transport and respawns the server once.
+     */
+    private final class StdioTransport implements McpTransport {
+        private final Process mProcess;
+        private final BufferedWriter mWriter;
+        private final Object mWriteLock = new Object();
+        private final Map<Integer, PendingCall> mPending = new ConcurrentHashMap<>();
+        private final StringBuilder mStderrTail = new StringBuilder();
+        private volatile boolean mClosed;
+        private int mNextRequestId = 1;
+
+        StdioTransport(AiDatabase.McpServerRecord server) throws Exception {
+            List<String> command = buildCommand(server);
+            ProcessBuilder builder = new ProcessBuilder(command);
+            builder.directory(new File(TermuxConstants.TERMUX_HOME_DIR_PATH));
+            Map<String, String> env = builder.environment();
+            env.put("HOME", TermuxConstants.TERMUX_HOME_DIR_PATH);
+            env.put("PREFIX", TermuxConstants.TERMUX_PREFIX_DIR_PATH);
+            env.put("TMPDIR", TermuxConstants.TERMUX_PREFIX_DIR_PATH + "/tmp");
+            env.put("TERM", "xterm-256color");
+            env.put("PATH", TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH + ":"
+                + TermuxConstants.TERMUX_HOME_DIR_PATH + "/.local/bin:"
+                + env.getOrDefault("PATH", ""));
+            mProcess = builder.start();
+            mWriter = new BufferedWriter(new OutputStreamWriter(mProcess.getOutputStream(), StandardCharsets.UTF_8));
+
+            Thread reader = new Thread(this::readLoop, "mcp-stdio-reader-" + sanitize(server.name));
+            reader.setDaemon(true);
+            reader.start();
+            Thread stderr = new Thread(() -> drainStderr(mProcess), "mcp-stdio-stderr-" + sanitize(server.name));
+            stderr.setDaemon(true);
+            stderr.start();
+        }
+
+        private List<String> buildCommand(AiDatabase.McpServerRecord server) throws Exception {
+            String command = server.command == null ? "" : server.command.trim();
+            if (TextUtils.isEmpty(command)) throw new IllegalStateException("stdio server has no command.");
+            List<String> out = new ArrayList<>();
+            out.add(resolveCommand(command));
+            if (!TextUtils.isEmpty(server.argsJson)) {
+                try {
+                    JSONArray args = new JSONArray(server.argsJson);
+                    for (int i = 0; i < args.length(); i++) {
+                        String arg = args.optString(i, "");
+                        if (!arg.isEmpty()) out.add(arg);
+                    }
+                } catch (Exception ignored) {}
+            }
+            return out;
+        }
+
+        /** Hermes _resolve_stdio_command, trimmed: absolute paths pass
+         * through; bare names resolve against $PREFIX/bin and ~/.local/bin. */
+        private String resolveCommand(String command) {
+            if (command.contains("/")) return command;
+            String[] candidates = {
+                TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH + "/" + command,
+                TermuxConstants.TERMUX_HOME_DIR_PATH + "/.local/bin/" + command
+            };
+            for (String candidate : candidates) {
+                File file = new File(candidate);
+                if (file.isFile() && file.canExecute()) return candidate;
+            }
+            return command; // let ProcessBuilder produce a clear failure
+        }
+
+        private void readLoop() {
+            try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(mProcess.getInputStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while (!mClosed && (line = reader.readLine()) != null) {
+                    dispatch(line);
+                }
+            } catch (Exception ignored) {
+            } finally {
+                failAllPending("MCP server process exited."
+                    + (mStderrTail.length() > 0 ? " stderr: " + truncate(mStderrTail.toString(), 200) : ""));
+            }
+        }
+
+        private void dispatch(String line) {
+            String trimmed = line.trim();
+            if (trimmed.isEmpty() || mClosed) return;
+            try {
+                JSONObject frame = new JSONObject(trimmed);
+                if (!frame.has("id")) return; // server-initiated notification: ignored in phase 3
+                PendingCall call = mPending.remove(frame.optInt("id", -1));
+                if (call == null) return;
+                if (frame.has("error")) {
+                    JSONObject error = frame.optJSONObject("error");
+                    call.error = "JSON-RPC " + error.optInt("code", 0) + ": "
+                        + redact(truncate(error.optString("message", "unknown error"), 200));
+                } else {
+                    call.result = frame.optJSONObject("result");
+                }
+                call.latch.countDown();
+            } catch (Exception ignored) {
+                // Not JSON — tolerate noise on stdout.
+            }
+        }
+
+        private void drainStderr(Process process) {
+            try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(process.getErrorStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    synchronized (mStderrTail) {
+                        if (mStderrTail.length() > 4096) mStderrTail.delete(0, 2048);
+                        mStderrTail.append(line).append('\n');
+                    }
+                }
+            } catch (Exception ignored) {}
+        }
+
+        private void failAllPending(String message) {
+            for (PendingCall call : mPending.values()) {
+                call.error = message;
+                call.latch.countDown();
+            }
+            mPending.clear();
+        }
+
+        @Override
+        public JSONObject request(String method, @Nullable JSONObject params, int timeoutMs) throws Exception {
+            if (mClosed || !mProcess.isAlive()) throw new McpSessionExpiredException();
+            int id;
+            synchronized (this) { id = ++mNextRequestId; }
+            JSONObject body = new JSONObject()
+                .put("jsonrpc", "2.0")
+                .put("id", id)
+                .put("method", method);
             if (params != null) body.put("params", params);
+
+            PendingCall call = new PendingCall();
+            mPending.put(id, call);
+            try {
+                try {
+                    synchronized (mWriteLock) {
+                        if (mClosed || !mProcess.isAlive()) throw new McpSessionExpiredException();
+                        mWriter.write(body.toString());
+                        mWriter.write("\n");
+                        mWriter.flush();
+                    }
+                } catch (Exception e) {
+                    throw new McpSessionExpiredException();
+                }
+                if (!call.latch.await(Math.max(5_000, timeoutMs), TimeUnit.MILLISECONDS)) {
+                    mPending.remove(id);
+                    throw new IllegalStateException("MCP stdio call timed out after " + (timeoutMs / 1000) + "s"
+                        + (mProcess.isAlive() ? "" : " (process exited)"));
+                }
+                if (call.error != null) throw new IllegalStateException(call.error);
+                return call.result;
+            } finally {
+                mPending.remove(id);
+            }
         }
 
-        HttpURLConnection connection = (HttpURLConnection) new URL(server.url.trim()).openConnection();
-        try {
-            connection.setRequestMethod("POST");
-            connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
-            connection.setReadTimeout(Math.max(5_000, timeoutMs));
-            connection.setDoOutput(true);
-            connection.setRequestProperty("Content-Type", "application/json");
-            connection.setRequestProperty("Accept", "application/json, text/event-stream");
-            connection.setRequestProperty("MCP-Protocol-Version", PROTOCOL_VERSION);
-            if (session.sessionId != null) connection.setRequestProperty("Mcp-Session-Id", session.sessionId);
-            if ("header".equals(server.authType)) {
-                String token = mConfig == null ? null : mConfig.getMcpServerToken(server.name);
-                if (!TextUtils.isEmpty(token)) connection.setRequestProperty("Authorization", "Bearer " + token);
+        @Override
+        public void notify(String method) throws Exception {
+            if (mClosed || !mProcess.isAlive()) return;
+            JSONObject body = new JSONObject().put("jsonrpc", "2.0").put("method", method);
+            synchronized (mWriteLock) {
+                mWriter.write(body.toString());
+                mWriter.write("\n");
+                mWriter.flush();
             }
-            try (OutputStream output = connection.getOutputStream()) {
-                output.write(body.toString().getBytes(StandardCharsets.UTF_8));
-            }
+        }
 
-            int code = connection.getResponseCode();
-            if (isNotification) {
-                if (code >= 200 && code < 300) return null;
-                throw new IllegalStateException("Notification rejected with HTTP " + code);
+        @Override
+        public void close() {
+            if (mClosed) return;
+            mClosed = true;
+            failAllPending("MCP server transport closed.");
+            mProcess.destroy();
+            try {
+                if (!mProcess.waitFor(2, TimeUnit.SECONDS)) mProcess.destroyForcibly();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                mProcess.destroyForcibly();
             }
-            if (code == 404 && session.sessionId != null) {
-                // Streamable HTTP: 404 on a session id = session expired.
-                throw new McpSessionExpiredException();
-            }
-            if (code == 401 || code == 403) {
-                throw new IllegalStateException("HTTP " + code + ": authentication required or rejected. "
-                    + "Check the server's auth token. Do NOT retry until fixed.");
-            }
-            InputStream stream = code >= 200 && code < 300 ? connection.getInputStream() : connection.getErrorStream();
-            String text = readFully(stream);
-            if (code < 200 || code >= 300) {
-                throw new IllegalStateException("HTTP " + code + ": " + redact(truncate(text, 200)));
-            }
-            String responseSession = connection.getHeaderField("Mcp-Session-Id");
-            if (responseSession != null && !responseSession.trim().isEmpty()) session.sessionId = responseSession.trim();
-            if (TextUtils.isEmpty(text.trim())) return null;
-            String contentType = connection.getContentType();
-            if (contentType != null && contentType.toLowerCase().contains("text/event-stream")) {
-                return parseSseResponse(text, id);
-            }
-            return parseJsonRpcResponse(text, id);
-        } finally {
-            connection.disconnect();
         }
     }
 
-    private List<ToolDef> listTools(AiDatabase.McpServerRecord server, ServerSession session) throws Exception {
+    private static final class PendingCall {
+        final CountDownLatch latch = new CountDownLatch(1);
+        volatile JSONObject result;
+        volatile String error;
+    }
+
+    // ------------------------------------------------------------------
+    // Tool discovery over a transport
+    // ------------------------------------------------------------------
+
+    private List<ToolDef> listTools(McpTransport transport, String serverName) throws Exception {
         List<ToolDef> out = new ArrayList<>();
         String cursor = null;
         for (int page = 0; page < MAX_LIST_PAGES; page++) {
             JSONObject params = new JSONObject();
             if (cursor != null) params.put("cursor", cursor);
-            JSONObject result = rpc(server, session, null, "tools/list", params, 30_000);
+            JSONObject result = transport.request("tools/list", params, 30_000);
             if (result == null) break;
             JSONArray tools = result.optJSONArray("tools");
             if (tools != null) {
@@ -375,9 +651,9 @@ public final class AiMcpRegistry {
                     String name = tool.optString("name", "");
                     if (TextUtils.isEmpty(name)) continue;
                     ToolDef def = new ToolDef();
-                    def.serverName = server.name;
+                    def.serverName = serverName;
                     def.toolName = name;
-                    def.registryName = TOOL_PREFIX + sanitize(server.name) + "__" + sanitize(name);
+                    def.registryName = TOOL_PREFIX + sanitize(serverName) + "__" + sanitize(name);
                     def.description = truncate(tool.optString("description", "MCP tool."), MAX_DESCRIPTION_CHARS);
                     def.inputSchema = normalizeSchema(tool.optJSONObject("inputSchema"));
                     out.add(def);
@@ -389,53 +665,8 @@ public final class AiMcpRegistry {
         return out;
     }
 
-    /** JSON or SSE data block → JSON-RPC response object (matched by id). */
-    private JSONObject parseJsonRpcResponse(String text, int expectedId) throws Exception {
-        String trimmed = text.trim();
-        JSONObject object;
-        try {
-            object = new JSONObject(trimmed);
-        } catch (Exception e) {
-            throw new IllegalStateException("Non-JSON MCP response: " + truncate(redact(trimmed), 200));
-        }
-        if (object.has("error")) {
-            JSONObject error = object.optJSONObject("error");
-            throw new IllegalStateException("JSON-RPC " + error.optInt("code", 0) + ": "
-                + redact(truncate(error.optString("message", "unknown error"), 200)));
-        }
-        if (object.has("result")) return object.optJSONObject("result");
-        // A notification or unrelated frame — nothing usable.
-        return null;
-    }
-
-    @Nullable
-    private JSONObject parseSseResponse(String text, int expectedId) throws Exception {
-        for (String line : text.split("\\r?\\n")) {
-            line = line.trim();
-            if (!line.startsWith("data:")) continue;
-            String data = line.substring(5).trim();
-            if (data.isEmpty() || "[DONE]".equals(data)) continue;
-            try {
-                JSONObject frame = new JSONObject(data);
-                if (frame.has("error")) {
-                    JSONObject error = frame.optJSONObject("error");
-                    throw new IllegalStateException("JSON-RPC " + error.optInt("code", 0) + ": "
-                        + redact(truncate(error.optString("message", "unknown error"), 200)));
-                }
-                if (!frame.has("result")) continue;
-                if (frame.has("id") && frame.optInt("id", -1) != expectedId) continue;
-                return frame.optJSONObject("result");
-            } catch (IllegalStateException e) {
-                throw e;
-            } catch (Exception ignored) {
-                // not a JSON-RPC frame; keep scanning
-            }
-        }
-        return null;
-    }
-
     // ------------------------------------------------------------------
-    // Result normalization (Hermes block handling, trimmed to phase 2)
+    // Result normalization (Hermes block handling, trimmed)
     // ------------------------------------------------------------------
 
     private String normalizeCallResult(@Nullable JSONObject result) throws Exception {
@@ -539,7 +770,7 @@ public final class AiMcpRegistry {
             return out;
         }
         try {
-            for (java.util.Iterator<String> keys = raw.keys(); keys.hasNext(); ) {
+            for (Iterator<String> keys = raw.keys(); keys.hasNext(); ) {
                 String key = keys.next();
                 out.put(key, raw.opt(key));
             }
@@ -564,6 +795,10 @@ public final class AiMcpRegistry {
     }
 
     private String redact(String text) {
+        return redactStatic(text);
+    }
+
+    static String redactStatic(String text) {
         if (text == null) return "";
         return text
             .replaceAll("(?i)(bearer\\s+)[A-Za-z0-9._\\-]+", "$1[REDACTED]")
@@ -576,17 +811,57 @@ public final class AiMcpRegistry {
         return text.length() <= max ? text : text.substring(0, max - 1) + "…";
     }
 
-    private String readFully(InputStream stream) throws Exception {
-        if (stream == null) return "";
-        StringBuilder builder = new StringBuilder();
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) {
-            String line;
-            while ((line = reader.readLine()) != null) builder.append(line).append('\n');
+    /** JSON or SSE data block → JSON-RPC response object (matched by id). */
+    @Nullable
+    static JSONObject parseJsonRpcResponse(String text, int expectedId) throws Exception {
+        String trimmed = text.trim();
+        JSONObject object;
+        try {
+            object = new JSONObject(trimmed);
+        } catch (Exception e) {
+            throw new IllegalStateException("Non-JSON MCP response: " + truncateStatic(redactStatic(trimmed), 200));
         }
-        return builder.toString();
+        if (object.has("error")) {
+            JSONObject error = object.optJSONObject("error");
+            throw new IllegalStateException("JSON-RPC " + error.optInt("code", 0) + ": "
+                + redactStatic(truncateStatic(error.optString("message", "unknown error"), 200)));
+        }
+        if (object.has("result")) return object.optJSONObject("result");
+        return null;
+    }
+
+    @Nullable
+    static JSONObject parseSseResponse(String text, int expectedId) {
+        for (String line : text.split("\\r?\\n")) {
+            line = line.trim();
+            if (!line.startsWith("data:")) continue;
+            String data = line.substring(5).trim();
+            if (data.isEmpty() || "[DONE]".equals(data)) continue;
+            try {
+                JSONObject frame = new JSONObject(data);
+                if (frame.has("error")) {
+                    JSONObject error = frame.optJSONObject("error");
+                    throw new IllegalStateException("JSON-RPC " + error.optInt("code", 0) + ": "
+                        + redactStatic(truncateStatic(error.optString("message", "unknown error"), 200)));
+                }
+                if (!frame.has("result")) continue;
+                if (frame.has("id") && frame.optInt("id", -1) != expectedId) continue;
+                return frame.optJSONObject("result");
+            } catch (IllegalStateException e) {
+                throw e;
+            } catch (Exception ignored) {
+                // not a JSON-RPC frame; keep scanning
+            }
+        }
+        return null;
+    }
+
+    private static String truncateStatic(String text, int max) {
+        if (text == null) return "";
+        return text.length() <= max ? text : text.substring(0, max - 1) + "…";
     }
 
     private static final class McpSessionExpiredException extends Exception {
-        McpSessionExpiredException() { super("MCP session expired"); }
+        McpSessionExpiredException() { super("MCP transport expired"); }
     }
 }
