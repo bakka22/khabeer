@@ -339,6 +339,7 @@
     <string name="ai_project_summary">Project access is limited to Termux home and shared phone storage.</string>
     <string name="ai_empty_chat_hint">Your agent output appears here. Technical logs stay tucked away unless you open them.</string>
     <string name="ai_new_session">New session</string>
+    <string name="ai_settings_label">Settings</string>
     <string name="ai_harnesses">Providers</string>
     <string name="ai_projects">Projects</string>
     <string name="ai_section_providers">PROVIDERS</string>

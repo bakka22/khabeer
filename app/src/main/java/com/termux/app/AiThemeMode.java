@@ -15,6 +15,12 @@ public final class AiThemeMode {
 
     private AiThemeMode() {}
 
+    public static void set(Context context, String mode) {
+        androidx.preference.PreferenceManager.getDefaultSharedPreferences(context)
+            .edit().putString(PREF_KEY, mode).apply();
+        apply(context);
+    }
+
     public static String mode(Context context) {
         return androidx.preference.PreferenceManager.getDefaultSharedPreferences(context)
             .getString(PREF_KEY, DARK);

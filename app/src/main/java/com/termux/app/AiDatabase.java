@@ -556,12 +556,12 @@ public final class AiDatabase extends SQLiteOpenHelper {
         return records;
     }
 
-    /** Live sessions: hidden/archived rows and katheer-style empty ghost
-     * sessions (never got a user message AND never titled) stay out. */
+    /** Every non-archived session — nothing is hidden automatically;
+     *  archiving is a user action from the Sessions page. */
     public synchronized List<RunRecord> getSessions(int limit) {
         List<RunRecord> records = new ArrayList<>();
         Cursor cursor = getReadableDatabase().query("runs", null,
-            "COALESCE(archived, 0) = 0 AND (title IS NOT NULL OR EXISTS (SELECT 1 FROM messages m WHERE m.session_id = runs.id AND m.active = 1))", null, null, null,
+            "COALESCE(archived, 0) = 0", null, null, null,
             "updated_at DESC", String.valueOf(limit));
         try {
             while (cursor.moveToNext()) records.add(readRun(cursor));

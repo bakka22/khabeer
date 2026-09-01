@@ -386,7 +386,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     private void setupChrome() {
         mChatTitle.setText("katheer");
         if (mMenuButton != null) mMenuButton.setOnClickListener(view -> { if (mDrawer != null) mDrawer.openDrawer(findViewById(R.id.ai_drawer_panel)); });
-        if (mSettingsButton != null) mSettingsButton.setOnClickListener(view -> createNewSessionChat());
+        if (mSettingsButton != null) mSettingsButton.setOnClickListener(view -> showAppSettingsDialog());
         if (mStopButton != null) mStopButton.setVisibility(View.GONE);
         if (mTerminalCard != null) mTerminalCard.setVisibility(View.GONE);
         View navHome = findViewById(R.id.nav_home);
@@ -398,7 +398,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         if (navSessions != null) navSessions.setOnClickListener(v -> showSessionsPage());
         if (navShell != null) navShell.setOnClickListener(v -> openChatLastActive());
         if (navProviders != null) navProviders.setOnClickListener(v -> showExtensionsPage());
-        if (navSettings != null) navSettings.setOnClickListener(v -> startActivity(new android.content.Intent(this, com.termux.app.activities.SettingsActivity.class)));
+        if (navSettings != null) navSettings.setOnClickListener(v -> showMorePage());
         View setupBack = findViewById(R.id.ai_setup_back);
         if (setupBack != null) setupBack.setOnClickListener(v -> {
             if (mPickingSessionProvider) {
@@ -822,6 +822,38 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         lp.setMargins(0, dp(10), 0, 0);
         button.setLayoutParams(lp);
+    }
+
+    /** Bottom-nav "More" page — intentionally empty for now; sections land
+     *  here later. */
+    private void showMorePage() {
+        View morePage = findViewById(R.id.ai_more_page);
+        if (morePage == null) return;
+        mHomePanel.setVisibility(View.GONE);
+        mSetupPanel.setVisibility(View.GONE);
+        mChatPage.setVisibility(View.GONE);
+        if (mSessionsPage != null) mSessionsPage.setVisibility(View.GONE);
+        if (mOpenCodePage != null) mOpenCodePage.setVisibility(View.GONE);
+        View extensions = findViewById(R.id.ai_extensions_page);
+        if (extensions != null) extensions.setVisibility(View.GONE);
+        mChatTitle.setText("More");
+        morePage.setVisibility(View.VISIBLE);
+    }
+
+    /** Top-bar gear: the katheer app settings that exist today. */
+    private void showAppSettingsDialog() {
+        String[] modes = new String[]{"Dark", "Light"};
+        String current = AiThemeMode.mode(this);
+        int checked = AiThemeMode.LIGHT.equals(current) ? 1 : 0;
+        new MaterialAlertDialogBuilder(this)
+            .setTitle("Settings")
+            .setSingleChoiceItems(modes, checked, (dialog, which) -> {
+                AiThemeMode.set(this, which == 1 ? AiThemeMode.LIGHT : AiThemeMode.DARK);
+                dialog.dismiss();
+            })
+            .setNeutralButton("Skills & extensions", (dialog, which) -> showExtensionsPage())
+            .setNegativeButton("Sessions", (dialog, which) -> showSessionsPage())
+            .show();
     }
 
     /** Skills & extensions page (katheer skills): list installed skills, toggle
