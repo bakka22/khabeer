@@ -3,7 +3,7 @@ package com.termux.app;
 import java.util.ArrayList;
 import java.util.List;
 
-public final class HermesSessionState {
+public final class KatheerSessionState {
 
     public static final class TurnState {
         public Object agent;

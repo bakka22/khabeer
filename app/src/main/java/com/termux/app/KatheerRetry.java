@@ -2,9 +2,9 @@ package com.termux.app;
 
 import java.util.Random;
 
-public final class HermesRetry {
+public final class KatheerRetry {
     private static final Random RANDOM = new Random();
-    private HermesRetry() {}
+    private KatheerRetry() {}
 
     public static long jitteredBackoff(int attempt, long baseMs, long capMs) {
         long exp = baseMs * (1L << Math.min(attempt, 10));

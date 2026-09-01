@@ -236,7 +236,7 @@
     <string name="donate_preference_title">Donate</string>
 
     <!-- AI workspace -->
-    <string name="ai_app_title">Mobile Hermes</string>
+    <string name="ai_app_title">katheer</string>
     <string name="ai_app_subtitle">Native agent with Termux tools</string>
     <string name="ai_welcome_title">Mobile agent</string>
     <string name="ai_welcome_body">Chat with model providers directly and expose Termux as a structured terminal tool.</string>

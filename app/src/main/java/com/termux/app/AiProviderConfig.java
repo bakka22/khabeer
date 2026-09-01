@@ -17,7 +17,7 @@ import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.GCMParameterSpec;
 
-/** Stores Hermes-mobile provider settings. Secrets are encrypted with Android Keystore. */
+/** Stores katheer-mobile provider settings. Secrets are encrypted with Android Keystore. */
 public final class AiProviderConfig {
 
     private static final String PREFS = "mobile_hermes_provider_config";

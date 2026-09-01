@@ -34,7 +34,7 @@ import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
-/** Persistent native Hermes-style runtime. Talks to model APIs directly and exposes Termux as tools. */
+/** Persistent native katheer-style runtime. Talks to model APIs directly and exposes Termux as tools. */
 public final class AiRuntimeService extends Service {
 
     public interface Listener {
@@ -71,10 +71,10 @@ public final class AiRuntimeService extends Service {
     private final Handler mHandler = new Handler(Looper.getMainLooper());
     private final List<Listener> mListeners = new ArrayList<>();
     private final Map<Long, PendingApproval> mPendingApprovals = new HashMap<>();
-    private final Map<String, HermesSessionState> mSessions = new HashMap<>();
+    private final Map<String, KatheerSessionState> mSessions = new HashMap<>();
 
     private AiDatabase mDatabase;
-    private MobileHermesToolExecutor mToolExecutor;
+    private MobileKatheerToolExecutor mToolExecutor;
     private AiProviderConfig mProviderConfig;
     private AiMcpRegistry mMcpRegistry;
     /** Live sessions: each runs its own turns on its own worker thread, with
@@ -89,16 +89,16 @@ public final class AiRuntimeService extends Service {
     private BusyInputMode mBusyMode = BusyInputMode.INTERRUPT;
     private final Object mQueueLock = new Object();
 
-    private HermesSessionState sessionState(String key) {
-        HermesSessionState s = mSessions.get(key);
-        if (s == null) { s = new HermesSessionState(); mSessions.put(key, s); }
+    private KatheerSessionState sessionState(String key) {
+        KatheerSessionState s = mSessions.get(key);
+        if (s == null) { s = new KatheerSessionState(); mSessions.put(key, s); }
         return s;
     }
 
 
     /** Live sessions: each runs its own turns on its own worker thread, with
      * its own state machine, transcript and interrupt flags — parallel
-     * sessions at once (Hermes: every session is self-contained). */
+     * sessions at once (katheer: every session is self-contained). */
     private static final class RunContext {
         final AiDatabase.RunRecord record;
         AiRunStateMachine stateMachine = new AiRunStateMachine();
@@ -108,7 +108,7 @@ public final class AiRuntimeService extends Service {
         volatile boolean stopRequested;
         volatile boolean lastTurnInterrupted;
         String steerText;
-        /** skill_view repeat-view dedup: "name|file" -> "mtime:size" (Hermes
+        /** skill_view repeat-view dedup: "name|file" -> "mtime:size" (katheer
          * repeat-view dedup — unchanged re-reads return a stub, not content). */
         final HashMap<String, String> skillViewCache = new HashMap<>();
 
@@ -163,7 +163,7 @@ public final class AiRuntimeService extends Service {
     private void clearActiveTurn(RunContext ctx) {
         if (ctx == null) return;
         try {
-            HermesSessionState ss = sessionState(ctx.record.sessionKey == null ? ctx.record.id : ctx.record.sessionKey);
+            KatheerSessionState ss = sessionState(ctx.record.sessionKey == null ? ctx.record.id : ctx.record.sessionKey);
             mDatabase.clearTurnLease(ctx.record.sessionKey, ss.persistent.runGeneration);
             ctx.record.activeTurnToken = null;
             persistRun(ctx);
@@ -177,7 +177,7 @@ public final class AiRuntimeService extends Service {
             ctx.record.activeTurnToken = token;
             ctx.record.activeTurnStartedAt = System.currentTimeMillis();
             ctx.record.resumePending = false;
-            HermesSessionState ss = sessionState(ctx.record.sessionKey == null ? ctx.record.id : ctx.record.sessionKey);
+            KatheerSessionState ss = sessionState(ctx.record.sessionKey == null ? ctx.record.id : ctx.record.sessionKey);
             mDatabase.markTurnLease(ctx.record.sessionKey, token, ss.persistent.runGeneration);
             persistRun(ctx);
         } catch (Exception ignored) {}
@@ -208,15 +208,19 @@ public final class AiRuntimeService extends Service {
         super.onCreate();
         mDatabase = new AiDatabase(this);
         mProviderConfig = new AiProviderConfig(this);
-        mToolExecutor = new MobileHermesToolExecutor(this);
+        mToolExecutor = new MobileKatheerToolExecutor(this);
         mMcpRegistry = new AiMcpRegistry(mProviderConfig);
+        // One-time katheer home migration; must precede MCP discovery so
+        // stored stdio paths are rewritten before any server is spawned.
+        AiSkillRegistry.migrateKatheerHome();
+        mDatabase.rewriteMcpServerDataRoot(".termuxAI", ".katheer");
         createNotificationChannel();
         startForeground(NOTIFICATION_ID, buildNotification());
-        // Seed bundled skills into $HOME/.termuxAI/skills (existing files win).
+        // Seed bundled skills into $HOME/.katheer/skills (existing files win).
         Thread seeder = new Thread(() -> AiSkillRegistry.seedFromAssets(this), "skill-seeder");
         seeder.setDaemon(true);
         seeder.start();
-        // Late-binding MCP discovery (Hermes mcp_startup): never blocks a
+        // Late-binding MCP discovery (katheer mcp_startup): never blocks a
         // turn; discovered tools appear in the model's array on the next one.
         mMcpRegistry.probeStaleAsync(mDatabase);
         try { mDatabase.recoverInterruptedTurns(); } catch (Exception ignored) {}
@@ -302,7 +306,7 @@ public AiDatabase.RunRecord getActiveRun() {
         return mDatabase.getTranscript(runId, 500);
     }
 
-    /** Archive a session (soft hide, Hermes-style). Archiving the active run
+    /** Archive a session (soft hide, katheer-style). Archiving the active run
      * stops its turn first and drops it as the current session. */
 public void archiveRun(String runId, boolean archived) {
         AiDatabase.RunRecord target = mDatabase.getRun(runId);
@@ -321,7 +325,7 @@ public void archiveRun(String runId, boolean archived) {
 
     /** Resume a persisted session: restore its transcript into the runtime so
      * the next prompt continues that conversation. Busy turns must be stopped
-     * first — switching mid-turn would scramble history (Hermes claims the
+     * first — switching mid-turn would scramble history (katheer claims the
      * active session before any switch). */
 public void resumeRun(String runId) {
         AiDatabase.RunRecord r = mDatabase.getRun(runId);
@@ -343,11 +347,11 @@ public void resumeRun(String runId) {
     }
 
     /** Starts a true session boundary: stops any turn and drops the current
-     * run entirely so the next prompt creates a fresh session (Hermes
+     * run entirely so the next prompt creates a fresh session (katheer
      * session_reset). stopActiveRun alone keeps the run as current. */
 public void newSession() {
         // Parallel sessions: leave every live run untouched — this only moves
-        // the UI focus off the current session (Hermes session boundary).
+        // the UI focus off the current session (katheer session boundary).
         mViewed = null;
         mHandler.post(() -> {
             for (Listener listener : new ArrayList<>(mListeners)) listener.onRunChanged(null);
@@ -361,7 +365,7 @@ public boolean steerActiveTurn(String text) {
         RunContext c = mViewed;
         if (c == null || c.worker == null || !c.worker.isAlive()) return false;
         if (c.stateMachine.getState() == AiRunStateMachine.State.WAITING_APPROVAL) return false;
-        HermesSessionState s = sessionState(c.record.sessionKey == null ? c.record.id : c.record.sessionKey);
+        KatheerSessionState s = sessionState(c.record.sessionKey == null ? c.record.id : c.record.sessionKey);
         s.conversation.sidecarNotes.add(text);
         c.steerText = text;
         emit("turn/steered", json("text", text));
@@ -370,7 +374,7 @@ public boolean steerActiveTurn(String text) {
 
 public void startAgent(String providerId, String baseUrl, String apiKey, String workspace, String prompt,
                            String model, @Nullable String effort, @Nullable String approvalPolicy) {
-        String normalizedWorkspace = MobileHermesToolExecutor.normalizeWorkspace(workspace);
+        String normalizedWorkspace = MobileKatheerToolExecutor.normalizeWorkspace(workspace);
         if (normalizedWorkspace == null) {
             notifyError(null, "Choose a valid project folder first.");
             return;
@@ -393,7 +397,7 @@ public void startAgent(String providerId, String baseUrl, String apiKey, String 
         record.lastResolvedModel = model;
         RunContext ctx = adoptRun(record);
         mViewed = ctx;
-        HermesSessionState ss = sessionState(sessionKey);
+        KatheerSessionState ss = sessionState(sessionKey);
         ss.persistent.bumpGeneration();
         transition(ctx, AiRunStateMachine.State.STARTING);
         transition(ctx, AiRunStateMachine.State.CONNECTING);
@@ -405,7 +409,7 @@ private boolean handleBusyInput(String prompt, String providerId, String baseUrl
         RunContext c = mViewed;
         if (c == null) return false;
         if (mBusyMode == BusyInputMode.QUEUE) {
-            HermesSessionState ss = sessionState(c.record.sessionKey == null ? c.record.id : c.record.sessionKey);
+            KatheerSessionState ss = sessionState(c.record.sessionKey == null ? c.record.id : c.record.sessionKey);
             synchronized (mQueueLock) {
                 if (ss.conversation.queuedEvents.size() >= BUSY_QUEUE_MAX_PENDING) {
                     notifyError(c.record.id, "Queue full (" + BUSY_QUEUE_MAX_PENDING + "). Wait for current turn to finish.");
@@ -423,7 +427,7 @@ private boolean handleBusyInput(String prompt, String providerId, String baseUrl
 
 private void drainQueueIfNeeded(RunContext ctx) {
         if (ctx == null) return;
-        HermesSessionState ss = sessionState(ctx.record.sessionKey == null ? ctx.record.id : ctx.record.sessionKey);
+        KatheerSessionState ss = sessionState(ctx.record.sessionKey == null ? ctx.record.id : ctx.record.sessionKey);
         String next = null;
         synchronized (mQueueLock) {
             if (!ss.conversation.queuedEvents.isEmpty()) next = ss.conversation.queuedEvents.remove(0);
@@ -444,7 +448,7 @@ private void drainQueueIfNeeded(RunContext ctx) {
             ctx().record.activeTurnToken = token;
             ctx().record.activeTurnStartedAt = System.currentTimeMillis();
             ctx().record.resumePending = false;
-            HermesSessionState ss = sessionState(ctx().record.sessionKey == null ? ctx().record.id : ctx().record.sessionKey);
+            KatheerSessionState ss = sessionState(ctx().record.sessionKey == null ? ctx().record.id : ctx().record.sessionKey);
             mDatabase.markTurnLease(ctx().record.sessionKey, token, ss.persistent.runGeneration);
             persistRun();
         } catch (Exception ignored) {}
@@ -453,7 +457,7 @@ private void drainQueueIfNeeded(RunContext ctx) {
     private void clearActiveTurn() {
         if (ctx() == null) return;
         try {
-            HermesSessionState ss = sessionState(ctx().record.sessionKey == null ? ctx().record.id : ctx().record.sessionKey);
+            KatheerSessionState ss = sessionState(ctx().record.sessionKey == null ? ctx().record.id : ctx().record.sessionKey);
             mDatabase.clearTurnLease(ctx().record.sessionKey, ss.persistent.runGeneration);
             ctx().record.activeTurnToken = null;
             persistRun();
@@ -466,7 +470,7 @@ public void sendPrompt(String prompt, @Nullable String effort, @Nullable String 
             notifyError(null, "No active native agent session.");
             return;
         }
-        // Session-authoritative resolution (Hermes _restore_session_model):
+        // Session-authoritative resolution (katheer _restore_session_model):
         // provider, model and credentials come from the session row and the
         // provider registry, never from ambient UI state — sessions carry
         // their own provider identity.
@@ -503,10 +507,10 @@ public void sendPrompt(String prompt, @Nullable String effort, @Nullable String 
                 c.record.state = AiRunStateMachine.State.INTERRUPTING;
                 persistRun(c);
             } catch (Exception ignored) {}
-            HermesInterruptManager.setInterrupt(true, c.worker.getId(), "steer");
+            KatheerInterruptManager.setInterrupt(true, c.worker.getId(), "steer");
         }
         // Let the interrupted worker unwind so it can persist its partial reply
-        // before we build the next turn (mirrors Hermes' orderly interrupt drain).
+        // before we build the next turn (mirrors katheer' orderly interrupt drain).
         if (c.worker != null && c.worker.isAlive()) {
             try { c.worker.join(3000); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
         }
@@ -517,7 +521,7 @@ public void sendPrompt(String prompt, @Nullable String effort, @Nullable String 
         runTurn(c, providerId, baseUrl, apiKey, c.record.workspace, prompt, model, effort, approvalPolicy);
     }
 
-    /** Session-scoped /model switch (Hermes _persist_model_switch_to_session):
+    /** Session-scoped /model switch (katheer _persist_model_switch_to_session):
      * the model lives on the session row so resume restores it. */
 public void setSessionModel(String model) {
         RunContext c = mViewed;
@@ -539,7 +543,7 @@ public void setSessionModel(String model) {
         emit("session/route", json("sessionId", c.record.id, "route", route));
     }
 
-    /** Session-scoped provider switch (Hermes model_config.gateway_runtime):
+    /** Session-scoped provider switch (katheer model_config.gateway_runtime):
      * the session keeps its transcript but subsequent turns run on the new
      * provider; the model resets to that provider's default. */
 public void setSessionProvider(String providerId) {
@@ -556,7 +560,7 @@ public void setSessionProvider(String providerId) {
     }
 
     /**
-     * Hermes-style interrupt checkpoint: when the previous turn was cut off
+     * katheer-style interrupt checkpoint: when the previous turn was cut off
      * mid-response, wrap the user's follow-up in a scaffold that tells the
      * model its own reply was interrupted and shows the visible text it had
      * produced, so "continue" has full context.
@@ -579,7 +583,7 @@ public void stopActiveRun() {
     private void stopRun(RunContext ctx) {
         if (ctx == null) return;
         ctx.stopRequested = true;
-        if (ctx.worker != null) HermesInterruptManager.setInterrupt(true, ctx.worker.getId(), "stop");
+        if (ctx.worker != null) KatheerInterruptManager.setInterrupt(true, ctx.worker.getId(), "stop");
         cancelApprovalsFor(ctx.record.id);
         if (ctx.worker != null) ctx.worker.interrupt();
         if (!isTerminal(ctx)) {
@@ -604,7 +608,7 @@ public void interruptActiveRun() {
         RunContext c = mViewed;
         if (c == null || c.worker == null) { stopActiveRun(); return; }
         c.stopRequested = true;
-        HermesInterruptManager.setInterrupt(true, c.worker.getId(), "interrupt");
+        KatheerInterruptManager.setInterrupt(true, c.worker.getId(), "interrupt");
         try { c.stateMachine.transition(AiRunStateMachine.State.INTERRUPTING); c.record.state = AiRunStateMachine.State.INTERRUPTING; persistRun(c); } catch (Exception ignored) {}
         emit("turn/interrupted", json("reason", "user"));
     }
@@ -652,15 +656,15 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         if (ctx.worker != null) ctx.worker.interrupt();
         String tag = ctx.record.id == null ? "runtime" : ctx.record.id.substring(0, Math.min(8, ctx.record.id.length()));
         ctx.worker = new Thread(() -> executeTurn(ctx, providerId, baseUrl, apiKey, workspace,
-            prompt == null ? "" : prompt, model, effort, approvalPolicy), "mobile-hermes-" + tag);
+            prompt == null ? "" : prompt, model, effort, approvalPolicy), "katheer-" + tag);
         ctx.worker.start();
     }
 
     private void executeTurn(RunContext ctx, String providerId, String baseUrl, String apiKey, String workspace, String prompt,
                          String model, @Nullable String effort, @Nullable String approvalPolicy) {
         mTurnContext.set(ctx);
-        HermesInterruptManager.clearCurrentThread();
-        HermesInterruptManager.setInterrupt(false, Thread.currentThread().getId(), null);
+        KatheerInterruptManager.clearCurrentThread();
+        KatheerInterruptManager.setInterrupt(false, Thread.currentThread().getId(), null);
         // A continuation after CANCELED needs a fresh machine (FSM has no CANCELED->RUNNING).
         if (ctx() == null || ctx().stateMachine.getState() == AiRunStateMachine.State.CANCELED
             || ctx().stateMachine.getState() == AiRunStateMachine.State.CREATED) {
@@ -693,7 +697,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
                 executeChatCompletionsTurn(ctx, providerId, baseUrl, apiKey, workspace, prompt, model, approvalPolicy);
                 return;
             }
-            for (int step = 0; step < MAX_MODEL_STEPS && !ctx().stopRequested && !HermesInterruptManager.isInterrupted(); step++) {
+            for (int step = 0; step < MAX_MODEL_STEPS && !ctx().stopRequested && !KatheerInterruptManager.isInterrupted(); step++) {
                 JSONObject response = callResponsesApiWithRetry(providerId, baseUrl, apiKey, model, effort, input);
                 JSONArray outputs = response.optJSONArray("output");
                 boolean hasToolCall = false;
@@ -748,16 +752,16 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
                 }
             }
 
-        if (!ctx().stopRequested && !HermesInterruptManager.isInterrupted()) failRun("The native agent reached its tool-step limit before finishing.");
-            else if (HermesInterruptManager.isInterrupted()) { emit("turn/interrupted", json("reason", HermesInterruptManager.getReason())); ctx().lastTurnInterrupted = true; clearActiveTurn(); }
+        if (!ctx().stopRequested && !KatheerInterruptManager.isInterrupted()) failRun("The native agent reached its tool-step limit before finishing.");
+            else if (KatheerInterruptManager.isInterrupted()) { emit("turn/interrupted", json("reason", KatheerInterruptManager.getReason())); ctx().lastTurnInterrupted = true; clearActiveTurn(); }
             else { ctx().lastTurnInterrupted = true; clearActiveTurn(); }
             drainQueueIfNeeded(ctx);
         } catch (Exception e) {
-            if (!ctx().stopRequested && !HermesInterruptManager.isInterrupted()) {
+            if (!ctx().stopRequested && !KatheerInterruptManager.isInterrupted()) {
                 if (isNetworkError(e)) { transitionWithFallback(AiRunStateMachine.State.DISCONNECTED); failRun(e.getMessage() == null ? e.toString() : e.getMessage()); }
                 else failRun(e.getMessage() == null ? e.toString() : e.getMessage());
             } else { emit("turn/interrupted", json("reason", "cancel")); ctx().lastTurnInterrupted = true; clearActiveTurn(); }
-        } finally { HermesInterruptManager.clearCurrentThread(); mTurnContext.remove(); }
+        } finally { KatheerInterruptManager.clearCurrentThread(); mTurnContext.remove(); }
     }
 
     private String extractMessageText(JSONObject item) {
@@ -773,7 +777,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         return builder.toString();
     }
 
-    /** Convert the chat-format history into Responses-API input items (full replay, Hermes-style). */
+    /** Convert the chat-format history into Responses-API input items (full replay, katheer-style). */
     private JSONArray toResponsesInput(JSONArray messages) throws Exception {
         JSONArray input = new JSONArray();
         for (int i = 0; i < messages.length(); i++) {
@@ -828,7 +832,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
                 String msg = e.getMessage() == null ? "" : e.getMessage();
                 boolean retryable = msg.contains("HTTP 429") || msg.contains("HTTP 5");
                 if (attempt < maxRetries && retryable && !ctx().stopRequested) {
-                    long backoff = HermesRetry.jitteredBackoff(attempt, 1000, 8000);
+                    long backoff = KatheerRetry.jitteredBackoff(attempt, 1000, 8000);
                     try { Thread.sleep(backoff); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); throw ie; }
                     continue;
                 }
@@ -847,7 +851,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         ctx().chatMessages.put(json("role", "user", "content", prompt));
         if (ctx() != null) { ctx().record.chatMessagesJson = ctx().chatMessages.toString(); persistRun(); }
 
-        for (int step = 0; step < MAX_MODEL_STEPS && !ctx().stopRequested && !HermesInterruptManager.isInterrupted(); step++) {
+        for (int step = 0; step < MAX_MODEL_STEPS && !ctx().stopRequested && !KatheerInterruptManager.isInterrupted(); step++) {
             JSONObject response = callChatCompletionsApi(providerId, baseUrl, apiKey, model, ctx().chatMessages);
             JSONArray choices = response.optJSONArray("choices");
             JSONObject choice = choices == null ? null : choices.optJSONObject(0);
@@ -887,13 +891,13 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
             }
         }
 
-        if (!ctx().stopRequested && !HermesInterruptManager.isInterrupted()) failRun("The chat-completions agent reached its tool-step limit before finishing.");
+        if (!ctx().stopRequested && !KatheerInterruptManager.isInterrupted()) failRun("The chat-completions agent reached its tool-step limit before finishing.");
         else { ctx().lastTurnInterrupted = true; clearActiveTurn(); }
         drainQueueIfNeeded(ctx);
     }
 
     /**
-     * Hermes-style replay cleanup (agent/replay_cleanup.py): a turn killed
+     * katheer-style replay cleanup (agent/replay_cleanup.py): a turn killed
      * mid-tool-loop can leave a trailing assistant(tool_calls) with NO tool
      * answers. Replaying that dangling tail makes the model re-issue the call
      * or lose the plot. Synthesize orphan-recovery tool results so the model
@@ -952,7 +956,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         connection.setRequestProperty("Content-Type", "application/json");
         connection.setRequestProperty("Accept", "text/event-stream");
         if (!TextUtils.isEmpty(apiKey)) connection.setRequestProperty("Authorization", "Bearer " + apiKey);
-        connection.setRequestProperty("X-Title", "Termux Mobile Hermes");
+        connection.setRequestProperty("X-Title", "Termux katheer");
         try (OutputStream output = connection.getOutputStream()) {
             output.write(body.toString().getBytes(StandardCharsets.UTF_8));
         }
@@ -984,7 +988,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         connection.setDoOutput(true);
         connection.setRequestProperty("Content-Type", "application/json");
         if (!TextUtils.isEmpty(apiKey)) connection.setRequestProperty("Authorization", "Bearer " + apiKey);
-        connection.setRequestProperty("X-Title", "Termux Mobile Hermes");
+        connection.setRequestProperty("X-Title", "Termux katheer");
         try (OutputStream output = connection.getOutputStream()) {
             output.write(body.toString().getBytes(StandardCharsets.UTF_8));
         }
@@ -1166,8 +1170,8 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         connection.setRequestProperty("Content-Type", "application/json");
         connection.setRequestProperty("Authorization", "Bearer " + apiKey);
         if ("openrouter".equals(providerId)) {
-            connection.setRequestProperty("HTTP-Referer", "https://termux.local/mobile-hermes");
-            connection.setRequestProperty("X-Title", "Termux Mobile Hermes");
+            connection.setRequestProperty("HTTP-Referer", "https://termux.local/katheer");
+            connection.setRequestProperty("X-Title", "Termux katheer");
         }
         try (OutputStream output = connection.getOutputStream()) {
             output.write(body.toString().getBytes(StandardCharsets.UTF_8));
@@ -1213,7 +1217,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
                 .put("parameters", flat.getJSONObject("parameters")));
     }
 
-    /** Every tool the model can call: terminal + skills + MCP tools (Hermes
+    /** Every tool the model can call: terminal + skills + MCP tools (katheer
      * merges all tools flat into one array — no wrapper tool). */
     private JSONArray modelTools(boolean chatShape) throws Exception {
         JSONArray tools = new JSONArray();
@@ -1273,7 +1277,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
             .put("name", "skill_manage")
             .put("description", "Create, update, or delete skills — your procedural memory for recurring task types. "
                 + "The call is an operations array (a single edit is a list of one); it applies atomically — any failure rolls "
-                + "every touched skill back. Ops: create (full SKILL.md; lands in $HOME/.termuxAI/skills/; must precede that "
+                + "every touched skill back. Ops: create (full SKILL.md; lands in $HOME/.katheer/skills/; must precede that "
                 + "skill's other ops), patch (targeted old_string/new_string fix — preferred; content alone REPLACES the whole "
                 + "file, read it via skill_view() first), write_file/remove_file (supporting files), delete (sole op only). "
                 + "Every write asks the user for approval first. Keep the description's first 57 chars a self-contained "
@@ -1388,7 +1392,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
 
     /** skills_list/skill_view run locally (no approval, no shell): read-only
      * filesystem access. skill_manage MUTATES the skills root, so it gates
-     * through the approval dialog before any write (Hermes write-gate). */
+     * through the approval dialog before any write (katheer write-gate). */
     private String runSkillsTool(String name, JSONObject args, @Nullable String approvalPolicy) {
         String displayName;
         if ("skill_view".equals(name)) displayName = args.optString("name", "skill_view");
@@ -1443,9 +1447,9 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
     }
 
     /**
-     * MCP tool dispatch (Hermes mcp tool handlers). Untrusted servers gate
+     * MCP tool dispatch (katheer mcp tool handlers). Untrusted servers gate
      * through the approval dialog BEFORE any network call — fail-closed, the
-     * same trust model Hermes applies to write-capable tools.
+     * same trust model katheer applies to write-capable tools.
      */
     private String runMcpToolCall(String registryName, JSONObject args, @Nullable String approvalPolicy) {
         AiMcpRegistry.ToolDef def = mMcpRegistry.findTool(registryName);
@@ -1576,11 +1580,11 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
 
     private boolean requestApproval(String command, String workspace) throws InterruptedException {
         if (ctx() == null) return false;
-        HermesInterruptManager.clearCurrentThread();
+        KatheerInterruptManager.clearCurrentThread();
         long id = mNextRequestId++;
         PendingApproval approval = new PendingApproval(ctx().record.id);
         mPendingApprovals.put(id, approval);
-        HermesSessionState ss = sessionState(ctx().record.sessionKey == null ? ctx().record.id : ctx().record.sessionKey);
+        KatheerSessionState ss = sessionState(ctx().record.sessionKey == null ? ctx().record.id : ctx().record.sessionKey);
         ss.persistent.pendingApproval = command;
         transition(AiRunStateMachine.State.WAITING_APPROVAL);
         JSONObject payload = new JSONObject();
@@ -1713,7 +1717,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
     /**
      * Rebuilds the system message at the start of every turn: new skills,
      * toggles and provider changes must reach EXISTING sessions too — the
-     * persisted transcript carries a frozen copy otherwise (Hermes rebuilds
+     * persisted transcript carries a frozen copy otherwise (katheer rebuilds
      * its prompt per turn behind a cache for the same reason).
      */
     private void refreshSystemMessage() {
@@ -1893,7 +1897,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
 
     private final java.util.concurrent.atomic.AtomicBoolean mTitleBusy = new java.util.concurrent.atomic.AtomicBoolean(false);
 
-    /** AI session titles (Hermes title_generator): a one-shot model call that
+    /** AI session titles (katheer title_generator): a one-shot model call that
      * names the session after its opening exchange. Message-derived titles
      * are regenerated; AI titles are never touched. */
     /** Synchronous single-session titler for the backfill queue. Returns

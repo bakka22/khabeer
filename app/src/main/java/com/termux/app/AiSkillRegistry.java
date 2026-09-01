@@ -29,11 +29,11 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Skills registry (Hermes skills_tool/skill_utils port).
+ * Skills registry (katheer skills_tool/skill_utils port).
  *
  * A skill is a directory containing SKILL.md (YAML frontmatter + markdown
  * body) plus optional support dirs (references/templates/assets/scripts).
- * Skills live at $HOME/.termuxAI/skills — one folder per skill, optionally
+ * Skills live at $HOME/.katheer/skills — one folder per skill, optionally
  * grouped by a category folder, so they can be synced with git.
  *
  * Progressive disclosure: only a name+description index reaches the system
@@ -91,10 +91,19 @@ public final class AiSkillRegistry {
     // ------------------------------------------------------------------
 
     public static File skillsRoot() {
-        return new File(TermuxConstants.TERMUX_HOME_DIR_PATH, ".termuxAI/skills");
+        return new File(TermuxConstants.TERMUX_HOME_DIR_PATH, ".katheer/skills");
     }
 
-    /** Pre-rename location; migrated once to the .termuxAI root. */
+    private static File dataRoot() {
+        return new File(TermuxConstants.TERMUX_HOME_DIR_PATH, ".katheer");
+    }
+
+    /** Pre-branding data root (skills, MCP helpers); migrated once to .katheer. */
+    private static File legacyDataRoot() {
+        return new File(TermuxConstants.TERMUX_HOME_DIR_PATH, ".termuxAI");
+    }
+
+    /** Pre-.termuxAI location; migrated once to the katheer root. */
     private static File legacySkillsRoot() {
         return new File(TermuxConstants.TERMUX_HOME_DIR_PATH, ".hermes/skills");
     }
@@ -207,7 +216,7 @@ public final class AiSkillRegistry {
 
     /**
      * Minimal frontmatter parser: top-level `key: value` lines with optional
-     * quotes and inline lists ([a, b] or a, b). The same naive fallback Hermes
+     * quotes and inline lists ([a, b] or a, b). The same naive fallback katheer
      * uses when a full YAML loader is unavailable.
      */
     private static void parseFrontmatter(String yaml, Skill skill) {
@@ -250,7 +259,7 @@ public final class AiSkillRegistry {
         return v;
     }
 
-    /** Hermes platform gate: empty platforms = all; "linux" matches Android. */
+    /** katheer platform gate: empty platforms = all; "linux" matches Android. */
     private static boolean platformSupported(List<String> platforms) {
         if (platforms == null || platforms.isEmpty()) return true;
         for (String p : platforms) {
@@ -397,7 +406,7 @@ public final class AiSkillRegistry {
     /**
      * @param dedup per-session map of "name|file" -> "mtime:size"; when the
      *        same unchanged file is requested again the stub teaches the model
-     *        to reuse the copy already in context (Hermes repeat-view dedup).
+     *        to reuse the copy already in context (katheer repeat-view dedup).
      */
     public static String viewTool(String name, @Nullable String filePath, @Nullable Map<String, String> dedup) {
         String clean = name == null ? "" : name.trim();
@@ -563,25 +572,70 @@ public final class AiSkillRegistry {
     // existing directories are never touched — user edits win)
     // ------------------------------------------------------------------
 
-    public static void seedFromAssets(Context context) {
+    public static boolean seedFromAssets(Context context) {
+        boolean renamed = migrateKatheerHome();
         try {
             File root = skillsRoot();
-            // One-time migration: move the old $HOME/.hermes/skills tree to
-            // $HOME/.termuxAI/skills, preserving user-added skills.
-            File legacy = legacySkillsRoot();
-            if (legacy.isDirectory() && !root.exists()) {
-                root.getParentFile().mkdirs();
-                if (!legacy.renameTo(root)) {
-                    // Rename across mount points fails; fall back to a copy.
-                    copyDir(legacy, root);
-                }
-            }
             root.mkdirs();
             String[] top = context.getAssets().list("skills");
-            if (top == null) return;
+            if (top == null) return renamed;
             for (String entry : top) copyAssetDir(context, "skills/" + entry, new File(root, entry));
             invalidate();
         } catch (Exception ignored) {}
+        return renamed;
+    }
+
+    /**
+     * One-time home migration to the katheer data root:
+     *  1. $HOME/.termuxAI  ->  $HOME/.katheer (whole tree: skills, MCP helpers)
+     *  2. $HOME/.hermes/skills -> $HOME/.katheer/skills (oldest layout)
+     *  3. stale ".termuxAI" path mentions inside migrated skill files are
+     *     rewritten so the agent's guidance keeps pointing at real paths.
+     * Returns true when the data root was renamed — callers may need to
+     * rewrite stored paths (e.g. stdio MCP server commands).
+     */
+    public static boolean migrateKatheerHome() {
+        boolean renamed = false;
+        try {
+            File katheer = dataRoot();
+            File legacy = legacyDataRoot();
+            if (legacy.isDirectory() && !katheer.exists()) {
+                renamed = legacy.renameTo(katheer);
+                if (!renamed) {
+                    // Rename across mount points fails; fall back to a copy.
+                    copyDir(legacy, katheer);
+                    renamed = katheer.isDirectory();
+                    if (renamed) deleteRecursive(legacy);
+                }
+            }
+            katheer.mkdirs();
+            File root = skillsRoot();
+            File oldest = legacySkillsRoot();
+            if (oldest.isDirectory() && !root.exists()) {
+                root.getParentFile().mkdirs();
+                if (!oldest.renameTo(root)) copyDir(oldest, root);
+            }
+            rewriteLegacyPaths(katheer);
+        } catch (Exception ignored) {}
+        return renamed;
+    }
+
+    /** Idempotent: rewrites ".termuxAI" path mentions inside markdown skill
+     *  files under the katheer root (agent-authored content may embed paths). */
+    private static void rewriteLegacyPaths(File dir) {
+        if (dir == null || !dir.isDirectory()) return;
+        File[] children = dir.listFiles();
+        if (children == null) return;
+        for (File child : children) {
+            if (child.isDirectory()) {
+                rewriteLegacyPaths(child);
+            } else if (child.isFile() && child.getName().endsWith(".md") && child.length() <= MAX_SKILL_FILE_BYTES) {
+                String content = readFile(child, MAX_SKILL_FILE_BYTES);
+                if (content != null && content.contains(".termuxAI")) {
+                    writeTextFile(child, content.replace(".termuxAI", ".katheer"));
+                }
+            }
+        }
     }
 
     private static void copyDir(File source, File target) {
@@ -694,7 +748,7 @@ public final class AiSkillRegistry {
     }
 
     // ==================================================================
-    // skill_manage tool (Hermes skill_manager_tool port, essential core)
+    // skill_manage tool (katheer skill_manager_tool port, essential core)
     // ==================================================================
 
     private static final int MAX_SKILL_CONTENT_CHARS = 100_000;
@@ -737,7 +791,7 @@ public final class AiSkillRegistry {
     /**
      * skill_manage dispatch. Accepts the operations-array shape (one op per
      * skill; a single edit is a list of one) and the legacy flat shape.
-     * Batch semantics follow Hermes: delete must be the sole op; all touched
+     * Batch semantics follow katheer: delete must be the sole op; all touched
      * skills are snapshotted and rolled back on any failure.
      */
     public static String manageTool(JSONObject args) {
@@ -863,7 +917,7 @@ public final class AiSkillRegistry {
         }
     }
 
-    // --- validators (Hermes _validate_*) ---
+    // --- validators (katheer _validate_*) ---
 
     private static String validateName(String name) {
         if (TextUtils.isEmpty(name)) return "Skill name is required.";
@@ -886,7 +940,7 @@ public final class AiSkillRegistry {
     }
 
     /**
-     * Frontmatter validation per Hermes _validate_frontmatter. When
+     * Frontmatter validation per katheer _validate_frontmatter. When
      * {@code newSkill} the description must also fit the 60-char prompt index
      * budget so new skills never lose routing signal to truncation.
      */
@@ -936,7 +990,7 @@ public final class AiSkillRegistry {
     }
 
     /**
-     * file_path validation per Hermes: no traversal; 'SKILL.md' (or
+     * file_path validation per katheer: no traversal; 'SKILL.md' (or
      * 'name/SKILL.md') targets the main file; anything else must live under
      * references/templates/scripts/assets and name an actual file.
      */
@@ -955,7 +1009,7 @@ public final class AiSkillRegistry {
         return null;
     }
 
-    // --- actions (Hermes _create_skill / _edit_skill / _patch_skill / ...) ---
+    // --- actions (katheer _create_skill / _edit_skill / _patch_skill / ...) ---
 
     private static String createSkill(String name, String content, String category) {
         String err = validateName(name);
@@ -1213,7 +1267,7 @@ public final class AiSkillRegistry {
     }
 
     // ==================================================================
-    // Guard scan (Hermes skills_guard port — curated pattern subset)
+    // Guard scan (katheer skills_guard port — curated pattern subset)
     // ==================================================================
 
     public static final class Finding {
@@ -1247,7 +1301,7 @@ public final class AiSkillRegistry {
         }
     }
 
-    /** (patternId, severity, category, regex, description) — ported from Hermes skills_guard THREAT_PATTERNS. */
+    /** (patternId, severity, category, regex, description) — ported from katheer skills_guard THREAT_PATTERNS. */
     private static final Object[][] GUARD_PATTERNS = {
         // exfiltration
         {"env_exfil_curl", "critical", "exfiltration", "curl\\s+(?![^\\n]*https?://(?:localhost|127\\.0\\.0\\.1|\\[::1\\]))[^\\n]*\\$\\{?\\w*(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|API)", "curl command interpolating secret environment variable"},
@@ -1339,7 +1393,7 @@ public final class AiSkillRegistry {
         ".git", "node_modules", "build", "dist", "__pycache__", ".venv"));
 
     /**
-     * Scan a skill directory for threat patterns (Hermes skills_guard port,
+     * Scan a skill directory for threat patterns (katheer skills_guard port,
      * curated subset). Line-scans every text file under the dir; binary
      * files and files > 256KB are skipped.
      */
@@ -1416,13 +1470,13 @@ public final class AiSkillRegistry {
     }
 
     // ==================================================================
-    // /skill-name composer invocations (Hermes skill_commands port)
+    // /skill-name composer invocations (katheer skill_commands port)
     // ==================================================================
     private static final int MAX_STACKED_SKILLS = 5;
 
     /**
      * Resolve a composer prompt of the form "/skill-a /skill-b user text"
-     * into a message that loads each named skill's full SKILL.md (Hermes
+     * into a message that loads each named skill's full SKILL.md (katheer
      * stacked slash-skill invocation). Returns {builtMessage, loadedNamesCsv}
      * or null when the prompt does not invoke any known skill (in which case
      * the text should be sent to the model unchanged).
@@ -1476,7 +1530,7 @@ public final class AiSkillRegistry {
     }
 
     // ==================================================================
-    // Skill installation (Hermes skills install port: download → quarantine
+    // Skill installation (katheer skills install port: download → quarantine
     // → guard scan → confirm happens in the UI; the move happens here)
     // ==================================================================
 

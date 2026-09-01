@@ -17,8 +17,8 @@ import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
-/** Native Hermes-mobile tool executor backed by the bundled Termux environment. */
-public final class MobileHermesToolExecutor {
+/** Native katheer-mobile tool executor backed by the bundled Termux environment. */
+public final class MobileKatheerToolExecutor {
 
     private static final int MAX_CAPTURE_BYTES = 64 * 1024;
     private static final int DEFAULT_TIMEOUT_SECONDS = 300;
@@ -26,7 +26,7 @@ public final class MobileHermesToolExecutor {
 
     private final Context mContext;
 
-    public MobileHermesToolExecutor(Context context) {
+    public MobileKatheerToolExecutor(Context context) {
         mContext = context.getApplicationContext();
     }
 
@@ -95,9 +95,9 @@ public final class MobileHermesToolExecutor {
             CountDownLatch readersDone = new CountDownLatch(2);
             Process finalProcess = process;
             new Thread(() -> drain(finalProcess.getInputStream(), stdout, readersDone),
-                "mobile-hermes-stdout").start();
+                "katheer-stdout").start();
             new Thread(() -> drain(finalProcess.getErrorStream(), stderr, readersDone),
-                "mobile-hermes-stderr").start();
+                "katheer-stderr").start();
 
             boolean finished = process.waitFor(timeout, TimeUnit.SECONDS);
             if (!finished) {

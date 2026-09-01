@@ -2,7 +2,7 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android" android:layout_width="match_parent" android:layout_height="match_parent" android:orientation="vertical" android:background="@drawable/bg_gradient_main">
     <LinearLayout android:layout_width="match_parent" android:layout_height="56dp" android:gravity="center_vertical" android:paddingStart="16dp" android:paddingEnd="16dp">
         <ImageView android:layout_width="28dp" android:layout_height="28dp" android:src="@drawable/ic_ai_menu" />
-        <TextView android:text="Termux AI Shell" android:textColor="@color/ai_text" android:textSize="15sp" android:textStyle="bold" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:layout_marginStart="12dp" />
+        <TextView android:text="katheer Shell" android:textColor="@color/ai_text" android:textSize="15sp" android:textStyle="bold" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:layout_marginStart="12dp" />
         <TextView android:text="● main" android:textColor="@color/ai_success" android:textSize="11sp" android:background="@drawable/bg_ai_chip" android:paddingStart="8dp" android:paddingEnd="8dp" android:paddingTop="4dp" android:paddingBottom="4dp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
     </LinearLayout>
     <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:paddingStart="12dp" android:paddingEnd="12dp" android:paddingTop="8dp" android:paddingBottom="8dp">

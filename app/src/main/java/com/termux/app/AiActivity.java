@@ -244,7 +244,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         setupProviderTiles();
         setupActions();
         selectProvider(AiProviderProfile.find(mProviderConfig.getSelectedProviderId()), false);
-        mChatTitle.setText("Mobile Hermes");
+        mChatTitle.setText("katheer");
         bindRuntime();
         bindTermux();
     }
@@ -296,7 +296,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             mSetupPanel.setVisibility(View.GONE);
             mChatPage.setVisibility(View.GONE);
             mHomePanel.setVisibility(View.VISIBLE);
-            mChatTitle.setText("Mobile Hermes");
+            mChatTitle.setText("katheer");
             showFeaturedProviders();
             return;
         }
@@ -304,7 +304,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             mChatPage.setVisibility(View.GONE);
             mSetupPanel.setVisibility(View.GONE);
             mHomePanel.setVisibility(View.VISIBLE);
-            mChatTitle.setText("Mobile Hermes");
+            mChatTitle.setText("katheer");
             showFeaturedProviders();
             return;
         }
@@ -384,7 +384,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     }
 
     private void setupChrome() {
-        mChatTitle.setText("Mobile Hermes");
+        mChatTitle.setText("katheer");
         if (mMenuButton != null) mMenuButton.setOnClickListener(view -> { if (mDrawer != null) mDrawer.openDrawer(findViewById(R.id.ai_drawer_panel)); });
         if (mSettingsButton != null) mSettingsButton.setOnClickListener(view -> createNewSessionChat());
         if (mStopButton != null) mStopButton.setVisibility(View.GONE);
@@ -596,7 +596,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
 
     /** Session provider switching: a full providers page — pick a provider,
      * land on its configuration page, and Continue binds it to THIS session
-     * only (Hermes: the session row carries its own route). */
+     * only (katheer: the session row carries its own route). */
     private void pickSessionProvider() {
         mPickingSessionProvider = true;
         showProviderDirectory();
@@ -813,10 +813,10 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         button.setLayoutParams(lp);
     }
 
-    /** Skills & extensions page (Hermes skills): list installed skills, toggle
+    /** Skills & extensions page (katheer skills): list installed skills, toggle
      * them, and read the full SKILL.md. The skills root is
-     * $HOME/.termuxAI/skills — drop a folder with a SKILL.md in there (or sync
-     * one from a desktop Hermes install) and it appears here. */
+     * $HOME/.katheer/skills — drop a folder with a SKILL.md in there (or sync
+     * one from a desktop katheer install) and it appears here. */
     private void showExtensionsPage() {
         if (mExtensionsPage == null) return;
         mHomePanel.setVisibility(View.GONE);
@@ -857,7 +857,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         toolbar.setLayoutParams(toolbarLp);
 
         TextView pathHint = new TextView(this);
-        pathHint.setText("$HOME/.termuxAI/skills");
+        pathHint.setText("$HOME/.katheer/skills");
         pathHint.setTextColor(color(R.color.ai_text_muted));
         pathHint.setTextSize(11);
         pathHint.setTypeface(Typeface.MONOSPACE);
@@ -911,7 +911,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         }
         if (!anyVisible) {
             TextView empty = new TextView(this);
-            empty.setText("No skills installed. Skills live in $HOME/.termuxAI/skills — one folder per skill with a SKILL.md inside.");
+            empty.setText("No skills installed. Skills live in $HOME/.katheer/skills — one folder per skill with a SKILL.md inside.");
             empty.setTextColor(color(R.color.ai_text_muted));
             empty.setTextSize(13);
             empty.setPadding(0, dp(6), 0, dp(16));
@@ -1312,7 +1312,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
 
     // ------------------------------------------------------------------
     // MCP OAuth 2.0 sign-in (authorization code + PKCE, loopback callback
-    // with a manual paste fallback — Hermes mcp_oauth flow)
+    // with a manual paste fallback — katheer mcp_oauth flow)
     // ------------------------------------------------------------------
 
     private void startMcpOAuthSignIn(AiDatabase.McpServerRecord record) {
@@ -1468,7 +1468,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
 
     // ------------------------------------------------------------------
     // Skill installation: download archive → extract to a quarantine dir →
-    // guard scan → user confirm → move into $HOME/.termuxAI/skills
+    // guard scan → user confirm → move into $HOME/.katheer/skills
     // ------------------------------------------------------------------
 
     private void showSkillInstallDialog() {
@@ -1713,7 +1713,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         new MaterialAlertDialogBuilder(this)
             .setTitle("Install " + installable.size() + " skill" + (installable.size() == 1 ? "" : "s") + "?")
             .setMessage(blocked.isEmpty()
-                ? "Scan complete. Install the checked skills into $HOME/.termuxAI/skills?"
+                ? "Scan complete. Install the checked skills into $HOME/.katheer/skills?"
                 : blocked.size() + " skill(s) were BLOCKED by the security scan and cannot be installed.")
             .setView(box)
             .setNegativeButton(android.R.string.cancel, null)
@@ -1851,7 +1851,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mShowingProviderDirectory = false;
         mProviderGrid.removeAllViews();
         mHomeTitle.setText("Choose your agent");
-        mHomeBody.setText("Start with OpenAI, Anthropic, or OpenCode. More providers opens the full Hermes registry.");
+        mHomeBody.setText("Start with OpenAI, Anthropic, or OpenCode. More providers opens the full katheer registry.");
         for (String id : AiProviderProfile.FEATURED_PROVIDER_IDS) {
             AiProviderProfile profile = AiProviderProfile.find(id);
             if (profile != null) mProviderGrid.addView(createProviderTile(profile));
@@ -1864,7 +1864,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         if (mSessionsPage != null) mSessionsPage.setVisibility(View.GONE);
         if (mOpenCodePage != null) mOpenCodePage.setVisibility(View.GONE);
         if (mExtensionsPage != null) mExtensionsPage.setVisibility(View.GONE);
-        mChatTitle.setText("Mobile Hermes");
+        mChatTitle.setText("katheer");
     }
 
     private void showProviderDirectory() {
@@ -1873,7 +1873,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mHomeTitle.setText(mPickingSessionProvider ? "Choose a provider for this session" : "More providers");
         mHomeBody.setText(mPickingSessionProvider
             ? "Pick a provider, configure it if needed, then Continue to bind it to this session only."
-            : "Hermes provider registry. Adapters marked “coming next” are listed honestly until their native request/auth flow is implemented.");
+            : "katheer provider registry. Adapters marked “coming next” are listed honestly until their native request/auth flow is implemented.");
         for (AiProviderProfile profile : AiProviderProfile.PROFILES) {
             boolean featured = "openai".equals(profile.id) || "anthropic".equals(profile.id) || "opencode".equals(profile.id);
             if (!featured || mPickingSessionProvider) mProviderGrid.addView(createProviderTile(profile));
@@ -2147,7 +2147,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             return;
         }
         if (!mSelectedProfile.implemented) {
-            showError(mSelectedProfile.name + " is registered from Hermes, but its native mobile adapter is not implemented yet.");
+            showError(mSelectedProfile.name + " is registered from katheer, but its native mobile adapter is not implemented yet.");
             showSetupPage();
             return;
         }
@@ -2179,7 +2179,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mCurrentToolBubble = null;
         mStopButton.setVisibility(View.GONE);
         mEmptyChatHint.setVisibility(View.VISIBLE);
-        mChatTitle.setText("Mobile Hermes");
+        mChatTitle.setText("katheer");
         mChatPage.setVisibility(View.GONE);
         mSetupPanel.setVisibility(View.GONE);
         mHomePanel.setVisibility(View.VISIBLE);
@@ -2203,7 +2203,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         String workspace = validateWorkspace();
         if (profile == null || workspace == null) return;
         // Slash-skill invocation: "/skill-name extra text" loads the skill's
-        // full SKILL.md into the outgoing message (Hermes skill_commands).
+        // full SKILL.md into the outgoing message (katheer skill_commands).
         // Anything that doesn't resolve to an installed skill is sent as-is.
         String typedPrompt = prompt;
         String[] invocation = AiSkillRegistry.buildSkillInvocationMessage(prompt);
@@ -2220,7 +2220,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mStopButton.setVisibility(View.VISIBLE);
         if (mHasNativeSession) {
             // Session-authoritative: provider/model/credentials resolve from
-            // the session row inside the service (Hermes session model).
+            // the session row inside the service (katheer session model).
             mRuntimeService.sendPrompt(prompt, clean(mSelectedEffort), mSelectedApproval);
         } else {
             String apiKey = mProviderConfig.getApiKey(profile);
@@ -2369,7 +2369,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
                     showModelLoadFailedDialog(profile, message);
                 });
             }
-        }, "mobile-hermes-model-catalog").start();
+        }, "katheer-model-catalog").start();
     }
 
     private void showModelListDialog(AiProviderProfile profile, List<String> models) {
@@ -2425,7 +2425,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         if (cleanModel.isEmpty()) cleanModel = profile.defaultModel;
         mSelectedModel = cleanModel;
         mProviderConfig.setModel(profile, cleanModel);
-        // Session-scoped /model switch (Hermes _persist_model_switch_to_session):
+        // Session-scoped /model switch (katheer _persist_model_switch_to_session):
         // the model lives on the session row so resume restores this choice.
         if (mRuntimeService != null && mHasNativeSession) mRuntimeService.setSessionModel(cleanModel);
         syncControlLabels();
@@ -2509,7 +2509,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         }
         String workspace = validateWorkspace();
         if (workspace == null) return;
-        TermuxSession session = mTermuxService.createTermuxSession(null, null, null, workspace, false, "Mobile Hermes shell");
+        TermuxSession session = mTermuxService.createTermuxSession(null, null, null, workspace, false, "katheer shell");
         if (session == null) {
             showError("Unable to open the optional Termux shell.");
             return;
@@ -2535,7 +2535,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
 
     @Nullable
     private String validateWorkspace() {
-        String path = MobileHermesToolExecutor.normalizeWorkspace(mWorkspaceInput.getText().toString());
+        String path = MobileKatheerToolExecutor.normalizeWorkspace(mWorkspaceInput.getText().toString());
         if (path == null) {
             mWorkspaceInputLayout.setError("Choose a readable folder under Termux home or shared storage.");
             return null;
@@ -2563,7 +2563,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         } catch (SecurityException ignored) {
         }
         String path = pathFromTreeUri(uri);
-        if (path == null || MobileHermesToolExecutor.normalizeWorkspace(path) == null) {
+        if (path == null || MobileKatheerToolExecutor.normalizeWorkspace(path) == null) {
             showError("That folder is not accessible from the Termux shell.");
             return;
         }

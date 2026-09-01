@@ -120,6 +120,8 @@
         <activity
             android:name=".app.AiActivity"
             android:exported="true"
+            android:icon="@mipmap/ic_katheer"
+            android:roundIcon="@mipmap/ic_katheer"
             android:label="@string/ai_app_title"
             android:launchMode="singleTask"
             android:resizeableActivity="true"
