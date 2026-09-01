@@ -1221,6 +1221,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         if (AiSkillRegistry.promptSection() != null) {
             tools.put(chatShape ? chatShape(skillsListTool()) : skillsListTool());
             tools.put(chatShape ? chatShape(skillViewTool()) : skillViewTool());
+            tools.put(chatShape ? chatShape(skillManageTool()) : skillManageTool());
         }
         if (mMcpRegistry != null) {
             for (AiMcpRegistry.ToolDef def : mMcpRegistry.toolsForModel(mDatabase)) {
@@ -1266,6 +1267,57 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
                 .put("required", new JSONArray().put("name")));
     }
 
+    private JSONObject skillManageTool() throws Exception {
+        return new JSONObject()
+            .put("type", "function")
+            .put("name", "skill_manage")
+            .put("description", "Create, update, or delete skills — your procedural memory for recurring task types. "
+                + "The call is an operations array (a single edit is a list of one); it applies atomically — any failure rolls "
+                + "every touched skill back. Ops: create (full SKILL.md; lands in $HOME/.termuxAI/skills/; must precede that "
+                + "skill's other ops), patch (targeted old_string/new_string fix — preferred; content alone REPLACES the whole "
+                + "file, read it via skill_view() first), write_file/remove_file (supporting files), delete (sole op only). "
+                + "Every write asks the user for approval first. Keep the description's first 57 chars a self-contained "
+                + "trigger: 'Use when <trigger>. <one-line behavior>.'")
+            .put("parameters", new JSONObject()
+                .put("type", "object")
+                .put("properties", new JSONObject()
+                    .put("operations", new JSONObject()
+                        .put("type", "array")
+                        .put("description", "Ordered ops; each names its target skill.")
+                        .put("items", new JSONObject()
+                            .put("type", "object")
+                            .put("properties", new JSONObject()
+                                .put("name", new JSONObject()
+                                    .put("type", "string")
+                                    .put("description", "Skill name (lowercase, hyphens/underscores, max 64 chars); an existing skill's name unless creating."))
+                                .put("action", new JSONObject()
+                                    .put("type", "string")
+                                    .put("enum", new JSONArray().put("create").put("patch").put("delete").put("write_file").put("remove_file")))
+                                .put("content", new JSONObject()
+                                    .put("type", "string")
+                                    .put("description", "Full SKILL.md text (YAML frontmatter + markdown body) for create, or a full rewrite on patch."))
+                                .put("category", new JSONObject()
+                                    .put("type", "string")
+                                    .put("description", "Optional category subdir for create (e.g. 'devops')."))
+                                .put("old_string", new JSONObject()
+                                    .put("type", "string")
+                                    .put("description", "Text to find (patch; exact match, like the patch tool)."))
+                                .put("new_string", new JSONObject()
+                                    .put("type", "string")
+                                    .put("description", "Replacement (patch); empty string deletes the match."))
+                                .put("replace_all", new JSONObject()
+                                    .put("type", "boolean")
+                                    .put("description", "patch: replace all occurrences (default false)."))
+                                .put("file_path", new JSONObject()
+                                    .put("type", "string")
+                                    .put("description", "Path RELATIVE to the skill's own directory, e.g. 'references/api.md' — no leading slash, never absolute. write_file/remove_file: required; first segment references/, templates/, scripts/, or assets/. patch: optional (default SKILL.md)."))
+                                .put("file_content", new JSONObject()
+                                    .put("type", "string")
+                                    .put("description", "Content for write_file.")))
+                            .put("required", new JSONArray().put("name").put("action")))))
+                .put("required", new JSONArray().put("operations")));
+    }
+
     private JSONObject executeChatToolCall(JSONObject toolCall, String workspace,
                                            @Nullable String approvalPolicy) throws Exception {
         String callId = toolCall.optString("id");
@@ -1277,7 +1329,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
 
         String output;
         if (isSkillsTool(name)) {
-            output = runSkillsTool(name, args);
+            output = runSkillsTool(name, args, approvalPolicy);
         } else if (name != null && name.startsWith(AiMcpRegistry.TOOL_PREFIX)) {
             output = runMcpToolCall(name, args, approvalPolicy);
         } else if (!"terminal".equals(name)) {
@@ -1307,7 +1359,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
 
         String output;
         if (isSkillsTool(name)) {
-            output = runSkillsTool(name, args);
+            output = runSkillsTool(name, args, approvalPolicy);
         } else if (name != null && name.startsWith(AiMcpRegistry.TOOL_PREFIX)) {
             output = runMcpToolCall(name, args, approvalPolicy);
         } else if (!"terminal".equals(name)) {
@@ -1331,17 +1383,32 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
     }
 
     private boolean isSkillsTool(String name) {
-        return "skills_list".equals(name) || "skill_view".equals(name);
+        return "skills_list".equals(name) || "skill_view".equals(name) || "skill_manage".equals(name);
     }
 
-    /** Skills tools run locally (no approval, no shell): read-only filesystem access. */
-    private String runSkillsTool(String name, JSONObject args) {
-        String displayName = "skill_view".equals(name)
-            ? args.optString("name", "skill_view") : "skills_list";
+    /** skills_list/skill_view run locally (no approval, no shell): read-only
+     * filesystem access. skill_manage MUTATES the skills root, so it gates
+     * through the approval dialog before any write (Hermes write-gate). */
+    private String runSkillsTool(String name, JSONObject args, @Nullable String approvalPolicy) {
+        String displayName;
+        if ("skill_view".equals(name)) displayName = args.optString("name", "skill_view");
+        else if ("skill_manage".equals(name)) displayName = AiSkillRegistry.manageGist(manageOpOf(args));
+        else displayName = "skills_list";
         emit("tool/callStarted", json("name", name, "command", displayName));
         String output;
         try {
-            if ("skills_list".equals(name)) {
+            if ("skill_manage".equals(name)) {
+                if (!"never".equals(approvalPolicy)) {
+                    String gist = TextUtils.isEmpty(displayName) ? "skill_manage" : displayName;
+                    boolean approved = requestApproval(gist, AiSkillRegistry.skillsRoot().getAbsolutePath());
+                    if (!approved) {
+                        output = skillsToolError("User denied this skill write. Ask the user to approve it in the dialog, or describe the change instead.");
+                        emit("item/commandExecution/outputDelta", json("text", skillsToolSummary(name, output), "command", displayName));
+                        return output;
+                    }
+                }
+                output = AiSkillRegistry.manageTool(args);
+            } else if ("skills_list".equals(name)) {
                 String category = args.optString("category", "");
                 output = AiSkillRegistry.listTool(TextUtils.isEmpty(category) ? null : category);
             } else {
@@ -1355,6 +1422,16 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         }
         emit("item/commandExecution/outputDelta", json("text", skillsToolSummary(name, output), "command", displayName));
         return output;
+    }
+
+    /** Normalize the two call shapes into a single op for the approval gist. */
+    private JSONObject manageOpOf(JSONObject args) {
+        if (args.has("operations")) {
+            JSONArray ops = args.optJSONArray("operations");
+            if (ops != null && ops.length() > 0) return ops.optJSONObject(0);
+            return null;
+        }
+        return args;
     }
 
     private String skillsToolError(String message) {
@@ -1483,6 +1560,12 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
             }
             if (result.optBoolean("dedup", false)) return name + " → unchanged (already in context)";
             if ("skills_list".equals(name)) return name + " → " + result.optInt("count", 0) + " skills";
+            if ("skill_manage".equals(name)) {
+                String msg = result.optString("message", "");
+                int applied = result.optInt("applied", 0);
+                if (applied > 0) return name + " → batch(" + applied + " ops) applied";
+                return name + " → " + (TextUtils.isEmpty(msg) ? "done" : msg.replace('\n', ' ').trim());
+            }
             String loaded = result.optString("name", "");
             String content = result.optString("content", "");
             return name + " → " + loaded + " (" + content.length() + " chars)";

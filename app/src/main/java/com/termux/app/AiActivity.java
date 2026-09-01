@@ -44,10 +44,32 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.File;
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
+import java.io.BufferedReader;
+import java.io.DataInputStream;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.net.URL;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.TimeUnit;
+import java.util.zip.GZIPInputStream;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
 
 /** Native mobile agent workspace: provider config + polished chat + optional Termux shell. */
 public final class AiActivity extends AppCompatActivity implements AiRuntimeService.Listener {
@@ -843,6 +865,21 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         pathHint.setLayoutParams(pathLp);
         toolbar.addView(pathHint);
 
+        MaterialButton install = new MaterialButton(this);
+        install.setText("Install");
+        install.setTextSize(12);
+        install.setAllCaps(false);
+        install.setStrokeColor(android.content.res.ColorStateList.valueOf(color(R.color.ai_border)));
+        install.setBackgroundTintList(android.content.res.ColorStateList.valueOf(color(R.color.ai_surface)));
+        install.setTextColor(color(R.color.ai_text));
+        install.setCornerRadius(dp(10));
+        LinearLayout.LayoutParams installLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        installLp.setMargins(0, 0, dp(8), 0);
+        install.setLayoutParams(installLp);
+        install.setOnClickListener(v -> showSkillInstallDialog());
+        toolbar.addView(install);
+
         MaterialButton refresh = new MaterialButton(this);
         refresh.setText("Refresh");
         refresh.setTextSize(12);
@@ -1134,10 +1171,27 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         commandInput.setVisibility(stdioBox.isChecked() ? View.VISIBLE : View.GONE);
         argsInput.setVisibility(stdioBox.isChecked() ? View.VISIBLE : View.GONE);
 
-        android.widget.CheckBox useToken = new android.widget.CheckBox(this);
-        useToken.setText("Authorization: Bearer token (HTTP servers only)");
-        useToken.setTextColor(color(R.color.ai_text));
-        useToken.setChecked(existing != null && "header".equals(existing.authType));
+        TextView authLabel = new TextView(this);
+        authLabel.setText("Authentication (HTTP servers)");
+        authLabel.setTextColor(color(R.color.ai_text_muted));
+        authLabel.setTextSize(12);
+
+        android.widget.RadioGroup authGroup = new android.widget.RadioGroup(this);
+        android.widget.RadioButton authNone = new android.widget.RadioButton(this);
+        authNone.setText("None (keyless server)");
+        android.widget.RadioButton authHeader = new android.widget.RadioButton(this);
+        authHeader.setText("Bearer token (stored encrypted)");
+        android.widget.RadioButton authOauth = new android.widget.RadioButton(this);
+        authOauth.setText("OAuth 2.0 — sign in with browser");
+        for (android.widget.RadioButton button : new android.widget.RadioButton[]{authNone, authHeader, authOauth})
+            button.setTextColor(color(R.color.ai_text));
+        authGroup.addView(authNone);
+        authGroup.addView(authHeader);
+        authGroup.addView(authOauth);
+        String existingAuth = existing == null ? "none" : existing.authType;
+        if ("header".equals(existingAuth)) authHeader.setChecked(true);
+        else if ("oauth".equals(existingAuth)) authOauth.setChecked(true);
+        else authNone.setChecked(true);
 
         EditText tokenInput = new EditText(this);
         tokenInput.setSingleLine(true);
@@ -1146,8 +1200,19 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         tokenInput.setText(existing == null || !"header".equals(existing.authType)
             ? "" : mProviderConfig.getMcpServerToken(existing.name));
         tokenInput.setTextColor(color(R.color.ai_text));
-        tokenInput.setVisibility(useToken.isChecked() ? View.VISIBLE : View.GONE);
-        useToken.setOnCheckedChangeListener((b, checked) -> tokenInput.setVisibility(checked ? View.VISIBLE : View.GONE));
+        tokenInput.setVisibility(authHeader.isChecked() ? View.VISIBLE : View.GONE);
+
+        TextView oauthHint = new TextView(this);
+        oauthHint.setText(existing != null && "oauth".equals(existing.authType)
+            ? "OAuth is configured. Saving opens a new sign-in if tokens are missing."
+            : "On save, your browser opens to authorize, and the callback is caught on this device.");
+        oauthHint.setTextColor(color(R.color.ai_text_muted));
+        oauthHint.setTextSize(11);
+        oauthHint.setVisibility(authOauth.isChecked() ? View.VISIBLE : View.GONE);
+        authGroup.setOnCheckedChangeListener((g, id) -> {
+            tokenInput.setVisibility(id == authHeader.getId() ? View.VISIBLE : View.GONE);
+            oauthHint.setVisibility(id == authOauth.getId() ? View.VISIBLE : View.GONE);
+        });
 
         android.widget.CheckBox trusted = new android.widget.CheckBox(this);
         trusted.setText("Trusted — skip approval for this server's tools");
@@ -1165,8 +1230,10 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         form.addView(stdioBox);
         form.addView(commandInput, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         form.addView(argsInput, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        form.addView(useToken);
+        form.addView(authLabel);
+        form.addView(authGroup);
         form.addView(tokenInput);
+        form.addView(oauthHint);
         form.addView(trusted);
         form.addView(warning);
 
@@ -1186,6 +1253,8 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
                     showError("An HTTP MCP server needs an http(s) URL.");
                     return;
                 }
+                boolean withHeader = authHeader.isChecked() && !stdio;
+                boolean withOauth = authOauth.isChecked() && !stdio;
                 AiDatabase.McpServerRecord record = existing == null ? new AiDatabase.McpServerRecord() : existing;
                 record.name = name;
                 record.transport = stdio ? "stdio" : "http";
@@ -1206,12 +1275,22 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
                     record.command = null;
                     record.argsJson = null;
                 }
-                boolean withToken = useToken.isChecked() && !stdio;
-                record.authType = withToken ? "header" : "none";
+                record.authType = withHeader ? "header" : withOauth ? "oauth" : "none";
+                if ("none".equals(record.authType)) record.oauthJson = null;
                 record.trust = trusted.isChecked() ? "trusted" : "untrusted";
                 if (record.lastStatus != null && record.lastStatus.startsWith("failed")) record.lastStatus = null;
                 mRuntimeService.saveMcpServer(record);
-                mProviderConfig.setMcpServerToken(name, withToken ? tokenInput.getText().toString().trim() : null);
+                mProviderConfig.setMcpServerToken(name, withHeader ? tokenInput.getText().toString().trim() : null);
+                if (withOauth) {
+                    boolean hasTokens = !TextUtils.isEmpty(mProviderConfig.getMcpServerToken(name))
+                        && !TextUtils.isEmpty(mProviderConfig.getMcpServerRefresh(name));
+                    if (!hasTokens) {
+                        dialog.dismiss();
+                        startMcpOAuthSignIn(record);
+                        return;
+                    }
+                    setStatus("OAuth tokens already stored for '" + name + "'.", false);
+                }
                 mRuntimeService.refreshMcpServer(name);
                 setStatus("MCP '" + name + "' saved. Testing…", false);
                 mUiHandler.postDelayed(() -> {
@@ -1229,6 +1308,439 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             if (!arg.isEmpty()) array.put(arg);
         }
         return array.length() == 0 ? null : array.toString();
+    }
+
+    // ------------------------------------------------------------------
+    // MCP OAuth 2.0 sign-in (authorization code + PKCE, loopback callback
+    // with a manual paste fallback — Hermes mcp_oauth flow)
+    // ------------------------------------------------------------------
+
+    private void startMcpOAuthSignIn(AiDatabase.McpServerRecord record) {
+        setStatus("Discovering OAuth endpoints for '" + record.name + "'…", false);
+        new Thread(() -> {
+            ServerSocket loopback = null;
+            try {
+                JSONObject meta = AiMcpRegistry.discoverOAuth(record.url);
+                JSONObject oauth = TextUtils.isEmpty(record.oauthJson) ? new JSONObject() : new JSONObject(record.oauthJson);
+                String redirectUri;
+                SynchronousQueue<String> codeQueue = new SynchronousQueue<>();
+                loopback = new ServerSocket(0, 4, InetAddress.getByName("127.0.0.1"));
+                int port = loopback.getLocalPort();
+                redirectUri = "http://127.0.0.1:" + port + "/callback";
+                oauth.put("redirect_uri", redirectUri);
+                String expectedState = base64UrlRandom(16);
+
+                Thread listener = spawnLoopbackListener(loopback, codeQueue, expectedState);
+                listener.start();
+
+                String clientId = oauth.optString("client_id", "");
+                if (TextUtils.isEmpty(clientId)) {
+                    clientId = AiMcpRegistry.registerClient(meta, redirectUri, record.name);
+                    oauth.put("client_id", clientId);
+                }
+                oauth.put("authorization_endpoint", meta.optString("authorization_endpoint"));
+                oauth.put("token_endpoint", meta.optString("token_endpoint"));
+                String verifier = base64UrlRandom(32);
+                oauth.put("code_verifier", verifier);
+                oauth.put("state", expectedState);
+                record.oauthJson = oauth.toString();
+                mRuntimeService.saveMcpServer(record);
+
+                String challenge = base64Url(MessageDigest.getInstance("SHA-256")
+                    .digest(verifier.getBytes(StandardCharsets.US_ASCII)));
+                String authUrl = AiMcpRegistry.buildAuthorizationUrl(meta, clientId, redirectUri,
+                    expectedState, challenge, meta.optString("resource"));
+
+                runOnUiThread(() -> {
+                    try {
+                        startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(authUrl))
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                    } catch (Exception e) {
+                        showError("No browser available — use the paste fallback.");
+                    }
+                    showOAuthPasteFallback(codeQueue);
+                    setStatus("Waiting for authorization (browser)…", false);
+                });
+
+                String candidate = codeQueue.poll(5, TimeUnit.MINUTES);
+                if (TextUtils.isEmpty(candidate)) throw new IllegalStateException("Timed out waiting for the authorization response.");
+                String code = extractOAuthParam(candidate, "code");
+                String state = extractOAuthParam(candidate, "state");
+                if (TextUtils.isEmpty(code)) throw new IllegalStateException("No authorization code in the response.");
+                if (!expectedState.equals(state)) throw new IllegalStateException("state mismatch — aborting (possible CSRF).");
+
+                JSONObject tokens = AiMcpRegistry.exchangeAuthorizationCode(meta, clientId, code, redirectUri, verifier);
+                String access = tokens.optString("access_token", "");
+                if (TextUtils.isEmpty(access)) throw new IllegalStateException("Token endpoint returned no access_token.");
+                mProviderConfig.setMcpServerToken(record.name, access);
+                String refresh = tokens.optString("refresh_token", "");
+                if (!TextUtils.isEmpty(refresh)) mProviderConfig.setMcpServerRefresh(record.name, refresh);
+                oauth.remove("code_verifier");
+                oauth.remove("state");
+                record.oauthJson = oauth.toString();
+                record.authType = "oauth";
+                mRuntimeService.saveMcpServer(record);
+                runOnUiThread(() -> setStatus("OAuth sign-in complete for '" + record.name + "'. Testing…", false));
+                mUiHandler.postDelayed(() -> {
+                    refreshExtensionsPage();
+                    mRuntimeService.testMcpServer(record.name);
+                }, 200);
+            } catch (Exception e) {
+                String message = e.getMessage() == null ? e.toString() : e.getMessage();
+                runOnUiThread(() -> setStatus("OAuth sign-in failed: " + message, true));
+            } finally {
+                if (loopback != null && !loopback.isClosed()) {
+                    try { loopback.close(); } catch (Exception ignored) {}
+                }
+            }
+        }, "mcp-oauth-signin").start();
+    }
+
+    /** Accepts one browser redirect on the loopback socket; offers the full
+     * callback URL to the queue and answers the browser. */
+    private Thread spawnLoopbackListener(ServerSocket loopback, SynchronousQueue<String> codeQueue, String expectedState) {
+        return new Thread(() -> {
+            try {
+                loopback.setSoTimeout(5 * 60 * 1000);
+                try (Socket socket = loopback.accept()) {
+                    BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.US_ASCII));
+                    String requestLine = reader.readLine();
+                    String body = "<html><body><h2>Authorization received.</h2>"
+                        + "<p>You can close this tab and return to Termux.</p></body></html>";
+                    byte[] bodyBytes = body.getBytes(StandardCharsets.UTF_8);
+                    socket.getOutputStream().write(("HTTP/1.1 200 OK\r\n"
+                        + "Content-Type: text/html; charset=utf-8\r\n"
+                        + "Content-Length: " + bodyBytes.length + "\r\n"
+                        + "Connection: close\r\n\r\n").getBytes(StandardCharsets.US_ASCII));
+                    socket.getOutputStream().write(bodyBytes);
+                    socket.getOutputStream().flush();
+                    if (requestLine != null && requestLine.contains("/callback")) codeQueue.offer(requestLine);
+                }
+            } catch (Exception ignored) {
+                // Timed out or socket closed — the paste fallback still works.
+            }
+        }, "mcp-oauth-loopback");
+    }
+
+    /** Fallback for browsers that block localhost redirects: the user copies
+     * the redirected URL (or just the code) and pastes it here. */
+    private void showOAuthPasteFallback(SynchronousQueue<String> codeQueue) {
+        EditText paste = new EditText(this);
+        paste.setSingleLine(true);
+        paste.setHint("Paste the redirected URL (or the code)");
+        new MaterialAlertDialogBuilder(this)
+            .setTitle("If the browser didn't return automatically")
+            .setMessage("Copy the address your browser ended up on after signing in, and paste it here. You can also paste just the code= value.")
+            .setView(paste)
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton(android.R.string.ok, (dialog, which) -> {
+                String value = paste.getText().toString().trim();
+                if (!value.isEmpty()) codeQueue.offer(value);
+            })
+            .show();
+    }
+
+    @Nullable
+    private static String extractOAuthParam(String candidate, String param) {
+        try {
+            if (candidate.contains(" ")) candidate = candidate.substring(candidate.indexOf(' ') + 1);
+            if (candidate.contains("HTTP/")) candidate = candidate.substring(0, candidate.indexOf("HTTP/")).trim();
+            String query = candidate.contains("?") ? candidate.substring(candidate.indexOf('?') + 1) : candidate;
+            for (String pair : query.split("&")) {
+                int eq = pair.indexOf('=');
+                if (eq <= 0) continue;
+                if (URLDecoder.decode(pair.substring(0, eq), "UTF-8").equals(param))
+                    return URLDecoder.decode(pair.substring(eq + 1), "UTF-8");
+            }
+        } catch (Exception ignored) {}
+        return null;
+    }
+
+    private static String base64UrlRandom(int byteCount) {
+        byte[] bytes = new byte[byteCount];
+        new SecureRandom().nextBytes(bytes);
+        return base64Url(bytes);
+    }
+
+    private static String base64Url(byte[] bytes) {
+        return android.util.Base64.encodeToString(bytes, android.util.Base64.URL_SAFE | android.util.Base64.NO_PADDING | android.util.Base64.NO_WRAP);
+    }
+
+    // ------------------------------------------------------------------
+    // Skill installation: download archive → extract to a quarantine dir →
+    // guard scan → user confirm → move into $HOME/.termuxAI/skills
+    // ------------------------------------------------------------------
+
+    private void showSkillInstallDialog() {
+        EditText urlInput = new EditText(this);
+        urlInput.setSingleLine(true);
+        urlInput.setHint("https://github.com/owner/repo/archive/refs/heads/main.zip");
+        urlInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        new MaterialAlertDialogBuilder(this)
+            .setTitle("Install skill from URL")
+            .setMessage("Point this at a .zip or .tar.gz containing one or more skills (folders with a SKILL.md inside). "
+                + "The archive is downloaded, extracted to a quarantine directory, scanned for dangerous patterns, "
+                + "and shown to you before anything is installed.")
+            .setView(urlInput)
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton("Download & scan", (dialog, which) -> {
+                String url = urlInput.getText().toString().trim();
+                if (!url.startsWith("http")) {
+                    showError("Enter an http(s) URL to a .zip or .tar.gz.");
+                    return;
+                }
+                setStatus("Downloading skill archive…", false);
+                new Thread(() -> installSkillsFromUrl(url), "skill-install").start();
+            })
+            .show();
+    }
+
+    private void installSkillsFromUrl(String url) {
+        File quarantine = new File(getCacheDir(), "skill_install");
+        try {
+            deleteDirectory(quarantine);
+            if (!url.startsWith("http")) throw new IllegalStateException("Not an http(s) URL.");
+            File archive = downloadArchive(url, new File(getCacheDir(), "skill_install_download"));
+            byte[] magic = new byte[2];
+            try (InputStream in = new FileInputStream(archive)) {
+                if (in.read(magic) != 2) throw new IllegalStateException("Downloaded file is empty.");
+            }
+            if (magic[0] == 'P' && magic[1] == 'K') extractZip(archive, quarantine);
+            else if ((magic[0] & 0xFF) == 0x1f && (magic[1] & 0xFF) == 0x8b) extractTarGz(archive, quarantine);
+            else throw new IllegalStateException("Unsupported archive type (expected .zip or .tar.gz).");
+
+            List<File> candidates = new ArrayList<>();
+            collectSkillCandidates(quarantine, candidates, 0);
+            if (candidates.isEmpty()) throw new IllegalStateException("No SKILL.md found in the archive.");
+            List<AiSkillRegistry.ScanReport> reports = new ArrayList<>();
+            for (File candidate : candidates) reports.add(AiSkillRegistry.scanSkillDir(candidate));
+            runOnUiThread(() -> showSkillInstallConfirm(candidates, reports));
+        } catch (Exception e) {
+            String message = e.getMessage() == null ? e.toString() : e.getMessage();
+            runOnUiThread(() -> setStatus("Skill install failed: " + message, true));
+            deleteDirectory(quarantine);
+        }
+    }
+
+    private File downloadArchive(String url, File dest) throws Exception {
+        HttpURLConnection connection;
+        String current = url;
+        for (int redirects = 0; redirects < 5; redirects++) {
+            connection = (HttpURLConnection) new URL(current).openConnection();
+            connection.setConnectTimeout(15_000);
+            connection.setReadTimeout(30_000);
+            connection.setInstanceFollowRedirects(false);
+            connection.setRequestProperty("User-Agent", "termux-ai/1.0 (skill install)");
+            int code = connection.getResponseCode();
+            if (code >= 300 && code < 400) {
+                String location = connection.getHeaderField("Location");
+                connection.disconnect();
+                if (TextUtils.isEmpty(location)) throw new IllegalStateException("Redirect without a Location header.");
+                current = location;
+                continue;
+            }
+            try (InputStream in = code >= 200 && code < 300 ? connection.getInputStream() : connection.getErrorStream();
+                 FileOutputStream out = new FileOutputStream(dest)) {
+                if (code < 200 || code >= 300) throw new IllegalStateException("HTTP " + code + " while downloading.");
+                byte[] buffer = new byte[8192];
+                long total = 0;
+                int read;
+                while ((read = in.read(buffer)) > 0) {
+                    total += read;
+                    if (total > 50L * 1024 * 1024) throw new IllegalStateException("Archive exceeds the 50 MB limit.");
+                    out.write(buffer, 0, read);
+                }
+            } finally {
+                connection.disconnect();
+            }
+            return dest;
+        }
+        throw new IllegalStateException("Too many redirects.");
+    }
+
+    private void extractZip(File archive, File target) throws Exception {
+        try (ZipInputStream zip = new ZipInputStream(new BufferedInputStream(new FileInputStream(archive)))) {
+            ZipEntry entry;
+            byte[] buffer = new byte[8192];
+            while ((entry = zip.getNextEntry()) != null) {
+                File out = new File(target, entry.getName());
+                if (!out.getCanonicalPath().startsWith(target.getCanonicalPath() + File.separator)
+                    && !out.getCanonicalPath().equals(target.getCanonicalPath()))
+                    throw new IllegalStateException("Archive entry escapes the extraction directory: " + entry.getName());
+                if (entry.isDirectory()) {
+                    out.mkdirs();
+                    continue;
+                }
+                out.getParentFile().mkdirs();
+                try (BufferedOutputStream output = new BufferedOutputStream(new FileOutputStream(out))) {
+                    int read;
+                    while ((read = zip.read(buffer)) > 0) output.write(buffer, 0, read);
+                }
+                zip.closeEntry();
+            }
+        }
+    }
+
+    private void extractTarGz(File archive, File target) throws Exception {
+        try (DataInputStream tar = new DataInputStream(new BufferedInputStream(new GZIPInputStream(new FileInputStream(archive), 8192)))) {
+            byte[] header = new byte[512];
+            String pendingLongName = null;
+            while (true) {
+                try {
+                    tar.readFully(header);
+                } catch (java.io.EOFException eof) {
+                    break;
+                }
+                if (header[0] == 0) break;
+                String name = pendingLongName != null ? pendingLongName : readTarString(header, 0, 100);
+                pendingLongName = null;
+                long size = readTarSize(header, 124);
+                int type = header[156];
+                if (type == 'L') { // GNU long name
+                    byte[] data = new byte[(int) size];
+                    tar.readFully(data);
+                    pendingLongName = new String(data, StandardCharsets.UTF_8).trim();
+                    continue;
+                }
+                if (type == 'x' || type == 'g') { // pax headers — skip
+                    skipFully(tar, (size + 511) / 512 * 512);
+                    continue;
+                }
+                if (type == '5' || name.endsWith("/")) {
+                    new File(target, sanitizeTarName(name)).mkdirs();
+                    skipFully(tar, (size + 511) / 512 * 512);
+                    continue;
+                }
+                if (type == 0 || type == '0') {
+                    File out = new File(target, sanitizeTarName(name));
+                    if (!out.getCanonicalPath().startsWith(target.getCanonicalPath() + File.separator))
+                        throw new IllegalStateException("Archive entry escapes the extraction directory: " + name);
+                    out.getParentFile().mkdirs();
+                    try (BufferedOutputStream output = new BufferedOutputStream(new FileOutputStream(out))) {
+                        byte[] buffer = new byte[8192];
+                        long remaining = size;
+                        while (remaining > 0) {
+                            int chunk = (int) Math.min(buffer.length, remaining);
+                            tar.readFully(buffer, 0, chunk);
+                            output.write(buffer, 0, chunk);
+                            remaining -= chunk;
+                        }
+                    }
+                    long padding = (512 - (size % 512)) % 512;
+                    if (padding > 0) skipFully(tar, padding);
+                    continue;
+                }
+                skipFully(tar, (size + 511) / 512 * 512); // links, devices, etc.
+            }
+        }
+    }
+
+    private static void skipFully(DataInputStream stream, long count) throws Exception {
+        while (count > 0) {
+            int skipped = stream.skipBytes((int) Math.min(count, Integer.MAX_VALUE));
+            if (skipped <= 0) throw new java.io.EOFException("Unexpected end of tar archive");
+            count -= skipped;
+        }
+    }
+
+    private static String readTarString(byte[] header, int offset, int length) {
+        int end = offset;
+        while (end < offset + length && header[end] != 0) end++;
+        return new String(header, offset, end - offset, StandardCharsets.UTF_8).trim();
+    }
+
+    private static long readTarSize(byte[] header, int offset) {
+        long size = 0;
+        boolean started = false;
+        for (int i = offset; i < offset + 12; i++) {
+            byte b = header[i];
+            if (b == 0 || b == ' ') {
+                if (started) break;
+                continue;
+            }
+            started = true;
+            size = (size << 3) + (b - '0');
+        }
+        return size;
+    }
+
+    private static String sanitizeTarName(String name) {
+        return name.replace('\\', '/').replaceFirst("^\\./", "").replaceFirst("^/", "");
+    }
+
+    private void collectSkillCandidates(File dir, List<File> out, int depth) {
+        if (depth > 3 || out.size() >= 10) return;
+        if (new File(dir, "SKILL.md").isFile()) {
+            out.add(dir);
+            return; // a skill dir is not scanned further down
+        }
+        File[] children = dir.listFiles();
+        if (children == null) return;
+        for (File child : children) if (child.isDirectory()) collectSkillCandidates(child, out, depth + 1);
+    }
+
+    private void showSkillInstallConfirm(List<File> candidates, List<AiSkillRegistry.ScanReport> reports) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(4), dp(8), dp(4), 0);
+        final List<File> installable = new ArrayList<>();
+        final List<File> blocked = new ArrayList<>();
+        List<android.widget.CheckBox> checks = new ArrayList<>();
+        for (int i = 0; i < candidates.size(); i++) {
+            File candidate = candidates.get(i);
+            AiSkillRegistry.ScanReport report = reports.get(i);
+            boolean dangerous = "dangerous".equals(report.verdict);
+            if (dangerous) blocked.add(candidate);
+            else installable.add(candidate);
+            android.widget.CheckBox check = new android.widget.CheckBox(this);
+            check.setText(candidate.getName()
+                + (dangerous ? " — BLOCKED (dangerous scan)"
+                : " — " + report.verdict + (report.findings.isEmpty() ? "" : " (" + report.findings.size() + " findings)")));
+            check.setTextColor(color(dangerous ? R.color.ai_error : R.color.ai_text));
+            check.setEnabled(!dangerous);
+            check.setChecked(!dangerous && "safe".equals(report.verdict));
+            box.addView(check);
+            checks.add(check);
+            if (!report.findings.isEmpty()) {
+                TextView detail = new TextView(this);
+                detail.setText(report.reportText());
+                detail.setTextColor(color(R.color.ai_text_muted));
+                detail.setTextSize(11);
+                detail.setPadding(dp(24), 0, 0, dp(6));
+                box.addView(detail);
+            }
+        }
+        new MaterialAlertDialogBuilder(this)
+            .setTitle("Install " + installable.size() + " skill" + (installable.size() == 1 ? "" : "s") + "?")
+            .setMessage(blocked.isEmpty()
+                ? "Scan complete. Install the checked skills into $HOME/.termuxAI/skills?"
+                : blocked.size() + " skill(s) were BLOCKED by the security scan and cannot be installed.")
+            .setView(box)
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton("Install", (dialog, which) -> {
+                StringBuilder installed = new StringBuilder();
+                List<String> failures = new ArrayList<>();
+                for (int i = 0; i < candidates.size(); i++) {
+                    if (!checks.get(i).isChecked()) continue;
+                    String name = candidates.get(i).getName().replaceAll("[^A-Za-z0-9._-]", "-").toLowerCase();
+                    String error = AiSkillRegistry.installSkill(candidates.get(i), name);
+                    if (error != null) failures.add(name + ": " + error);
+                    else installed.append(name).append(", ");
+                }
+                deleteDirectory(new File(getCacheDir(), "skill_install"));
+                AiSkillRegistry.invalidate();
+                refreshExtensionsPage();
+                if (failures.isEmpty()) setStatus("Installed: " + installed, false);
+                else setStatus("Installed: " + installed + "Failed: " + TextUtils.join("; ", failures), true);
+            })
+            .show();
+    }
+
+    private static void deleteDirectory(File dir) {
+        if (dir == null || !dir.exists()) return;
+        File[] children = dir.listFiles();
+        if (children != null) for (File child : children) deleteDirectory(child);
+        dir.delete();
     }
 
     private View createSkillCard(AiSkillRegistry.Skill skill, boolean disabled) {
@@ -1690,7 +2202,16 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         AiProviderProfile profile = mSelectedProfile;
         String workspace = validateWorkspace();
         if (profile == null || workspace == null) return;
-        addUserMessage(prompt);
+        // Slash-skill invocation: "/skill-name extra text" loads the skill's
+        // full SKILL.md into the outgoing message (Hermes skill_commands).
+        // Anything that doesn't resolve to an installed skill is sent as-is.
+        String typedPrompt = prompt;
+        String[] invocation = AiSkillRegistry.buildSkillInvocationMessage(prompt);
+        if (invocation != null && mAttachedPaths.isEmpty()) {
+            prompt = invocation[0];
+            setStatus("Loaded skill" + (invocation[1].contains(",") ? "s" : "") + ": " + invocation[1], false);
+        }
+        addUserMessage(typedPrompt);
         mUserScrolledUp = false;
         mPromptInput.setText("");
         mEmptyChatHint.setVisibility(View.GONE);
@@ -2297,7 +2818,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         String name = payload == null ? "" : payload.optString("name", "terminal");
         if (TextUtils.isEmpty(name)) name = "terminal";
         String label;
-        if ("skills_list".equals(name) || "skill_view".equals(name)) {
+        if ("skills_list".equals(name) || "skill_view".equals(name) || "skill_manage".equals(name)) {
             label = name + (TextUtils.isEmpty(command) ? "" : " · " + command);
         } else if (name.startsWith(AiMcpRegistry.TOOL_PREFIX)) {
             label = "MCP · " + (TextUtils.isEmpty(command) ? name : command);

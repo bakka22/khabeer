@@ -197,6 +197,16 @@ public final class AiProviderConfig {
         setSecret(KEY_MCP_TOKEN + (serverName == null ? "" : serverName), token);
     }
 
+    /** OAuth refresh tokens live under their own key so an access-token
+     * update never touches the long-lived credential. */
+    public String getMcpServerRefresh(String serverName) {
+        return getSecret("mcp_refresh_" + (serverName == null ? "" : serverName));
+    }
+
+    public void setMcpServerRefresh(String serverName, String token) {
+        setSecret("mcp_refresh_" + (serverName == null ? "" : serverName), token);
+    }
+
     private String getSecret(String storageKey) {
         String encoded = mPrefs.getString(storageKey, "");
         if (TextUtils.isEmpty(encoded)) return null;

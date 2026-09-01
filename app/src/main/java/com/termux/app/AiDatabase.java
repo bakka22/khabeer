@@ -20,7 +20,7 @@ import java.util.List;
 public final class AiDatabase extends SQLiteOpenHelper {
 
     private static final String DATABASE_NAME = "termux_ai_runtime.db";
-    private static final int DATABASE_VERSION = 9;
+    private static final int DATABASE_VERSION = 10;
 
     public static final class RunRecord {
         public String id;
@@ -57,6 +57,7 @@ public final class AiDatabase extends SQLiteOpenHelper {
     public void onCreate(SQLiteDatabase db) {
         createV4Schema(db);
         createV8Schema(db);
+        createV10Schema(db);
     }
 
     private void createV8Schema(SQLiteDatabase db) {
@@ -81,6 +82,10 @@ public final class AiDatabase extends SQLiteOpenHelper {
         try { db.execSQL("ALTER TABLE mcp_servers ADD COLUMN args_json TEXT"); } catch (Exception ignored) {}
     }
 
+    private void createV10Schema(SQLiteDatabase db) {
+        try { db.execSQL("ALTER TABLE mcp_servers ADD COLUMN oauth_json TEXT"); } catch (Exception ignored) {}
+    }
+
     /** One MCP server configuration: transport 'http' (Streamable HTTP, url)
      * or 'stdio' (local command spawned in the Termux environment). Auth
      * tokens never live here — they are Keystore-encrypted via
@@ -91,12 +96,13 @@ public final class AiDatabase extends SQLiteOpenHelper {
         public String url;
         public String command;             // stdio only
         public String argsJson;            // stdio only, JSON array of strings
-        public String authType = "none";   // none | header
+        public String authType = "none";   // none | header | oauth
         public int timeoutSeconds = 60;
         public boolean enabled = true;
         public String trust = "untrusted"; // untrusted | trusted
         public String lastStatus;          // connected | disabled | failed: <msg>
         public String lastToolsJson;       // cached tool list JSON
+        public String oauthJson;           // OAuth client/endpoint state (v10)
         public long updatedAt;
     }
 
@@ -128,6 +134,8 @@ public final class AiDatabase extends SQLiteOpenHelper {
         r.trust = c.getString(c.getColumnIndexOrThrow("trust"));
         r.lastStatus = c.getString(c.getColumnIndexOrThrow("last_status"));
         r.lastToolsJson = c.getString(c.getColumnIndexOrThrow("last_tools_json"));
+        int oauthIdx = c.getColumnIndex("oauth_json");
+        if (oauthIdx >= 0) r.oauthJson = c.getString(oauthIdx);
         r.updatedAt = c.getLong(c.getColumnIndexOrThrow("updated_at"));
         return r;
     }
@@ -145,6 +153,7 @@ public final class AiDatabase extends SQLiteOpenHelper {
         v.put("trust", r.trust);
         v.put("last_status", r.lastStatus);
         v.put("last_tools_json", r.lastToolsJson);
+        if (r.oauthJson != null) v.put("oauth_json", r.oauthJson);
         v.put("updated_at", System.currentTimeMillis());
         getWritableDatabase().insertWithOnConflict("mcp_servers", null, v, SQLiteDatabase.CONFLICT_REPLACE);
     }
@@ -288,6 +297,9 @@ public final class AiDatabase extends SQLiteOpenHelper {
         }
         if (oldVersion < 9) {
             createV9Schema(db);
+        }
+        if (oldVersion < 10) {
+            createV10Schema(db);
         }
         if (oldVersion < 6) {
             // Title provenance (Hermes title_source): 'message' = derived from

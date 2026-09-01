@@ -285,7 +285,7 @@ public final class AiMcpRegistry {
         }
         McpTransport created = "stdio".equals(server.transport)
             ? new StdioTransport(server)
-            : new HttpTransport(server, mConfig == null ? null : mConfig.getMcpServerToken(server.name));
+            : new HttpTransport(server, mConfig == null ? null : mConfig.getMcpServerToken(server.name), mConfig);
         try {
             JSONObject init = created.request("initialize", new JSONObject()
                 .put("protocolVersion", PROTOCOL_VERSION)
@@ -322,17 +322,37 @@ public final class AiMcpRegistry {
 
     private static final class HttpTransport implements McpTransport {
         private final AiDatabase.McpServerRecord mServer;
-        private final String mToken;
+        private final AiProviderConfig mConfig;
+        private String mToken;
         private String mSessionId;
         private int mNextRequestId = 1;
 
-        HttpTransport(AiDatabase.McpServerRecord server, String token) {
+        HttpTransport(AiDatabase.McpServerRecord server, String token, AiProviderConfig config) {
             mServer = server;
             mToken = token;
+            mConfig = config;
+        }
+
+        /** True when this server authenticates with a bearer credential. */
+        private boolean hasBearer() {
+            return ("header".equals(mServer.authType) || "oauth".equals(mServer.authType))
+                && !TextUtils.isEmpty(mToken);
         }
 
         @Override
         public JSONObject request(String method, @Nullable JSONObject params, int timeoutMs) throws Exception {
+            try {
+                return doRequest(method, params, timeoutMs);
+            } catch (McpAuthRequiredException e) {
+                // One automatic refresh + retry for OAuth servers; header
+                // auth tokens are static, so they surface immediately.
+                if (!"oauth".equals(mServer.authType)) throw e;
+                refreshAccessToken();
+                return doRequest(method, params, timeoutMs);
+            }
+        }
+
+        private JSONObject doRequest(String method, @Nullable JSONObject params, int timeoutMs) throws Exception {
             if (TextUtils.isEmpty(mServer.url)) throw new IllegalStateException("MCP server URL is missing.");
             int id;
             synchronized (this) { id = ++mNextRequestId; }
@@ -346,8 +366,7 @@ public final class AiMcpRegistry {
                 connection.setRequestProperty("Accept", "application/json, text/event-stream");
                 connection.setRequestProperty("MCP-Protocol-Version", PROTOCOL_VERSION);
                 if (mSessionId != null) connection.setRequestProperty("Mcp-Session-Id", mSessionId);
-                if ("header".equals(mServer.authType) && !TextUtils.isEmpty(mToken))
-                    connection.setRequestProperty("Authorization", "Bearer " + mToken);
+                if (hasBearer()) connection.setRequestProperty("Authorization", "Bearer " + mToken);
                 JSONObject body = new JSONObject()
                     .put("jsonrpc", "2.0")
                     .put("id", id)
@@ -363,13 +382,15 @@ public final class AiMcpRegistry {
                     throw new McpSessionExpiredException();
                 }
                 if (code == 401 || code == 403) {
-                    throw new IllegalStateException("HTTP " + code + ": authentication required or rejected. "
-                        + "Check the server's auth token. Do NOT retry until fixed.");
+                    throw new McpAuthRequiredException("HTTP " + code + ": authentication required or rejected."
+                        + ("oauth".equals(mServer.authType)
+                            ? " OAuth refresh will be attempted once; if it fails, sign in again."
+                            : " Check the server's auth token. Do NOT retry until fixed."));
                 }
                 InputStream stream = code >= 200 && code < 300 ? connection.getInputStream() : connection.getErrorStream();
                 String text = readFully(stream);
                 if (code < 200 || code >= 300) {
-                    throw new IllegalStateException("HTTP " + code + ": " + AiMcpRegistry.redactStatic(truncate(text, 200)));
+                    throw new IllegalStateException("HTTP " + code + ": " + AiMcpRegistry.redactStatic(truncateStatic(text, 200)));
                 }
                 String responseSession = connection.getHeaderField("Mcp-Session-Id");
                 if (responseSession != null && !responseSession.trim().isEmpty()) mSessionId = responseSession.trim();
@@ -381,6 +402,28 @@ public final class AiMcpRegistry {
                 return AiMcpRegistry.parseJsonRpcResponse(text, id);
             } finally {
                 connection.disconnect();
+            }
+        }
+
+        /** Use the stored refresh token to mint a fresh access token. */
+        private void refreshAccessToken() throws Exception {
+            JSONObject oauth = TextUtils.isEmpty(mServer.oauthJson) ? null : new JSONObject(mServer.oauthJson);
+            String refreshToken = mConfig == null ? null : mConfig.getMcpServerRefresh(mServer.name);
+            if (oauth == null || TextUtils.isEmpty(oauth.optString("token_endpoint")) || TextUtils.isEmpty(refreshToken))
+                throw new McpAuthRequiredException("OAuth session expired and no refresh token is stored — sign in again.");
+            Map<String, String> form = new java.util.LinkedHashMap<>();
+            form.put("grant_type", "refresh_token");
+            form.put("refresh_token", refreshToken);
+            form.put("client_id", oauth.optString("client_id", ""));
+            JSONObject tokens = httpPostForm(oauth.optString("token_endpoint"), form);
+            String access = tokens.optString("access_token", "");
+            if (TextUtils.isEmpty(access))
+                throw new McpAuthRequiredException("OAuth refresh rejected: " + AiMcpRegistry.redactStatic(truncateStatic(tokens.toString(), 160)) + " — sign in again.");
+            mToken = access;
+            if (mConfig != null) {
+                mConfig.setMcpServerToken(mServer.name, access);
+                String rotated = tokens.optString("refresh_token", "");
+                if (!TextUtils.isEmpty(rotated)) mConfig.setMcpServerRefresh(mServer.name, rotated);
             }
         }
 
@@ -398,8 +441,7 @@ public final class AiMcpRegistry {
                 connection.setRequestProperty("Accept", "application/json, text/event-stream");
                 connection.setRequestProperty("MCP-Protocol-Version", PROTOCOL_VERSION);
                 if (mSessionId != null) connection.setRequestProperty("Mcp-Session-Id", mSessionId);
-                if ("header".equals(mServer.authType) && !TextUtils.isEmpty(mToken))
-                    connection.setRequestProperty("Authorization", "Bearer " + mToken);
+                if (hasBearer()) connection.setRequestProperty("Authorization", "Bearer " + mToken);
                 try (OutputStream output = connection.getOutputStream()) {
                     output.write(body.toString().getBytes(StandardCharsets.UTF_8));
                 }
@@ -863,5 +905,200 @@ public final class AiMcpRegistry {
 
     private static final class McpSessionExpiredException extends Exception {
         McpSessionExpiredException() { super("MCP transport expired"); }
+    }
+
+    /** 401/403 from a server — OAuth callers may retry once after a refresh. */
+    private static final class McpAuthRequiredException extends Exception {
+        McpAuthRequiredException(String message) { super(message); }
+    }
+
+    // ------------------------------------------------------------------
+    // OAuth 2.0 Authorization Code + PKCE (Hermes mcp_oauth port)
+    // Static helpers used by the UI sign-in flow; the transport only
+    // consumes the stored tokens.
+    // ------------------------------------------------------------------
+
+    /**
+     * Discover OAuth metadata for an MCP server URL: protected-resource
+     * metadata first (to find the authorization server), then authorization-
+     * server metadata. Falls back to treating the server's origin as the AS.
+     * Returns {authorization_endpoint, token_endpoint, registration_endpoint?,
+     * scopes_supported?, resource?}.
+     */
+    public static JSONObject discoverOAuth(String serverUrl) throws Exception {
+        java.net.URI uri = new java.net.URI(serverUrl.trim());
+        String origin = uri.getScheme() + "://" + uri.getRawAuthority();
+        String asBase = origin;
+        try {
+            JSONObject prm = httpGetJson(origin + "/.well-known/oauth-protected-resource");
+            JSONArray servers = prm.optJSONArray("authorization_servers");
+            if (servers != null && servers.length() > 0) {
+                String candidate = servers.optString(0, "");
+                if (!TextUtils.isEmpty(candidate)) asBase = candidate.endsWith("/") ? candidate.substring(0, candidate.length() - 1) : candidate;
+            }
+        } catch (Exception ignored) {
+            // No protected-resource metadata — origin is the AS (common).
+        }
+        JSONObject meta;
+        try {
+            meta = httpGetJson(asBase + "/.well-known/oauth-authorization-server");
+        } catch (Exception ignored) {
+            meta = httpGetJson(asBase + "/.well-known/openid-configuration");
+        }
+        if (TextUtils.isEmpty(meta.optString("authorization_endpoint")) || TextUtils.isEmpty(meta.optString("token_endpoint")))
+            throw new IllegalStateException("Authorization server metadata is missing authorization/token endpoints.");
+        meta.put("resource", serverUrl.trim());
+        return meta;
+    }
+
+    /** Dynamic client registration; returns the issued client_id. */
+    public static String registerClient(JSONObject meta, String redirectUri, String serverName) throws Exception {
+        String endpoint = meta.optString("registration_endpoint", "");
+        if (TextUtils.isEmpty(endpoint))
+            throw new IllegalStateException("Server offers no dynamic client registration. Configure a static client_id instead.");
+        JSONObject body = new JSONObject()
+            .put("client_name", "Termux AI (" + serverName + ")")
+            .put("redirect_uris", new JSONArray().put(redirectUri))
+            .put("grant_types", new JSONArray().put("authorization_code").put("refresh_token"))
+            .put("response_types", new JSONArray().put("code"))
+            .put("token_endpoint_auth_method", "none");
+        JSONObject response = httpPostJson(endpoint, body.toString());
+        String clientId = response.optString("client_id", "");
+        if (TextUtils.isEmpty(clientId)) throw new IllegalStateException("Registration response had no client_id.");
+        return clientId;
+    }
+
+    /** Authorization-code exchange; returns the token response JSON. */
+    public static JSONObject exchangeAuthorizationCode(JSONObject meta, String clientId, String code,
+                                                       String redirectUri, String codeVerifier) throws Exception {
+        Map<String, String> form = new java.util.LinkedHashMap<>();
+        form.put("grant_type", "authorization_code");
+        form.put("code", code);
+        form.put("redirect_uri", redirectUri);
+        form.put("client_id", clientId);
+        form.put("code_verifier", codeVerifier);
+        return httpPostForm(meta.optString("token_endpoint"), form);
+    }
+
+    /** Refresh-token grant; returns the token response JSON. */
+    public static JSONObject refreshAccessTokenStatic(JSONObject meta, String clientId, String refreshToken) throws Exception {
+        Map<String, String> form = new java.util.LinkedHashMap<>();
+        form.put("grant_type", "refresh_token");
+        form.put("refresh_token", refreshToken);
+        form.put("client_id", clientId);
+        return httpPostForm(meta.optString("token_endpoint"), form);
+    }
+
+    /** Build the browser authorization URL (PKCE S256). */
+    public static String buildAuthorizationUrl(JSONObject meta, String clientId, String redirectUri,
+                                               String state, String codeChallenge, String resource) throws Exception {
+        StringBuilder url = new StringBuilder(meta.optString("authorization_endpoint"))
+            .append("?response_type=code")
+            .append("&client_id=").append(java.net.URLEncoder.encode(clientId, "UTF-8"))
+            .append("&redirect_uri=").append(java.net.URLEncoder.encode(redirectUri, "UTF-8"))
+            .append("&state=").append(java.net.URLEncoder.encode(state, "UTF-8"))
+            .append("&code_challenge=").append(java.net.URLEncoder.encode(codeChallenge, "UTF-8"))
+            .append("&code_challenge_method=S256");
+        JSONArray scopes = meta.optJSONArray("scopes_supported");
+        if (scopes != null && scopes.length() > 0) {
+            StringBuilder scope = new StringBuilder();
+            for (int i = 0; i < scopes.length(); i++) {
+                if (i > 0) scope.append(' ');
+                scope.append(scopes.optString(i));
+            }
+            url.append("&scope=").append(java.net.URLEncoder.encode(scope.toString(), "UTF-8"));
+        }
+        if (!TextUtils.isEmpty(resource)) url.append("&resource=").append(java.net.URLEncoder.encode(resource, "UTF-8"));
+        return url.toString();
+    }
+
+    private static JSONObject httpGetJson(String url) throws Exception {
+        HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
+        try {
+            connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
+            connection.setReadTimeout(15_000);
+            connection.setRequestProperty("Accept", "application/json");
+            int code = connection.getResponseCode();
+            String text = readStreamStatic(code >= 200 && code < 300 ? connection.getInputStream() : connection.getErrorStream());
+            if (code < 200 || code >= 300) throw new IllegalStateException("HTTP " + code + " from " + url);
+            return new JSONObject(text);
+        } finally {
+            connection.disconnect();
+        }
+    }
+
+    private static JSONObject httpPostJson(String url, String json) throws Exception {
+        HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
+        try {
+            connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
+            connection.setReadTimeout(20_000);
+            connection.setRequestMethod("POST");
+            connection.setDoOutput(true);
+            connection.setRequestProperty("Content-Type", "application/json");
+            connection.setRequestProperty("Accept", "application/json");
+            try (OutputStream output = connection.getOutputStream()) {
+                output.write(json.getBytes(StandardCharsets.UTF_8));
+            }
+            int code = connection.getResponseCode();
+            String text = readStreamStatic(code >= 200 && code < 300 ? connection.getInputStream() : connection.getErrorStream());
+            if (code < 200 || code >= 300) throw new IllegalStateException("HTTP " + code + ": " + redactStatic(truncateStatic(text, 200)));
+            return new JSONObject(text);
+        } finally {
+            connection.disconnect();
+        }
+    }
+
+    private static JSONObject httpPostForm(String url, Map<String, String> form) throws Exception {
+        StringBuilder body = new StringBuilder();
+        for (Map.Entry<String, String> entry : form.entrySet()) {
+            if (body.length() > 0) body.append('&');
+            body.append(java.net.URLEncoder.encode(entry.getKey(), "UTF-8"))
+                .append('=')
+                .append(java.net.URLEncoder.encode(entry.getValue(), "UTF-8"));
+        }
+        HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
+        try {
+            connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
+            connection.setReadTimeout(20_000);
+            connection.setRequestMethod("POST");
+            connection.setDoOutput(true);
+            connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
+            connection.setRequestProperty("Accept", "application/json");
+            try (OutputStream output = connection.getOutputStream()) {
+                output.write(body.toString().getBytes(StandardCharsets.UTF_8));
+            }
+            int code = connection.getResponseCode();
+            String text = readStreamStatic(code >= 200 && code < 300 ? connection.getInputStream() : connection.getErrorStream());
+            if (code < 200 || code >= 300) throw new IllegalStateException("HTTP " + code + ": " + redactStatic(truncateStatic(text, 200)));
+            try {
+                return new JSONObject(text);
+            } catch (Exception e) {
+                return formToJson(text);
+            }
+        } finally {
+            connection.disconnect();
+        }
+    }
+
+    /** Some token endpoints answer form-urlencoded despite Accept: json. */
+    private static JSONObject formToJson(String text) throws Exception {
+        JSONObject out = new JSONObject();
+        for (String pair : text.split("&")) {
+            int eq = pair.indexOf('=');
+            if (eq <= 0) continue;
+            out.put(java.net.URLDecoder.decode(pair.substring(0, eq), "UTF-8"),
+                java.net.URLDecoder.decode(pair.substring(eq + 1), "UTF-8"));
+        }
+        return out;
+    }
+
+    private static String readStreamStatic(InputStream stream) throws Exception {
+        if (stream == null) return "";
+        StringBuilder builder = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) builder.append(line).append('\n');
+        }
+        return builder.toString();
     }
 }
