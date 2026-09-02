@@ -3063,10 +3063,16 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         String cleanModel = model == null ? "" : model.trim();
         if (cleanModel.isEmpty()) cleanModel = profile.defaultModel;
         mSelectedModel = cleanModel;
-        mProviderConfig.setModel(profile, cleanModel);
         // Session-scoped /model switch (katheer _persist_model_switch_to_session):
         // the model lives on the session row so resume restores this choice.
-        if (mRuntimeService != null && mHasNativeSession) mRuntimeService.setSessionModel(cleanModel);
+        // Provider config is only the default for NEW sessions; mutating it
+        // while a session is active made one session's model bleed into
+        // other sessions that shared the same provider.
+        if (mRuntimeService != null && mHasNativeSession) {
+            mRuntimeService.setSessionModel(cleanModel);
+        } else {
+            mProviderConfig.setModel(profile, cleanModel);
+        }
         syncControlLabels();
         setStatus("Model selected: " + cleanModel, false);
     }
@@ -3721,20 +3727,38 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     }
 
     private void openResumedSession(String runId) {
-        AiDatabase.RunRecord resumed = mRuntimeService.getActiveRun();
-        if (resumed != null && runId.equals(resumed.id)) {
-            AiProviderProfile runProfile = AiProviderProfile.find(resumed.harnessId);
-            if (runProfile != null) selectProvider(runProfile, false);
-            if (!TextUtils.isEmpty(resumed.lastResolvedModel)) mSelectedModel = resumed.lastResolvedModel;
-        }
         mRuntimeService.resumeRun(runId);
         AiDatabase.RunRecord after = mRuntimeService.getActiveRun();
         if (after == null || !runId.equals(after.id)) return;
+        applyRunControlsToUi(after);
         mCurrentRunId = after.id;
         rebuildTranscript(after.id);
         syncControlLabels();
         if (mDrawer != null) mDrawer.closeDrawer(findViewById(R.id.ai_drawer_panel));
         showChatPage();
+    }
+
+    /** Load provider/model labels from a session without touching global
+     * provider defaults. Session switching is a view change, not a config
+     * write. */
+    private void applyRunControlsToUi(AiDatabase.RunRecord run) {
+        if (run == null) return;
+        AiProviderProfile runProfile = AiProviderProfile.find(run.harnessId);
+        if (runProfile != null) {
+            mSelectedProfile = runProfile;
+            if (mSelectedProviderIcon != null) mSelectedProviderIcon.setImageResource(iconForProvider(runProfile.id));
+            if (mSelectedProviderTitle != null) mSelectedProviderTitle.setText(runProfile.name);
+            if (mSelectedProviderBody != null) mSelectedProviderBody.setText(runProfile.description);
+            if (mEmptyChatHint instanceof TextView) ((TextView) mEmptyChatHint).setText(runProfile.mark);
+            if (mChatTitle != null) mChatTitle.setText(runProfile.terminalOnly ? "Termux Shell" : runProfile.name);
+        }
+        if (!TextUtils.isEmpty(run.lastResolvedModel)) {
+            mSelectedModel = run.lastResolvedModel;
+        } else if (!TextUtils.isEmpty(run.modelOverride)) {
+            mSelectedModel = run.modelOverride;
+        } else if (runProfile != null) {
+            mSelectedModel = runProfile.defaultModel;
+        }
     }
 
     private void confirmArchive(AiDatabase.RunRecord run) {

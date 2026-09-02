@@ -677,15 +677,10 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         emit("turn/started", new JSONObject());
         transition(AiRunStateMachine.State.RUNNING);
 
-        if (ctx() != null) mDatabase.appendMessage(ctx().record.id, "user", prompt);
-
         JSONArray input;
         try {
-            refreshSystemMessage();
-            sanitizeReplayHistory();
-            ctx().chatMessages.put(json("role", "user", "content", prompt));
-            if (ctx() != null) { ctx().record.chatMessagesJson = ctx().chatMessages.toString(); persistRun(); }
-            input = toResponsesInput(ctx().chatMessages);
+            appendUserTurnToHistory(ctx, prompt);
+            input = toResponsesInput(ctx.chatMessages);
         } catch (Exception e) {
             input = new JSONArray();
             input.put(json("role", "user", "content", prompt));
@@ -772,6 +767,34 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         } finally { KatheerInterruptManager.clearCurrentThread(); mTurnContext.remove(); }
     }
 
+    /** Single owner for user-turn mutation. Provider adapters must only
+     * render this durable chat transcript into their API dialect; they must
+     * not append the same user text again. */
+    private void appendUserTurnToHistory(RunContext ctx, String prompt) throws Exception {
+        if (ctx == null) throw new IllegalStateException("No active run context.");
+        mDatabase.appendMessage(ctx.record.id, "user", prompt);
+        refreshSystemMessage();
+        sanitizeReplayHistory();
+        if (ctx.chatMessages == null) ctx.chatMessages = new JSONArray();
+        ctx.chatMessages.put(json("role", "user", "content", prompt));
+        saveChatHistory(ctx);
+    }
+
+    /** Rebuild per-turn system/context metadata without changing the user
+     * transcript. This keeps each provider dialect read-only over history. */
+    private void refreshReplayHistory(RunContext ctx) {
+        if (ctx == null) return;
+        refreshSystemMessage();
+        sanitizeReplayHistory();
+        saveChatHistory(ctx);
+    }
+
+    private void saveChatHistory(RunContext ctx) {
+        if (ctx == null || ctx.chatMessages == null) return;
+        ctx.record.chatMessagesJson = ctx.chatMessages.toString();
+        persistRun(ctx);
+    }
+
     private String extractMessageText(JSONObject item) {
         JSONArray content = item.optJSONArray("content");
         if (content == null) return "";
@@ -852,11 +875,8 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
                                   @Nullable String effort, @Nullable String approvalPolicy) throws Exception {
         JSONArray input;
         try {
-            refreshSystemMessage();
-            sanitizeReplayHistory();
-            ctx().chatMessages.put(json("role", "user", "content", prompt));
-            if (ctx() != null) { ctx().record.chatMessagesJson = ctx().chatMessages.toString(); persistRun(); }
-            input = toCodexResponsesInput(ctx().chatMessages);
+            refreshReplayHistory(ctx);
+            input = toCodexResponsesInput(ctx.chatMessages);
         } catch (Exception e) {
             input = new JSONArray();
             input.put(new JSONObject().put("role", "user")
@@ -1244,12 +1264,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
     private void executeAnthropicTurn(RunContext ctx, String providerId, String baseUrl, String apiKey,
                                       String workspace, String prompt, String model,
                                       @Nullable String approvalPolicy) throws Exception {
-        try {
-            refreshSystemMessage();
-            sanitizeReplayHistory();
-            ctx().chatMessages.put(json("role", "user", "content", prompt));
-            if (ctx() != null) { ctx().record.chatMessagesJson = ctx().chatMessages.toString(); persistRun(); }
-        } catch (Exception ignored) {}
+        refreshReplayHistory(ctx);
 
         try {
             for (int step = 0; step < MAX_MODEL_STEPS && !ctx().stopRequested && !KatheerInterruptManager.isInterrupted(); step++) {
@@ -1438,10 +1453,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
                                             String prompt, String model, @Nullable String approvalPolicy) throws Exception {
         if (ctx().chatMessages == null)
             ctx().chatMessages = new JSONArray();
-        refreshSystemMessage();
-        sanitizeReplayHistory();
-        ctx().chatMessages.put(json("role", "user", "content", prompt));
-        if (ctx() != null) { ctx().record.chatMessagesJson = ctx().chatMessages.toString(); persistRun(); }
+        refreshReplayHistory(ctx);
 
         for (int step = 0; step < MAX_MODEL_STEPS && !ctx().stopRequested && !KatheerInterruptManager.isInterrupted(); step++) {
             JSONObject response = callChatCompletionsApi(providerId, baseUrl, apiKey, model, ctx().chatMessages);
