@@ -1300,11 +1300,39 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         bodyLp.setMargins(0, dp(6), 0, dp(10));
         box.addView(body, bodyLp);
 
+        TextView status = new TextView(this);
+        status.setText(currentCompactionStatusText());
+        status.setTextColor(color(R.color.ai_text_dim));
+        status.setTextSize(11);
+        status.setLineSpacing(dp(1), 1.0f);
+        LinearLayout.LayoutParams statusLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        statusLp.setMargins(0, 0, 0, dp(10));
+        box.addView(status, statusLp);
+
         MaterialButton compact = smallMemoryButton("Compact current session");
+        compact.setEnabled(mRuntimeService != null && mRuntimeService.getActiveRun() != null);
         box.addView(compact, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         compact.setOnClickListener(v -> confirmManualCompaction());
         return card;
+    }
+
+    private String currentCompactionStatusText() {
+        if (mRuntimeService == null) return "Runtime not connected yet.";
+        AiDatabase.RunRecord run = mRuntimeService.getActiveRun();
+        if (run == null) return "No current session selected.";
+        int activeMessages = 0;
+        try { activeMessages = mRuntimeService.getTranscript(run.id).length(); } catch (Exception ignored) {}
+        String model = TextUtils.isEmpty(run.modelOverride) ? run.lastResolvedModel : run.modelOverride;
+        if (TextUtils.isEmpty(model)) model = "model not resolved yet";
+        String provider = TextUtils.isEmpty(run.harnessId) ? "unknown provider" : run.harnessId;
+        String readiness = activeMessages >= 30
+            ? "Ready for manual compaction."
+            : "Still small; compaction will refuse until roughly 30 active replay messages.";
+        return "Current session: " + provider + " · " + model + "\n" +
+            "Active replay messages: " + activeMessages + "\n" +
+            readiness;
     }
 
     private void confirmManualCompaction() {

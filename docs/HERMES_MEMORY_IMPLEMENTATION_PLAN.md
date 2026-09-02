@@ -261,9 +261,12 @@ Implemented:
 
 Still missing/needs hardening:
 
-- Context-size/status indicator is not yet visualized beyond the "session too small" guard.
 - Runtime path is compile-verified but still needs on-device provider validation.
 - The compaction summary generator uses the same quiet provider adapter as memory review; provider-specific token parameter quirks may need device/provider testing.
+
+Additional hardening completed:
+
+- Memory page manual compaction card now shows current session provider/model, active replay message count, and readiness/too-small status.
 
 ### Phase 6 — Journey / memory graph
 
@@ -321,3 +324,4 @@ Still need:
 - 2026-09-02: Hardening pass after audit. `session_search` now searches/reads compacted historical rows instead of active-only rows, manual compaction reads historical transcript, tool calls/results persist globally as searchable non-replay rows, and `AiMemoryStore` now has a much closer Java port of Hermes strict threat patterns. `compileDebugJavaWithJavac` passed after these changes.
 - 2026-09-02: Final hardening build verification passed: `assembleDebug` successful after the `session_search` recovery/tool transcript/threat scanner changes. ADB still shows an empty device list, so install/launch and live memory-flow verification remain pending until the phone is visible to ADB.
 - 2026-09-02: Added executable verification. `AiMemoryStoreTest` covers seeding/prompt injection format, Hermes strict threat blocking, batch remove+add final-budget behavior, and strict UTF-8 unreadable-file refusal without wipe. `AiDatabaseMemoryTest` covers manual compaction trimming active replay while `session_search` recovers archived/tool history. Focused tests and full `:app:testDebugUnitTest` passed, followed by successful `assembleDebug`.
+- 2026-09-02: Closed the local context-size/status UI gap for manual compaction. The Memory page now shows provider/model, active replay message count, and readiness before the user confirms compaction. Re-ran `compileDebugJavaWithJavac`, full `:app:testDebugUnitTest`, and `assembleDebug`; all passed.
