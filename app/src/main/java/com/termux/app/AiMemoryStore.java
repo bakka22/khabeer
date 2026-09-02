@@ -36,6 +36,7 @@ public final class AiMemoryStore {
     public static final String TARGET_USER = "user";
 
     private static int sConsolidationFailures;
+    private static File sDataRootOverride;
 
     private static final int MAX_SCAN_CHARS = 65_536;
     private static final String FILLER = "(?:\\w+\\s+){0,8}";
@@ -102,7 +103,13 @@ public final class AiMemoryStore {
     private AiMemoryStore() {}
 
     public static File dataRoot() {
+        if (sDataRootOverride != null) return sDataRootOverride;
         return new File(TermuxConstants.TERMUX_HOME_DIR_PATH, ".katheer");
+    }
+
+    static synchronized void setDataRootForTests(File root) {
+        sDataRootOverride = root;
+        sConsolidationFailures = 0;
     }
 
     public static File memoryDir() {

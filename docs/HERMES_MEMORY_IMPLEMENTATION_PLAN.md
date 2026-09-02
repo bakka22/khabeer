@@ -295,6 +295,10 @@ Verified:
 
 - `compileDebugJavaWithJavac`
 - `assembleDebug`
+- Focused memory/database unit tests:
+  - `AiMemoryStoreTest`
+  - `AiDatabaseMemoryTest`
+- Full `:app:testDebugUnitTest`
 
 Still need:
 
@@ -316,3 +320,4 @@ Still need:
 - 2026-09-02: Phase 7 build verification passed: `compileDebugJavaWithJavac` and `assembleDebug` both successful. ADB verification is blocked: `adb devices` and `adb devices -l` return an empty device list after restarting the ADB server. APK exists at `app/build/outputs/apk/debug/termux-app_apt-android-7-debug_universal.apk`.
 - 2026-09-02: Hardening pass after audit. `session_search` now searches/reads compacted historical rows instead of active-only rows, manual compaction reads historical transcript, tool calls/results persist globally as searchable non-replay rows, and `AiMemoryStore` now has a much closer Java port of Hermes strict threat patterns. `compileDebugJavaWithJavac` passed after these changes.
 - 2026-09-02: Final hardening build verification passed: `assembleDebug` successful after the `session_search` recovery/tool transcript/threat scanner changes. ADB still shows an empty device list, so install/launch and live memory-flow verification remain pending until the phone is visible to ADB.
+- 2026-09-02: Added executable verification. `AiMemoryStoreTest` covers seeding/prompt injection format, Hermes strict threat blocking, batch remove+add final-budget behavior, and strict UTF-8 unreadable-file refusal without wipe. `AiDatabaseMemoryTest` covers manual compaction trimming active replay while `session_search` recovers archived/tool history. Focused tests and full `:app:testDebugUnitTest` passed, followed by successful `assembleDebug`.
