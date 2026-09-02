@@ -22,6 +22,7 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
+import android.widget.CheckBox;
 
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
@@ -837,7 +838,799 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         View extensions = findViewById(R.id.ai_extensions_page);
         if (extensions != null) extensions.setVisibility(View.GONE);
         mChatTitle.setText("More");
+        populateMorePage((LinearLayout) morePage);
         morePage.setVisibility(View.VISIBLE);
+    }
+
+    private void populateMorePage(LinearLayout morePage) {
+        morePage.removeAllViews();
+        morePage.setPadding(dp(16), dp(16), dp(16), dp(100));
+
+        TextView title = new TextView(this);
+        title.setText("More");
+        title.setTextColor(color(R.color.ai_text));
+        title.setTextSize(24);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        morePage.addView(title);
+
+        TextView subtitle = new TextView(this);
+        subtitle.setText("Memory, identity, and agent configuration.");
+        subtitle.setTextColor(color(R.color.ai_text_muted));
+        subtitle.setTextSize(13);
+        LinearLayout.LayoutParams subLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        subLp.setMargins(0, dp(4), 0, dp(14));
+        subtitle.setLayoutParams(subLp);
+        morePage.addView(subtitle);
+
+        morePage.addView(createMoreEntry(
+            "Memory",
+            "Edit SOUL.md, MEMORY.md, and USER.md. The agent can write curated memory through the memory tool.",
+            "🧠",
+            v -> showMemoryPage()));
+    }
+
+    private View createMoreEntry(String title, String body, String icon, View.OnClickListener listener) {
+        MaterialCardView card = new MaterialCardView(this);
+        card.setCardBackgroundColor(color(R.color.ai_surface_elevated));
+        card.setStrokeColor(color(R.color.ai_border));
+        card.setStrokeWidth(dp(1));
+        card.setRadius(dp(18));
+        card.setClickable(true);
+        card.setFocusable(true);
+        card.setOnClickListener(listener);
+        LinearLayout.LayoutParams cardLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        cardLp.setMargins(0, 0, 0, dp(10));
+        card.setLayoutParams(cardLp);
+
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(16), dp(14), dp(16), dp(14));
+        card.addView(row);
+
+        TextView glyph = new TextView(this);
+        glyph.setText(icon);
+        glyph.setTextSize(24);
+        glyph.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams glyphLp = new LinearLayout.LayoutParams(dp(44), dp(44));
+        row.addView(glyph, glyphLp);
+
+        LinearLayout texts = new LinearLayout(this);
+        texts.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams textsLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        textsLp.setMargins(dp(12), 0, dp(8), 0);
+        row.addView(texts, textsLp);
+
+        TextView tvTitle = new TextView(this);
+        tvTitle.setText(title);
+        tvTitle.setTextColor(color(R.color.ai_text));
+        tvTitle.setTextSize(16);
+        tvTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        texts.addView(tvTitle);
+
+        TextView tvBody = new TextView(this);
+        tvBody.setText(body);
+        tvBody.setTextColor(color(R.color.ai_text_muted));
+        tvBody.setTextSize(12);
+        tvBody.setLineSpacing(dp(1), 1.0f);
+        texts.addView(tvBody);
+
+        TextView chevron = new TextView(this);
+        chevron.setText("›");
+        chevron.setTextColor(color(R.color.ai_text_muted));
+        chevron.setTextSize(28);
+        row.addView(chevron);
+        return card;
+    }
+
+    private void showMemoryPage() {
+        View morePage = findViewById(R.id.ai_more_page);
+        if (!(morePage instanceof LinearLayout)) return;
+        LinearLayout page = (LinearLayout) morePage;
+        page.removeAllViews();
+        page.setPadding(dp(16), dp(16), dp(16), dp(100));
+        mChatTitle.setText("Memory");
+
+        TextView title = new TextView(this);
+        title.setText("Memory");
+        title.setTextColor(color(R.color.ai_text));
+        title.setTextSize(24);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        page.addView(title);
+
+        TextView subtitle = new TextView(this);
+        subtitle.setText("Hermes-style persistent memory. SOUL.md is identity memory; MEMORY.md and USER.md are curated facts the agent can update through the memory tool.");
+        subtitle.setTextColor(color(R.color.ai_text_muted));
+        subtitle.setTextSize(13);
+        subtitle.setLineSpacing(dp(2), 1.0f);
+        LinearLayout.LayoutParams subLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        subLp.setMargins(0, dp(4), 0, dp(14));
+        page.addView(subtitle, subLp);
+
+        page.addView(createMemoryStatusCard());
+        page.addView(createJourneyEntryCard());
+        page.addView(createManualCompactionCard());
+        page.addView(createPendingMemoryCard());
+
+        page.addView(createMemoryEditor(
+            AiMemoryStore.TARGET_SOUL,
+            "SOUL.md",
+            "Assistant identity/persona. Injected first into the session prompt. User-owned; not a normal memory-tool target.",
+            AiMemoryStore.SOUL_LIMIT));
+        page.addView(createMemoryEditor(
+            AiMemoryStore.TARGET_USER,
+            "USER.md",
+            "Who the user is: preferences, style, stable personal workflow facts.",
+            AiMemoryStore.USER_LIMIT));
+        page.addView(createMemoryEditor(
+            AiMemoryStore.TARGET_MEMORY,
+            "MEMORY.md",
+            "Agent notes: environment facts, project conventions, durable lessons.",
+            AiMemoryStore.MEMORY_LIMIT));
+    }
+
+    private View createJourneyEntryCard() {
+        MaterialCardView card = new MaterialCardView(this);
+        card.setCardBackgroundColor(color(R.color.ai_surface_elevated));
+        card.setStrokeColor(color(R.color.ai_border));
+        card.setStrokeWidth(dp(1));
+        card.setRadius(dp(18));
+        card.setClickable(true);
+        card.setFocusable(true);
+        LinearLayout.LayoutParams cardLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        cardLp.setMargins(0, 0, 0, dp(12));
+        card.setLayoutParams(cardLp);
+
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(16), dp(14), dp(16), dp(14));
+        card.addView(row);
+
+        TextView glyph = new TextView(this);
+        glyph.setText("🧭");
+        glyph.setTextSize(24);
+        glyph.setGravity(Gravity.CENTER);
+        row.addView(glyph, new LinearLayout.LayoutParams(dp(44), dp(44)));
+
+        LinearLayout text = new LinearLayout(this);
+        text.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams textLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        textLp.setMargins(dp(12), 0, dp(8), 0);
+        row.addView(text, textLp);
+
+        TextView title = new TextView(this);
+        title.setText("Journey");
+        title.setTextColor(color(R.color.ai_text));
+        title.setTextSize(16);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        text.addView(title);
+
+        TextView body = new TextView(this);
+        body.setText("Browse the real memory graph: MEMORY.md entries, USER.md entries, and installed skills.");
+        body.setTextColor(color(R.color.ai_text_muted));
+        body.setTextSize(12);
+        body.setLineSpacing(dp(1), 1.0f);
+        text.addView(body);
+
+        TextView chevron = new TextView(this);
+        chevron.setText("›");
+        chevron.setTextColor(color(R.color.ai_text_muted));
+        chevron.setTextSize(28);
+        row.addView(chevron);
+        card.setOnClickListener(v -> showJourneyPage());
+        return card;
+    }
+
+    private void showJourneyPage() {
+        View morePage = findViewById(R.id.ai_more_page);
+        if (!(morePage instanceof LinearLayout)) return;
+        LinearLayout page = (LinearLayout) morePage;
+        page.removeAllViews();
+        page.setPadding(dp(16), dp(16), dp(16), dp(100));
+        mChatTitle.setText("Journey");
+
+        TextView title = new TextView(this);
+        title.setText("Journey");
+        title.setTextColor(color(R.color.ai_text));
+        title.setTextSize(24);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        page.addView(title);
+
+        TextView subtitle = new TextView(this);
+        subtitle.setText("A concrete view of the persistent context the app can carry across work: curated memory files plus procedural skill memory.");
+        subtitle.setTextColor(color(R.color.ai_text_muted));
+        subtitle.setTextSize(13);
+        subtitle.setLineSpacing(dp(2), 1.0f);
+        LinearLayout.LayoutParams subLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        subLp.setMargins(0, dp(4), 0, dp(14));
+        page.addView(subtitle, subLp);
+
+        MaterialButton back = smallMemoryButton("Back to Memory");
+        back.setOnClickListener(v -> showMemoryPage());
+        page.addView(back, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        addJourneyMemorySection(page, AiMemoryStore.TARGET_USER, "USER.md nodes", AiMemoryStore.USER_LIMIT);
+        addJourneyMemorySection(page, AiMemoryStore.TARGET_MEMORY, "MEMORY.md nodes", AiMemoryStore.MEMORY_LIMIT);
+        addJourneySkillSection(page);
+    }
+
+    private void addJourneyMemorySection(LinearLayout page, String target, String title, int limit) {
+        TextView heading = journeyHeading(title);
+        page.addView(heading);
+        List<String> entries = memoryEntries(target);
+        if (entries.isEmpty()) {
+            TextView empty = journeyEmpty("No entries yet.");
+            page.addView(empty);
+            return;
+        }
+        for (int i = 0; i < entries.size(); i++) {
+            page.addView(createJourneyMemoryNode(target, i, entries.get(i), limit));
+        }
+    }
+
+    private void addJourneySkillSection(LinearLayout page) {
+        TextView heading = journeyHeading("Skill nodes");
+        page.addView(heading);
+        Set<String> disabled = AiSkillRegistry.readDisabled();
+        List<AiSkillRegistry.Skill> skills = AiSkillRegistry.listSkills();
+        boolean any = false;
+        for (AiSkillRegistry.Skill skill : skills) {
+            if (skill == null) continue;
+            any = true;
+            page.addView(createJourneySkillNode(skill, disabled.contains(skill.name)));
+        }
+        if (!any) page.addView(journeyEmpty("No skills installed."));
+    }
+
+    private TextView journeyHeading(String text) {
+        TextView heading = new TextView(this);
+        heading.setText(text);
+        heading.setTextColor(color(R.color.ai_text));
+        heading.setTextSize(17);
+        heading.setTypeface(Typeface.DEFAULT_BOLD);
+        heading.setPadding(0, dp(18), 0, dp(8));
+        return heading;
+    }
+
+    private TextView journeyEmpty(String text) {
+        TextView empty = new TextView(this);
+        empty.setText(text);
+        empty.setTextColor(color(R.color.ai_text_muted));
+        empty.setTextSize(12);
+        empty.setPadding(0, 0, 0, dp(10));
+        return empty;
+    }
+
+    private View createJourneyMemoryNode(String target, int index, String entry, int limit) {
+        MaterialCardView card = journeyNodeCard();
+        LinearLayout box = journeyNodeBox(card);
+        String nodeId = "memory:" + target + ":" + index;
+        TextView title = new TextView(this);
+        title.setText(nodeId);
+        title.setTextColor(color(R.color.ai_text));
+        title.setTextSize(13);
+        title.setTypeface(Typeface.MONOSPACE);
+        box.addView(title);
+
+        TextView body = new TextView(this);
+        body.setText(entry);
+        body.setTextColor(color(R.color.ai_text_muted));
+        body.setTextSize(12);
+        body.setLineSpacing(dp(1), 1.0f);
+        body.setPadding(0, dp(6), 0, dp(8));
+        box.addView(body);
+
+        LinearLayout buttons = new LinearLayout(this);
+        buttons.setOrientation(LinearLayout.HORIZONTAL);
+        MaterialButton edit = smallMemoryButton("Edit");
+        MaterialButton delete = smallMemoryButton("Delete");
+        buttons.addView(edit, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        LinearLayout.LayoutParams delLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        delLp.setMargins(dp(8), 0, 0, 0);
+        buttons.addView(delete, delLp);
+        box.addView(buttons);
+
+        edit.setOnClickListener(v -> editJourneyMemoryNode(target, index, entry, limit));
+        delete.setOnClickListener(v -> deleteJourneyMemoryNode(target, index));
+        return card;
+    }
+
+    private View createJourneySkillNode(AiSkillRegistry.Skill skill, boolean disabled) {
+        MaterialCardView card = journeyNodeCard();
+        card.setClickable(true);
+        card.setFocusable(true);
+        LinearLayout box = journeyNodeBox(card);
+
+        TextView title = new TextView(this);
+        title.setText("skill:" + skill.name);
+        title.setTextColor(color(R.color.ai_text));
+        title.setTextSize(13);
+        title.setTypeface(Typeface.MONOSPACE);
+        box.addView(title);
+
+        TextView meta = new TextView(this);
+        String state = !skill.platformSupported ? "not available on Android" : (disabled ? "disabled" : "enabled");
+        meta.setText(skill.category + " · " + state + " · " + skill.relPath);
+        meta.setTextColor(color(!skill.platformSupported || disabled ? R.color.ai_warning : R.color.ai_text_muted));
+        meta.setTextSize(11);
+        meta.setPadding(0, dp(4), 0, dp(4));
+        box.addView(meta);
+
+        if (!TextUtils.isEmpty(skill.description)) {
+            TextView desc = new TextView(this);
+            desc.setText(skill.description);
+            desc.setTextColor(color(R.color.ai_text_muted));
+            desc.setTextSize(12);
+            desc.setPadding(0, dp(2), 0, 0);
+            box.addView(desc);
+        }
+        card.setOnClickListener(v -> showSkillViewer(skill));
+        return card;
+    }
+
+    private MaterialCardView journeyNodeCard() {
+        MaterialCardView card = new MaterialCardView(this);
+        card.setCardBackgroundColor(color(R.color.ai_surface_elevated));
+        card.setStrokeColor(color(R.color.ai_border));
+        card.setStrokeWidth(dp(1));
+        card.setRadius(dp(16));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.setMargins(0, 0, 0, dp(10));
+        card.setLayoutParams(lp);
+        return card;
+    }
+
+    private LinearLayout journeyNodeBox(MaterialCardView card) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(14), dp(12), dp(14), dp(12));
+        card.addView(box);
+        return box;
+    }
+
+    private List<String> memoryEntries(String target) {
+        List<String> entries = new ArrayList<>();
+        String raw = AiMemoryStore.readRaw(target);
+        if (TextUtils.isEmpty(raw.trim())) return entries;
+        String[] parts = raw.split("\\n§\\n");
+        for (String part : parts) {
+            String clean = part == null ? "" : part.trim();
+            if (!TextUtils.isEmpty(clean) && !entries.contains(clean)) entries.add(clean);
+        }
+        return entries;
+    }
+
+    private void editJourneyMemoryNode(String target, int index, String current, int limit) {
+        EditText editor = new EditText(this);
+        editor.setSingleLine(false);
+        editor.setMinLines(4);
+        editor.setGravity(Gravity.TOP | Gravity.START);
+        editor.setText(current);
+        editor.setSelection(editor.length());
+        editor.setTextColor(color(R.color.ai_text));
+        editor.setHintTextColor(color(R.color.ai_text_dim));
+        editor.setBackgroundColor(color(R.color.ai_surface_muted));
+        editor.setPadding(dp(12), dp(10), dp(12), dp(10));
+        new MaterialAlertDialogBuilder(this)
+            .setTitle("Edit memory node")
+            .setMessage("Node: memory:" + target + ":" + index + "\nStore cap: " + limit + " chars")
+            .setView(editor)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Save", (dialog, which) -> {
+                List<String> entries = memoryEntries(target);
+                if (index < 0 || index >= entries.size()) { showError("Memory node no longer exists."); return; }
+                entries.set(index, editor.getText() == null ? "" : editor.getText().toString().trim());
+                saveJourneyEntries(target, entries, limit);
+            })
+            .show();
+    }
+
+    private void deleteJourneyMemoryNode(String target, int index) {
+        new MaterialAlertDialogBuilder(this)
+            .setTitle("Delete memory node?")
+            .setMessage("Delete memory:" + target + ":" + index + " from " + (AiMemoryStore.TARGET_USER.equals(target) ? "USER.md" : "MEMORY.md") + "?")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Delete", (dialog, which) -> {
+                List<String> entries = memoryEntries(target);
+                if (index < 0 || index >= entries.size()) { showError("Memory node no longer exists."); return; }
+                entries.remove(index);
+                saveJourneyEntries(target, entries, AiMemoryStore.limitFor(target));
+            })
+            .show();
+    }
+
+    private void saveJourneyEntries(String target, List<String> entries, int limit) {
+        ArrayList<String> clean = new ArrayList<>();
+        for (String entry : entries) {
+            String e = entry == null ? "" : entry.trim();
+            if (!TextUtils.isEmpty(e) && !clean.contains(e)) clean.add(e);
+        }
+        String serialized = TextUtils.join(AiMemoryStore.ENTRY_DELIMITER, clean);
+        if (serialized.length() > limit) {
+            showError("That edit is " + serialized.length() + "/" + limit + " chars. Shorten it before saving.");
+            return;
+        }
+        JSONObject result = AiMemoryStore.saveRaw(target, serialized);
+        if (result.optBoolean("success")) {
+            Toast.makeText(this, "Memory node saved", Toast.LENGTH_SHORT).show();
+            showJourneyPage();
+        } else {
+            showError(result.optString("error", "Memory node save failed."));
+        }
+    }
+
+    private View createManualCompactionCard() {
+        MaterialCardView card = new MaterialCardView(this);
+        card.setCardBackgroundColor(color(R.color.ai_surface_elevated));
+        card.setStrokeColor(color(R.color.ai_border));
+        card.setStrokeWidth(dp(1));
+        card.setRadius(dp(18));
+        LinearLayout.LayoutParams cardLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        cardLp.setMargins(0, 0, 0, dp(12));
+        card.setLayoutParams(cardLp);
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(16), dp(14), dp(16), dp(14));
+        card.addView(box);
+
+        TextView heading = new TextView(this);
+        heading.setText("Manual session compaction");
+        heading.setTextColor(color(R.color.ai_text));
+        heading.setTextSize(17);
+        heading.setTypeface(Typeface.DEFAULT_BOLD);
+        box.addView(heading);
+
+        TextView body = new TextView(this);
+        body.setText("Compress the current session into a Hermes-style structured checkpoint, keep the newest messages live, and preserve recovery through session_search. This never runs automatically.");
+        body.setTextColor(color(R.color.ai_text_muted));
+        body.setTextSize(12);
+        body.setLineSpacing(dp(1), 1.0f);
+        LinearLayout.LayoutParams bodyLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        bodyLp.setMargins(0, dp(6), 0, dp(10));
+        box.addView(body, bodyLp);
+
+        MaterialButton compact = smallMemoryButton("Compact current session");
+        box.addView(compact, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        compact.setOnClickListener(v -> confirmManualCompaction());
+        return card;
+    }
+
+    private void confirmManualCompaction() {
+        if (mRuntimeService == null) {
+            showError("Runtime is not connected yet.");
+            return;
+        }
+        new MaterialAlertDialogBuilder(this)
+            .setTitle("Compact current session?")
+            .setMessage("The app will ask this session's selected provider/model to create a structured checkpoint, archive older active messages, and keep a protected recent tail. This is manual and cannot run mid-turn.")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Compact", (dialog, which) -> {
+                setStatus("Compaction started…", true);
+                mRuntimeService.compactCurrentSessionManually();
+            })
+            .show();
+    }
+
+    private View createMemoryStatusCard() {
+        MaterialCardView card = new MaterialCardView(this);
+        card.setCardBackgroundColor(color(R.color.ai_surface_elevated));
+        card.setStrokeColor(color(R.color.ai_border));
+        card.setStrokeWidth(dp(1));
+        card.setRadius(dp(18));
+        LinearLayout.LayoutParams cardLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        cardLp.setMargins(0, 0, 0, dp(12));
+        card.setLayoutParams(cardLp);
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(16), dp(14), dp(16), dp(14));
+        card.addView(box);
+
+        TextView heading = new TextView(this);
+        heading.setText("Memory system");
+        heading.setTextColor(color(R.color.ai_text));
+        heading.setTextSize(17);
+        heading.setTypeface(Typeface.DEFAULT_BOLD);
+        box.addView(heading);
+
+        TextView summary = new TextView(this);
+        summary.setText(memoryStatusText());
+        summary.setTextColor(color(R.color.ai_text_muted));
+        summary.setTextSize(12);
+        summary.setLineSpacing(dp(2), 1.0f);
+        LinearLayout.LayoutParams summaryLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        summaryLp.setMargins(0, dp(8), 0, dp(8));
+        box.addView(summary, summaryLp);
+
+        TextView note = new TextView(this);
+        note.setText("Conversation history is saved automatically and exposed to the model through session_search. Memory file edits affect new sessions; active sessions keep their frozen prompt snapshot.");
+        note.setTextColor(color(R.color.ai_text_dim));
+        note.setTextSize(11);
+        note.setLineSpacing(dp(1), 1.0f);
+        box.addView(note);
+
+        box.addView(memoryToggle("Enable MEMORY.md", mProviderConfig == null || mProviderConfig.isMemoryEnabled(), checked -> {
+            if (mProviderConfig != null) mProviderConfig.setMemoryEnabled(checked);
+            showMemoryPage();
+        }));
+        box.addView(memoryToggle("Enable USER.md", mProviderConfig == null || mProviderConfig.isUserMemoryEnabled(), checked -> {
+            if (mProviderConfig != null) mProviderConfig.setUserMemoryEnabled(checked);
+            showMemoryPage();
+        }));
+        box.addView(memoryToggle("Require approval before memory writes", mProviderConfig != null && mProviderConfig.isMemoryWriteApprovalEnabled(), checked -> {
+            if (mProviderConfig != null) mProviderConfig.setMemoryWriteApprovalEnabled(checked);
+            showMemoryPage();
+        }));
+        box.addView(memoryToggle("Enable 10-turn memory review nudge", mProviderConfig == null || mProviderConfig.isMemoryNudgeEnabled(), checked -> {
+            if (mProviderConfig != null) mProviderConfig.setMemoryNudgeEnabled(checked);
+            showMemoryPage();
+        }));
+
+        LinearLayout buttons = new LinearLayout(this);
+        buttons.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams buttonsLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        buttonsLp.setMargins(0, dp(10), 0, 0);
+        box.addView(buttons, buttonsLp);
+
+        MaterialButton resetUser = smallMemoryButton("Reset USER.md");
+        MaterialButton resetMemory = smallMemoryButton("Reset MEMORY.md");
+        buttons.addView(resetUser, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        LinearLayout.LayoutParams rmLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        rmLp.setMargins(dp(8), 0, 0, 0);
+        buttons.addView(resetMemory, rmLp);
+
+        resetUser.setOnClickListener(v -> confirmResetMemory(AiMemoryStore.TARGET_USER, "USER.md"));
+        resetMemory.setOnClickListener(v -> confirmResetMemory(AiMemoryStore.TARGET_MEMORY, "MEMORY.md"));
+        return card;
+    }
+
+    private interface BoolConsumer { void accept(boolean checked); }
+
+    private View memoryToggle(String text, boolean checked, BoolConsumer onChange) {
+        CheckBox cb = new CheckBox(this);
+        cb.setText(text);
+        cb.setChecked(checked);
+        cb.setTextColor(color(R.color.ai_text));
+        cb.setTextSize(12);
+        cb.setButtonTintList(android.content.res.ColorStateList.valueOf(color(R.color.ai_accent)));
+        cb.setPadding(0, dp(6), 0, dp(2));
+        cb.setOnCheckedChangeListener((buttonView, isChecked) -> onChange.accept(isChecked));
+        return cb;
+    }
+
+    private MaterialButton smallMemoryButton(String text) {
+        MaterialButton b = new MaterialButton(this);
+        b.setText(text);
+        b.setAllCaps(false);
+        b.setTextSize(12);
+        b.setTextColor(color(R.color.ai_text));
+        b.setStrokeColor(android.content.res.ColorStateList.valueOf(color(R.color.ai_border)));
+        b.setStrokeWidth(dp(1));
+        b.setBackgroundTintList(android.content.res.ColorStateList.valueOf(color(R.color.ai_surface_muted)));
+        b.setCornerRadius(dp(12));
+        return b;
+    }
+
+    private void confirmResetMemory(String target, String label) {
+        new MaterialAlertDialogBuilder(this)
+            .setTitle("Reset " + label + "?")
+            .setMessage("This clears the curated entries in " + label + ". SOUL.md and session history are not touched.")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Reset", (dialog, which) -> {
+                JSONObject result = AiMemoryStore.reset(target);
+                if (result.optBoolean("success")) {
+                    Toast.makeText(this, label + " reset", Toast.LENGTH_SHORT).show();
+                    showMemoryPage();
+                } else {
+                    showError(result.optString("error", "Reset failed."));
+                }
+            })
+            .show();
+    }
+
+    private String memoryStatusText() {
+        try {
+            JSONObject status = AiMemoryStore.status();
+            JSONObject soul = status.optJSONObject("soul");
+            JSONObject user = status.optJSONObject("user");
+            JSONObject memory = status.optJSONObject("memory");
+            return "SOUL.md: " + statusLine(soul) + "\n" +
+                "USER.md: " + statusLine(user) + "\n" +
+                "MEMORY.md: " + statusLine(memory) + "\n" +
+                "Pending staged writes: " + status.optInt("pending_count", 0) + "\n" +
+                "Write approval: " + ((mProviderConfig != null && mProviderConfig.isMemoryWriteApprovalEnabled()) ? "on" : "off") + "\n" +
+                "Nudge loop: " + ((mProviderConfig == null || mProviderConfig.isMemoryNudgeEnabled()) ? "on every " + (mProviderConfig == null ? 10 : mProviderConfig.getMemoryNudgeInterval()) + " user turns" : "off");
+        } catch (Exception e) {
+            return "Memory status unavailable.";
+        }
+    }
+
+    private String statusLine(JSONObject o) {
+        if (o == null) return "unavailable";
+        return o.optInt("chars") + "/" + o.optInt("limit") + " chars · " + o.optInt("entry_count") + " entr" + (o.optInt("entry_count") == 1 ? "y" : "ies");
+    }
+
+    private View createPendingMemoryCard() {
+        JSONArray pending = AiMemoryStore.pendingWrites();
+        MaterialCardView card = new MaterialCardView(this);
+        card.setCardBackgroundColor(color(R.color.ai_surface_elevated));
+        card.setStrokeColor(color(R.color.ai_border));
+        card.setStrokeWidth(dp(1));
+        card.setRadius(dp(18));
+        LinearLayout.LayoutParams cardLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        cardLp.setMargins(0, 0, 0, dp(12));
+        card.setLayoutParams(cardLp);
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(16), dp(14), dp(16), dp(14));
+        card.addView(box);
+
+        TextView heading = new TextView(this);
+        heading.setText("Pending memory writes");
+        heading.setTextColor(color(R.color.ai_text));
+        heading.setTextSize(17);
+        heading.setTypeface(Typeface.DEFAULT_BOLD);
+        box.addView(heading);
+
+        TextView body = new TextView(this);
+        body.setText(pending.length() == 0
+            ? "No staged writes. The default Hermes behavior is direct model writes for MEMORY.md/USER.md; staged review is available for gated/background writes."
+            : pending.length() + " write(s) waiting for review.");
+        body.setTextColor(color(R.color.ai_text_muted));
+        body.setTextSize(12);
+        LinearLayout.LayoutParams bodyLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        bodyLp.setMargins(0, dp(6), 0, dp(8));
+        box.addView(body, bodyLp);
+
+        for (int i = 0; i < pending.length(); i++) {
+            JSONObject item = pending.optJSONObject(i);
+            if (item == null) continue;
+            box.addView(createPendingMemoryRow(item));
+        }
+        return card;
+    }
+
+    private View createPendingMemoryRow(JSONObject item) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.VERTICAL);
+        row.setPadding(0, dp(8), 0, dp(8));
+        String id = item.optString("id");
+        JSONObject args = item.optJSONObject("args");
+
+        TextView text = new TextView(this);
+        text.setText((TextUtils.isEmpty(id) ? "pending" : id) + "\n" + oneLine(args == null ? "" : args.toString(), 140));
+        text.setTextColor(color(R.color.ai_text_muted));
+        text.setTextSize(11);
+        row.addView(text);
+
+        LinearLayout buttons = new LinearLayout(this);
+        buttons.setOrientation(LinearLayout.HORIZONTAL);
+        MaterialButton approve = smallMemoryButton("Approve");
+        MaterialButton reject = smallMemoryButton("Reject");
+        buttons.addView(approve, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        LinearLayout.LayoutParams rejectLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        rejectLp.setMargins(dp(8), 0, 0, 0);
+        buttons.addView(reject, rejectLp);
+        row.addView(buttons);
+
+        approve.setOnClickListener(v -> {
+            JSONObject result = AiMemoryStore.approvePending(id);
+            if (result.optBoolean("success")) {
+                Toast.makeText(this, "Memory write approved", Toast.LENGTH_SHORT).show();
+                showMemoryPage();
+            } else showError(result.optString("error", "Approval failed."));
+        });
+        reject.setOnClickListener(v -> {
+            JSONObject result = AiMemoryStore.rejectPending(id);
+            if (result.optBoolean("success")) {
+                Toast.makeText(this, "Memory write rejected", Toast.LENGTH_SHORT).show();
+                showMemoryPage();
+            } else showError(result.optString("error", "Reject failed."));
+        });
+        return row;
+    }
+
+    private View createMemoryEditor(String target, String title, String body, int limit) {
+        MaterialCardView card = new MaterialCardView(this);
+        card.setCardBackgroundColor(color(R.color.ai_surface_elevated));
+        card.setStrokeColor(color(R.color.ai_border));
+        card.setStrokeWidth(dp(1));
+        card.setRadius(dp(18));
+        LinearLayout.LayoutParams cardLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        cardLp.setMargins(0, 0, 0, dp(12));
+        card.setLayoutParams(cardLp);
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(16), dp(14), dp(16), dp(14));
+        card.addView(box);
+
+        TextView heading = new TextView(this);
+        heading.setText(title);
+        heading.setTextColor(color(R.color.ai_text));
+        heading.setTextSize(17);
+        heading.setTypeface(Typeface.DEFAULT_BOLD);
+        box.addView(heading);
+
+        TextView desc = new TextView(this);
+        desc.setText(body);
+        desc.setTextColor(color(R.color.ai_text_muted));
+        desc.setTextSize(12);
+        desc.setLineSpacing(dp(1), 1.0f);
+        box.addView(desc);
+
+        EditText editor = new EditText(this);
+        editor.setSingleLine(false);
+        editor.setMinLines(AiMemoryStore.TARGET_SOUL.equals(target) ? 5 : 4);
+        editor.setGravity(Gravity.TOP | Gravity.START);
+        editor.setText(AiMemoryStore.readRaw(target));
+        editor.setTextColor(color(R.color.ai_text));
+        editor.setHintTextColor(color(R.color.ai_text_dim));
+        editor.setTextSize(13);
+        editor.setBackgroundColor(color(R.color.ai_surface_muted));
+        editor.setPadding(dp(12), dp(10), dp(12), dp(10));
+        LinearLayout.LayoutParams editorLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        editorLp.setMargins(0, dp(10), 0, dp(8));
+        box.addView(editor, editorLp);
+
+        TextView counter = new TextView(this);
+        counter.setGravity(Gravity.END);
+        counter.setTextColor(editor.length() > limit ? color(R.color.ai_error) : color(R.color.ai_text_muted));
+        counter.setText(editor.length() + "/" + limit);
+        counter.setTextSize(11);
+        box.addView(counter);
+
+        editor.addTextChangedListener(new android.text.TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+            @Override public void onTextChanged(CharSequence s, int start, int before, int count) {
+                int len = s == null ? 0 : s.length();
+                counter.setText(len + "/" + limit);
+                counter.setTextColor(len > limit ? color(R.color.ai_error) : color(R.color.ai_text_muted));
+            }
+            @Override public void afterTextChanged(android.text.Editable s) {}
+        });
+
+        MaterialButton save = new MaterialButton(this);
+        save.setText("Save " + title);
+        save.setAllCaps(false);
+        save.setTextColor(0xFFFFFFFF);
+        save.setBackgroundTintList(android.content.res.ColorStateList.valueOf(color(R.color.ai_accent)));
+        save.setCornerRadius(dp(12));
+        LinearLayout.LayoutParams saveLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        saveLp.setMargins(0, dp(8), 0, 0);
+        box.addView(save, saveLp);
+        save.setOnClickListener(v -> {
+            JSONObject result = AiMemoryStore.saveRaw(target, editor.getText() == null ? "" : editor.getText().toString());
+            if (result.optBoolean("success")) {
+                setStatus(title + " saved. It affects the next session snapshot.", false);
+                Toast.makeText(this, title + " saved", Toast.LENGTH_SHORT).show();
+            } else {
+                showError(result.optString("error", "Memory save failed."));
+            }
+        });
+
+        return card;
     }
 
     /** Top-bar gear: the katheer app settings that exist today. */

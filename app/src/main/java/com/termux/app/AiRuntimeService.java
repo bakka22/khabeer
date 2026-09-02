@@ -108,6 +108,12 @@ public final class AiRuntimeService extends Service {
         volatile boolean stopRequested;
         volatile boolean lastTurnInterrupted;
         String steerText;
+        String providerId;
+        String baseUrl;
+        String apiKey;
+        String model;
+        String effort;
+        String approvalPolicy;
         /** skill_view repeat-view dedup: "name|file" -> "mtime:size" (katheer
          * repeat-view dedup — unchanged re-reads return a stub, not content). */
         final HashMap<String, String> skillViewCache = new HashMap<>();
@@ -201,6 +207,7 @@ public final class AiRuntimeService extends Service {
         persistRun(ctx);
         if (ctx.record.sessionKey != null) sessionState(ctx.record.sessionKey).clearTurn();
         if (!"ai".equals(ctx.record.titleSource)) generateSessionTitleAsync(ctx.record.id);
+        maybeRunMemoryReview(ctx);
     }
 
     @Override
@@ -210,6 +217,7 @@ public final class AiRuntimeService extends Service {
         mProviderConfig = new AiProviderConfig(this);
         mToolExecutor = new MobileKatheerToolExecutor(this);
         mMcpRegistry = new AiMcpRegistry(mProviderConfig);
+        AiMemoryStore.ensureDefaults();
         // One-time katheer home migration; must precede MCP discovery so
         // stored stdio paths are rewritten before any server is spawned.
         AiSkillRegistry.migrateKatheerHome();
@@ -559,6 +567,96 @@ public void setSessionProvider(String providerId) {
         emit("session/provider", json("sessionId", c.record.id, "provider", profile.id));
     }
 
+    /** Manual-only context compaction. This mirrors Hermes' structured
+     * checkpoint flow while keeping MEMORY.md / USER.md authoritative and
+     * never mutating a live turn underneath the model. */
+public void compactCurrentSessionManually() {
+        RunContext c = mViewed;
+        if (c == null || c.record == null) {
+            notifyError(null, "No active session to compact.");
+            return;
+        }
+        if (c.worker != null && c.worker.isAlive()) {
+            notifyError(c.record.id, "Wait for the current model turn to finish before compacting this session.");
+            return;
+        }
+        AiProviderProfile profile = AiProviderProfile.find(c.record.harnessId);
+        if (profile == null) {
+            notifyError(c.record.id, "Session provider is not available.");
+            return;
+        }
+        String providerId = profile.id;
+        String baseUrl = mProviderConfig.getBaseUrl(profile);
+        String apiKey = mProviderConfig.resolveCredential(profile);
+        String model = TextUtils.isEmpty(c.record.modelOverride) ? mProviderConfig.getModel(profile) : c.record.modelOverride;
+        if (TextUtils.isEmpty(model)) model = profile.defaultModel;
+        if ("opencode".equals(providerId)) {
+            String route = TextUtils.isEmpty(c.record.route) ? mProviderConfig.getOpenCodeSelectedRoute() : c.record.route;
+            baseUrl = AiProviderConfig.ocRouteUrl(route);
+            apiKey = mProviderConfig.getOpenCodeRouteKey(route);
+            if (TextUtils.isEmpty(c.record.modelOverride)) model = mProviderConfig.getOpenCodeRouteModel(route);
+        }
+        if (TextUtils.isEmpty(baseUrl) || TextUtils.isEmpty(model)) {
+            notifyError(c.record.id, "Provider endpoint and model are required before compaction.");
+            return;
+        }
+        if ((profile.apiKeyAuth || "opencode".equals(providerId)) && TextUtils.isEmpty(apiKey)) {
+            notifyError(c.record.id, "Add credentials for this provider before compaction.");
+            return;
+        }
+        final RunContext target = c;
+        final String runId = c.record.id;
+        final String fProviderId = providerId;
+        final String fBaseUrl = baseUrl;
+        final String fApiKey = apiKey;
+        final String fModel = model;
+        final JSONArray transcript = mDatabase.getHistoricalTranscript(runId, 1000);
+        if (transcript.length() < 30) {
+            notifyError(runId, "This session is still small; compaction needs a longer transcript to be useful.");
+            return;
+        }
+        mDatabase.appendEvent(runId, "memory/compactionStarted", new JSONObject().toString());
+        new Thread(() -> {
+            try {
+                String summary = callBackgroundCompactionSummary(fProviderId, fBaseUrl, fApiKey, fModel, runId, transcript);
+                if (TextUtils.isEmpty(summary)) throw new IllegalStateException("The provider returned an empty compaction summary.");
+                if (!summary.startsWith("[CONTEXT COMPACTION")) summary = compactionPrefix() + "\n\n" + summary.trim();
+                JSONObject result = mDatabase.compactSession(runId, summary, 20);
+                if (!result.optBoolean("success")) throw new IllegalStateException(result.optString("error", "Compaction failed."));
+                rebuildReplayFromDatabase(target);
+                try { mDatabase.appendEvent(runId, "memory/compactionComplete", result.toString()); } catch (Exception ignored) {}
+                persistRun(target);
+                mHandler.post(() -> {
+                    for (Listener listener : new ArrayList<>(mListeners)) listener.onRunChanged(copyRun(target.record));
+                });
+            } catch (Exception e) {
+                try { mDatabase.appendEvent(runId, "memory/compactionFailed", new JSONObject().put("error", e.getMessage()).toString()); } catch (Exception ignored) {}
+                notifyError(runId, e.getMessage() == null ? "Manual compaction failed." : e.getMessage());
+            }
+        }, "katheer-manual-compaction").start();
+    }
+
+    private void rebuildReplayFromDatabase(RunContext ctx) {
+        if (ctx == null || ctx.record == null) return;
+        try {
+            JSONArray rebuilt = new JSONArray().put(json("role", "system", "content", systemInstructions()));
+            JSONArray rows = mDatabase.getTranscript(ctx.record.id, 1000);
+            for (int i = 0; i < rows.length(); i++) {
+                JSONObject row = rows.optJSONObject(i);
+                if (row == null) continue;
+                String role = row.optString("role", "user");
+                if (!"assistant".equals(role) && !"user".equals(role) && !"tool".equals(role)) role = "user";
+                rebuilt.put(json("role", role, "content", row.optString("content", "")));
+            }
+            ctx.chatMessages = rebuilt;
+            ctx.previousResponseId = null;
+            ctx.record.previousResponseId = null;
+            ctx.record.chatMessagesJson = rebuilt.toString();
+        } catch (Exception e) {
+            notifyError(ctx.record.id, "Compaction completed, but replay rebuild failed: " + e.getMessage());
+        }
+    }
+
     /**
      * katheer-style interrupt checkpoint: when the previous turn was cut off
      * mid-response, wrap the user's follow-up in a scaffold that tells the
@@ -663,6 +761,12 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
     private void executeTurn(RunContext ctx, String providerId, String baseUrl, String apiKey, String workspace, String prompt,
                          String model, @Nullable String effort, @Nullable String approvalPolicy) {
         mTurnContext.set(ctx);
+        ctx.providerId = providerId;
+        ctx.baseUrl = baseUrl;
+        ctx.apiKey = apiKey;
+        ctx.model = model;
+        ctx.effort = effort;
+        ctx.approvalPolicy = approvalPolicy;
         KatheerInterruptManager.clearCurrentThread();
         KatheerInterruptManager.setInterrupt(false, Thread.currentThread().getId(), null);
         // A continuation after CANCELED needs a fresh machine (FSM has no CANCELED->RUNNING).
@@ -772,6 +876,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
      * not append the same user text again. */
     private void appendUserTurnToHistory(RunContext ctx, String prompt) throws Exception {
         if (ctx == null) throw new IllegalStateException("No active run context.");
+        AiMemoryStore.resetTurnFailureBudget();
         mDatabase.appendMessage(ctx.record.id, "user", prompt);
         refreshSystemMessage();
         sanitizeReplayHistory();
@@ -1842,6 +1947,9 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
     private JSONArray modelTools(boolean chatShape) throws Exception {
         JSONArray tools = new JSONArray();
         tools.put(chatShape ? terminalToolForChat() : terminalTool());
+        if (mProviderConfig == null || mProviderConfig.isAnyBuiltInMemoryEnabled())
+            tools.put(chatShape ? chatShape(memoryTool()) : memoryTool());
+        tools.put(chatShape ? chatShape(sessionSearchTool()) : sessionSearchTool());
         if (AiSkillRegistry.promptSection() != null) {
             tools.put(chatShape ? chatShape(skillsListTool()) : skillsListTool());
             tools.put(chatShape ? chatShape(skillViewTool()) : skillViewTool());
@@ -1858,6 +1966,79 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
             }
         }
         return tools;
+    }
+
+    private JSONObject memoryTool() throws Exception {
+        return new JSONObject()
+            .put("type", "function")
+            .put("name", "memory")
+            .put("description", "Save durable facts to persistent memory that survive across sessions. "
+                + "Use target='user' for user preferences/profile, target='memory' for environment/project/workflow notes. "
+                + "Make compact high-signal entries. Skip trivial facts, temporary task progress, raw data dumps, and things easily rediscovered. "
+                + "Reusable procedures belong in skills. Use session_search for past conversation/task history. "
+                + "Prefer one operations array when consolidating or changing multiple entries; it applies atomically against the final char budget. "
+                + "SOUL.md is not a memory target: it is user-owned identity/persona context edited from the Memory page.")
+            .put("parameters", new JSONObject()
+                .put("type", "object")
+                .put("properties", new JSONObject()
+                    .put("target", new JSONObject()
+                        .put("type", "string")
+                        .put("enum", enabledMemoryTargets())
+                        .put("description", enabledMemoryTargetDescription()))
+                    .put("action", new JSONObject()
+                        .put("type", "string")
+                        .put("enum", new JSONArray().put("add").put("replace").put("remove"))
+                        .put("description", "Single-operation shape. Omit when using operations."))
+                    .put("content", new JSONObject()
+                        .put("type", "string")
+                        .put("description", "Entry content for add/replace. Alias: new_text."))
+                    .put("new_text", new JSONObject()
+                        .put("type", "string")
+                        .put("description", "Alias for content."))
+                    .put("old_text", new JSONObject()
+                        .put("type", "string")
+                        .put("description", "Short unique substring identifying the entry for replace/remove."))
+                    .put("operations", new JSONObject()
+                        .put("type", "array")
+                        .put("description", "Atomic batch of {action, content/new_text, old_text?} operations.")
+                        .put("items", new JSONObject()
+                            .put("type", "object")
+                            .put("properties", new JSONObject()
+                                .put("action", new JSONObject().put("type", "string").put("enum", new JSONArray().put("add").put("replace").put("remove")))
+                                .put("content", new JSONObject().put("type", "string"))
+                                .put("new_text", new JSONObject().put("type", "string"))
+                                .put("old_text", new JSONObject().put("type", "string")))
+                            .put("required", new JSONArray().put("action")))))
+                .put("required", new JSONArray().put("target")));
+    }
+
+    private JSONObject sessionSearchTool() throws Exception {
+        return new JSONObject()
+            .put("type", "function")
+            .put("name", "session_search")
+            .put("description", "Search, browse, read, or scroll durable past chat sessions. "
+                + "Use when the user references something from a previous conversation, asks what happened before, "
+                + "or when old task context may save them from repeating themselves. Zero LLM calls: returns stored transcript rows. "
+                + "Modes are inferred from args: query=discovery, session_id=read, session_id+around_message_id=scroll, no args=browse.")
+            .put("parameters", new JSONObject()
+                .put("type", "object")
+                .put("properties", new JSONObject()
+                    .put("query", new JSONObject()
+                        .put("type", "string")
+                        .put("description", "Search text for discovery mode."))
+                    .put("session_id", new JSONObject()
+                        .put("type", "string")
+                        .put("description", "Session to read or scroll."))
+                    .put("around_message_id", new JSONObject()
+                        .put("type", "integer")
+                        .put("description", "Message id anchor for scroll mode."))
+                    .put("window", new JSONObject()
+                        .put("type", "integer")
+                        .put("description", "Messages before/after anchor, default 5, max 20."))
+                    .put("limit", new JSONObject()
+                        .put("type", "integer")
+                        .put("description", "Max sessions/results, default 8, max 20.")))
+                .put("required", new JSONArray()));
     }
 
     private JSONObject skillsListTool() throws Exception {
@@ -1950,9 +2131,14 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         JSONObject args = parseObject(function == null ? "{}" : function.optString("arguments", "{}"));
         String command = args.optString("command", "");
         int timeout = args.optInt("timeout_seconds", DEFAULT_TOOL_TIMEOUT_SECONDS);
+        persistToolTranscript("tool_call", callId, name, args, null);
 
         String output;
-        if (isSkillsTool(name)) {
+        if (isMemoryTool(name)) {
+            output = runMemoryTool(args);
+        } else if (isSessionSearchTool(name)) {
+            output = runSessionSearchTool(args);
+        } else if (isSkillsTool(name)) {
             output = runSkillsTool(name, args, approvalPolicy);
         } else if (name != null && name.startsWith(AiMcpRegistry.TOOL_PREFIX)) {
             output = runMcpToolCall(name, args, approvalPolicy);
@@ -1968,6 +2154,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
             emit("item/commandExecution/outputDelta", json("text", output + "\n", "command", command));
         }
 
+        persistToolTranscript("tool_result", callId, name, args, output);
         return new JSONObject()
             .put("role", "tool")
             .put("tool_call_id", callId)
@@ -1980,9 +2167,14 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         JSONObject args = parseObject(item.optString("arguments", "{}"));
         String command = args.optString("command", "");
         int timeout = args.optInt("timeout_seconds", DEFAULT_TOOL_TIMEOUT_SECONDS);
+        persistToolTranscript("tool_call", callId, name, args, null);
 
         String output;
-        if (isSkillsTool(name)) {
+        if (isMemoryTool(name)) {
+            output = runMemoryTool(args);
+        } else if (isSessionSearchTool(name)) {
+            output = runSessionSearchTool(args);
+        } else if (isSkillsTool(name)) {
             output = runSkillsTool(name, args, approvalPolicy);
         } else if (name != null && name.startsWith(AiMcpRegistry.TOOL_PREFIX)) {
             output = runMcpToolCall(name, args, approvalPolicy);
@@ -1997,17 +2189,131 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
             if (!approved) {
                 output = new JSONObject().put("error", "User denied terminal command.").toString();
                 emit("item/commandExecution/outputDelta", json("text", output + "\n", "command", command));
+                persistToolTranscript("tool_result", callId, name, args, output);
                 return functionOutput(callId, output);
             }
 
             output = mToolExecutor.runCommand(workspace, command, timeout);
             emit("item/commandExecution/outputDelta", json("text", output + "\n", "command", command));
         }
+        persistToolTranscript("tool_result", callId, name, args, output);
         return functionOutput(callId, output);
+    }
+
+    private void persistToolTranscript(String phase, String callId, String name, JSONObject args, @Nullable String output) {
+        RunContext c = ctx();
+        if (c == null || c.record == null || TextUtils.isEmpty(c.record.id)) return;
+        try {
+            String safeName = TextUtils.isEmpty(name) ? "unknown_tool" : name;
+            StringBuilder content = new StringBuilder();
+            content.append("[").append(phase).append("] ").append(safeName);
+            if (!TextUtils.isEmpty(callId)) content.append(" #").append(callId);
+            if (args != null && args.length() > 0) content.append("\narguments: ").append(boundForTranscript(args.toString(), 4000));
+            if (output != null) content.append("\noutput: ").append(boundForTranscript(output, 12000));
+            JSONObject api = new JSONObject()
+                .put("phase", phase)
+                .put("tool", safeName)
+                .put("call_id", callId == null ? "" : callId)
+                .put("arguments", args == null ? new JSONObject() : args);
+            if (output != null) api.put("output", output);
+            mDatabase.appendToolTranscript(c.record.id, content.toString(), api.toString());
+        } catch (Exception ignored) {}
+    }
+
+    private String boundForTranscript(String text, int limit) {
+        if (text == null) return "";
+        if (text.length() <= limit) return text;
+        return text.substring(0, Math.max(0, limit - 80)) + "\n[truncated " + (text.length() - limit) + " chars in searchable transcript; full live tool result was passed to the model]";
     }
 
     private boolean isSkillsTool(String name) {
         return "skills_list".equals(name) || "skill_view".equals(name) || "skill_manage".equals(name);
+    }
+
+    private boolean isMemoryTool(String name) {
+        return "memory".equals(name);
+    }
+
+    private JSONArray enabledMemoryTargets() {
+        JSONArray targets = new JSONArray();
+        if (mProviderConfig == null || mProviderConfig.isMemoryEnabled()) targets.put("memory");
+        if (mProviderConfig == null || mProviderConfig.isUserMemoryEnabled()) targets.put("user");
+        return targets;
+    }
+
+    private String enabledMemoryTargetDescription() {
+        boolean mem = mProviderConfig == null || mProviderConfig.isMemoryEnabled();
+        boolean user = mProviderConfig == null || mProviderConfig.isUserMemoryEnabled();
+        if (mem && user) return "memory=agent notes/environment/workflow lessons, user=user profile/preferences.";
+        if (mem) return "Only memory is enabled: agent notes/environment/workflow lessons.";
+        if (user) return "Only user is enabled: user profile/preferences.";
+        return "Built-in memory is disabled.";
+    }
+
+    private boolean isSessionSearchTool(String name) {
+        return "session_search".equals(name);
+    }
+
+    private String runMemoryTool(JSONObject args) {
+        String target = args == null ? "memory" : args.optString("target", "memory");
+        String action = args == null ? "" : args.optString("action", args.has("operations") ? "batch" : "");
+        String displayName = "memory " + action + " → " + target;
+        emit("tool/callStarted", json("name", "memory", "command", displayName));
+        try {
+            if (mProviderConfig != null && mProviderConfig.isMemoryWriteApprovalEnabled()) {
+                String staged = AiMemoryStore.stageWrite(args == null ? new JSONObject() : args, "foreground").toString();
+                emit("item/commandExecution/outputDelta", json("text", memoryToolSummary(staged), "command", displayName));
+                return staged;
+            }
+            boolean memoryEnabled = mProviderConfig == null || mProviderConfig.isMemoryEnabled();
+            boolean userEnabled = mProviderConfig == null || mProviderConfig.isUserMemoryEnabled();
+            String output = AiMemoryStore.tool(args, memoryEnabled, userEnabled);
+            emit("item/commandExecution/outputDelta", json("text", memoryToolSummary(output), "command", displayName));
+            return output;
+        } catch (Exception e) {
+            String output = skillsToolError("memory tool failed: " + e.getMessage());
+            emit("item/commandExecution/outputDelta", json("text", memoryToolSummary(output), "command", displayName));
+            return output;
+        }
+    }
+
+    private String runSessionSearchTool(JSONObject args) {
+        String displayName = "session_search";
+        if (args != null && !TextUtils.isEmpty(args.optString("query", ""))) displayName += " “" + args.optString("query") + "”";
+        emit("tool/callStarted", json("name", "session_search", "command", displayName));
+        try {
+            String current = ctx() == null || ctx().record == null ? null : ctx().record.id;
+            String output = mDatabase.sessionSearch(args == null ? new JSONObject() : args, current).toString();
+            emit("item/commandExecution/outputDelta", json("text", sessionSearchSummary(output), "command", displayName));
+            return output;
+        } catch (Exception e) {
+            String output = skillsToolError("session_search failed: " + e.getMessage());
+            emit("item/commandExecution/outputDelta", json("text", "error → " + e.getMessage(), "command", displayName));
+            return output;
+        }
+    }
+
+    private String sessionSearchSummary(String output) {
+        try {
+            JSONObject o = new JSONObject(output);
+            if (!o.optBoolean("success")) return "error → " + o.optString("error", "search failed");
+            if (o.has("results")) return "found " + o.optJSONArray("results").length() + " session(s)";
+            if (o.has("sessions")) return "listed " + o.optJSONArray("sessions").length() + " session(s)";
+            if (o.has("messages")) return "loaded " + o.optJSONArray("messages").length() + " message(s)";
+            return "session recall complete";
+        } catch (Exception e) {
+            return "session recall complete";
+        }
+    }
+
+    private String memoryToolSummary(String output) {
+        try {
+            JSONObject o = new JSONObject(output);
+            if (!o.optBoolean("success")) return "error → " + o.optString("error", "memory write failed");
+            return o.optString("message", "memory saved") + " · " + o.optString("usage", "");
+        } catch (Exception e) {
+            return "memory updated";
+        }
     }
 
     /** skills_list/skill_view run locally (no approval, no shell): read-only
@@ -2326,9 +2632,23 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
 
     private String systemInstructions() {
         StringBuilder sb = new StringBuilder();
-        sb.append("You are a native mobile agent running inside Termux on Android. ")
+        boolean memoryEnabled = mProviderConfig == null || mProviderConfig.isMemoryEnabled();
+        boolean userEnabled = mProviderConfig == null || mProviderConfig.isUserMemoryEnabled();
+        sb.append(AiMemoryStore.systemPromptSnapshot(memoryEnabled, userEnabled));
+        sb.append("\n\n")
+          .append("You are running as a native mobile agent inside Termux on Android. ")
           .append("Use the terminal tool deliberately, explain what you are doing, and prefer small inspect-before-change steps. ")
           .append("Never claim a command succeeded unless the terminal output confirms it.");
+        if (memoryEnabled || userEnabled) {
+            sb.append("\n\n")
+              .append("Memory rules: MEMORY.md and USER.md are curated persistent memory. ")
+              .append("Save compact durable facts with the memory tool when the user states preferences, corrections, stable environment facts, or reusable workflow lessons. ")
+              .append("Write declarative facts, not instructions to yourself. If memory is full, consolidate with one operations batch instead of looping. ")
+              .append("Use session_search for prior conversation/task history, temporary progress, and anything that should not live in the tiny always-on memory files. ")
+              .append("SOUL.md is slot-1 identity/persona context. It is user-owned and is not a memory-tool target.");
+        } else {
+            sb.append("\n\nMemory rules: built-in MEMORY.md/USER.md are disabled. Use session_search for durable conversation recall. SOUL.md remains identity/persona context.");
+        }
         String skills = AiSkillRegistry.promptSection();
         if (!TextUtils.isEmpty(skills)) sb.append("\n\n").append(skills);
         return sb.toString();
@@ -2351,7 +2671,11 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
             }
             JSONObject first = messages.optJSONObject(0);
             if (first != null && "system".equals(first.optString("role"))) {
-                first.put("content", instructions);
+                // Hermes-style prompt-cache behavior: SOUL.md, MEMORY.md and
+                // USER.md are frozen into the session's initial system prompt.
+                // Disk writes are durable immediately, but they do not mutate
+                // the current conversation prefix mid-session.
+                return;
             } else {
                 JSONArray updated = new JSONArray().put(json("role", "system", "content", instructions));
                 for (int i = 0; i < messages.length(); i++) updated.put(messages.opt(i));
@@ -2389,6 +2713,203 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         return builder.toString();
     }
 
+    private void maybeRunMemoryReview(RunContext source) {
+        if (source == null || source.record == null || mProviderConfig == null) return;
+        if (!mProviderConfig.isMemoryNudgeEnabled() || !mProviderConfig.isAnyBuiltInMemoryEnabled()) return;
+        int userTurns = mDatabase.countUserMessages(source.record.id);
+        int interval = mProviderConfig.getMemoryNudgeInterval();
+        if (userTurns <= 0 || userTurns % interval != 0) return;
+
+        final String runId = source.record.id;
+        final String providerId = source.providerId;
+        final String baseUrl = source.baseUrl;
+        final String apiKey = source.apiKey;
+        final String model = source.model;
+        final JSONArray transcript = mDatabase.getTranscript(runId, 80);
+        final boolean memoryApproval = mProviderConfig.isMemoryWriteApprovalEnabled();
+        final boolean memoryEnabled = mProviderConfig.isMemoryEnabled();
+        final boolean userEnabled = mProviderConfig.isUserMemoryEnabled();
+
+        new Thread(() -> {
+            try {
+                if (TextUtils.isEmpty(providerId) || TextUtils.isEmpty(baseUrl) || TextUtils.isEmpty(model)) return;
+                String review = callBackgroundMemoryReview(providerId, baseUrl, apiKey, model, transcript, memoryEnabled, userEnabled);
+                JSONObject parsed = parseReviewJson(review);
+                JSONArray ops = parsed == null ? null : parsed.optJSONArray("operations");
+                if (ops == null || ops.length() == 0) return;
+                JSONObject byMemory = new JSONObject().put("target", AiMemoryStore.TARGET_MEMORY).put("operations", new JSONArray());
+                JSONObject byUser = new JSONObject().put("target", AiMemoryStore.TARGET_USER).put("operations", new JSONArray());
+                for (int i = 0; i < ops.length(); i++) {
+                    JSONObject op = ops.optJSONObject(i);
+                    if (op == null) continue;
+                    String target = op.optString("target", AiMemoryStore.TARGET_MEMORY);
+                    JSONObject clean = new JSONObject(op.toString());
+                    clean.remove("target");
+                    if (AiMemoryStore.TARGET_USER.equals(target)) byUser.getJSONArray("operations").put(clean);
+                    else byMemory.getJSONArray("operations").put(clean);
+                }
+                applyReviewOps(runId, byMemory, memoryApproval, memoryEnabled, userEnabled);
+                applyReviewOps(runId, byUser, memoryApproval, memoryEnabled, userEnabled);
+            } catch (Exception e) {
+                try { mDatabase.appendEvent(runId, "memory/reviewSkipped", new JSONObject().put("error", e.getMessage()).toString()); } catch (Exception ignored) {}
+            }
+        }, "katheer-memory-review").start();
+    }
+
+    private void applyReviewOps(String runId, JSONObject args, boolean approval, boolean memoryEnabled, boolean userEnabled) throws Exception {
+        JSONArray ops = args.optJSONArray("operations");
+        if (ops == null || ops.length() == 0) return;
+        String result = approval
+            ? AiMemoryStore.stageWrite(args, "background_review").toString()
+            : AiMemoryStore.tool(args, memoryEnabled, userEnabled);
+        mDatabase.appendEvent(runId, "memory/reviewResult", new JSONObject(result).toString());
+    }
+
+    private String callBackgroundMemoryReview(String providerId, String baseUrl, String apiKey, String model, JSONArray transcript,
+                                              boolean memoryEnabled, boolean userEnabled) throws Exception {
+        String prompt = "You are the katheer background memory reviewer. Inspect the recent transcript and return ONLY JSON. " +
+            "If nothing durable should be saved, return {\"operations\":[]}. " +
+            "Otherwise return {\"operations\":[{\"target\":\"memory|user\",\"action\":\"add|replace|remove\",\"content\":\"...\",\"old_text\":\"...\"}]}. " +
+            "Save user preferences/corrections/profile to user. Save stable environment/project/tool lessons to memory. " +
+            "Skip task progress, transient paths, raw dumps, and procedures that belong in skills. Write declarative facts, not imperatives. " +
+            "Enabled targets: memory=" + memoryEnabled + ", user=" + userEnabled + ". Transcript JSON:\n" + transcript.toString();
+        if (ANTHROPIC_MESSAGES_PROVIDERS.contains(providerId)) return callBackgroundAnthropic(baseUrl, apiKey, model, prompt);
+        if (usesChatCompletions(providerId)) return callBackgroundChatCompletions(providerId, baseUrl, apiKey, model, prompt);
+        return callBackgroundResponses(baseUrl, apiKey, model, prompt);
+    }
+
+    private String callBackgroundCompactionSummary(String providerId, String baseUrl, String apiKey, String model,
+                                                   String sessionId, JSONArray transcript) throws Exception {
+        String prompt = "You are generating a manual Hermes-style context compaction checkpoint for katheer mobile. " +
+            "Return the final summary text only. Do not include JSON, markdown fences, commentary, or apologies.\n\n" +
+            "The summary MUST begin exactly with this prefix:\n" + compactionPrefix() + "\n\n" +
+            "Then include these sections exactly, in this order:\n" +
+            "## Historical Task Snapshot\n" +
+            "## Goal\n" +
+            "## Constraints\n" +
+            "## Completed Actions\n" +
+            "## Active State\n" +
+            "## Blocked\n" +
+            "## Key Decisions\n" +
+            "## Errors & Fixes\n" +
+            "## Relevant Files\n" +
+            "## Critical Context\n" +
+            "## Context Recovery\n\n" +
+            "Rules: be compact but concrete; quote security/user constraints verbatim when present; preserve the latest unfulfilled request verbatim where possible; " +
+            "do not turn MEMORY.md or USER.md content into weaker advice; newest user reversals such as stop/undo/never mind override older work; " +
+            "Context Recovery must include this exact callable hint: session_search(query='<keywords>', session_id='" + sessionId + "'), replacing <keywords> with high-signal terms.\n\n" +
+            "Transcript JSON:\n" + transcript.toString();
+        String system = "Return the final compaction summary text only.";
+        if (ANTHROPIC_MESSAGES_PROVIDERS.contains(providerId)) return callBackgroundAnthropic(baseUrl, apiKey, model, prompt, 4096, system);
+        if (usesChatCompletions(providerId)) return callBackgroundChatCompletions(providerId, baseUrl, apiKey, model, prompt, 4096, system);
+        return callBackgroundResponses(baseUrl, apiKey, model, prompt, 4096, system);
+    }
+
+    private String compactionPrefix() {
+        return "[CONTEXT COMPACTION — REFERENCE ONLY]\n" +
+            "Your persistent memory (MEMORY.md, USER.md) in the system prompt is ALWAYS authoritative — never deprioritize memory due to this compaction note.\n" +
+            "If the newest user message reverses earlier work (\"stop\", \"undo\", \"never mind\"), obey the newest user message and end any in-flight work from this summary.";
+    }
+
+    private String callBackgroundChatCompletions(String providerId, String baseUrl, String apiKey, String model, String prompt) throws Exception {
+        return callBackgroundChatCompletions(providerId, baseUrl, apiKey, model, prompt, 1024, "Return strict JSON only.");
+    }
+
+    private String callBackgroundChatCompletions(String providerId, String baseUrl, String apiKey, String model, String prompt, int maxTokens, String system) throws Exception {
+        JSONArray messages = new JSONArray()
+            .put(new JSONObject().put("role", "system").put("content", system))
+            .put(new JSONObject().put("role", "user").put("content", prompt));
+        JSONObject body = new JSONObject().put("model", model).put("messages", messages).put("stream", false);
+        if (maxTokens > 0) body.put("max_tokens", maxTokens);
+        String text = postJson(chatCompletionsUrl(baseUrl), body, apiKey, providerId);
+        JSONObject o = new JSONObject(text);
+        JSONArray choices = o.optJSONArray("choices");
+        JSONObject first = choices == null || choices.length() == 0 ? null : choices.optJSONObject(0);
+        JSONObject msg = first == null ? null : first.optJSONObject("message");
+        return msg == null ? text : msg.optString("content", text);
+    }
+
+    private String callBackgroundResponses(String baseUrl, String apiKey, String model, String prompt) throws Exception {
+        return callBackgroundResponses(baseUrl, apiKey, model, prompt, 1024, "Return strict JSON only.");
+    }
+
+    private String callBackgroundResponses(String baseUrl, String apiKey, String model, String prompt, int maxOutputTokens, String system) throws Exception {
+        JSONObject body = new JSONObject()
+            .put("model", model)
+            .put("instructions", system)
+            .put("input", prompt);
+        if (maxOutputTokens > 0) body.put("max_output_tokens", maxOutputTokens);
+        String text = postJson(baseUrl, body, apiKey, "");
+        JSONObject o = new JSONObject(text);
+        String out = o.optString("output_text", "");
+        return TextUtils.isEmpty(out) ? text : out;
+    }
+
+    private String callBackgroundAnthropic(String baseUrl, String apiKey, String model, String prompt) throws Exception {
+        return callBackgroundAnthropic(baseUrl, apiKey, model, prompt, 1024, "Return strict JSON only.");
+    }
+
+    private String callBackgroundAnthropic(String baseUrl, String apiKey, String model, String prompt, int maxTokens, String system) throws Exception {
+        JSONObject body = new JSONObject()
+            .put("model", model)
+            .put("max_tokens", Math.max(1, maxTokens))
+            .put("system", system)
+            .put("messages", new JSONArray().put(new JSONObject()
+                .put("role", "user")
+                .put("content", prompt)));
+        boolean oauth = isAnthropicOAuthToken(apiKey);
+        HttpURLConnection c = openJsonConnection(anthropicMessagesUrl(baseUrl), oauth ? apiKey : "", "");
+        if (oauth) {
+            c.setRequestProperty("anthropic-beta", "oauth-2025-04-20");
+            c.setRequestProperty("Authorization", "Bearer " + apiKey);
+        } else if (!TextUtils.isEmpty(apiKey)) {
+            c.setRequestProperty("x-api-key", apiKey);
+        }
+        c.setRequestProperty("anthropic-version", "2023-06-01");
+        try (OutputStream output = c.getOutputStream()) { output.write(body.toString().getBytes(StandardCharsets.UTF_8)); }
+        int code = c.getResponseCode();
+        String text = readFully(code >= 200 && code < 300 ? c.getInputStream() : c.getErrorStream());
+        if (code < 200 || code >= 300) throw new IllegalStateException("Background review failed HTTP " + code + ": " + text);
+        JSONObject o = new JSONObject(text);
+        JSONArray content = o.optJSONArray("content");
+        if (content != null && content.length() > 0) return content.optJSONObject(0).optString("text", text);
+        return text;
+    }
+
+    private String postJson(String url, JSONObject body, String apiKey, String providerId) throws Exception {
+        HttpURLConnection c = openJsonConnection(url, apiKey, providerId);
+        try (OutputStream output = c.getOutputStream()) { output.write(body.toString().getBytes(StandardCharsets.UTF_8)); }
+        int code = c.getResponseCode();
+        String text = readFully(code >= 200 && code < 300 ? c.getInputStream() : c.getErrorStream());
+        if (code < 200 || code >= 300) throw new IllegalStateException("Background review failed HTTP " + code + ": " + text);
+        return text;
+    }
+
+    private HttpURLConnection openJsonConnection(String url, String apiKey, String providerId) throws Exception {
+        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+        c.setRequestMethod("POST");
+        c.setConnectTimeout(MODEL_CONNECT_TIMEOUT_MS);
+        c.setReadTimeout(MODEL_READ_TIMEOUT_MS);
+        c.setDoOutput(true);
+        c.setRequestProperty("Content-Type", "application/json");
+        if (!TextUtils.isEmpty(apiKey)) c.setRequestProperty("Authorization", "Bearer " + apiKey);
+        c.setRequestProperty("X-Title", "Termux katheer");
+        if ("github-copilot".equals(providerId)) {
+            for (int i = 0; i < ProviderLogin.COPILOT_REQUEST_HEADERS.length; i += 2)
+                c.setRequestProperty(ProviderLogin.COPILOT_REQUEST_HEADERS[i], ProviderLogin.COPILOT_REQUEST_HEADERS[i + 1]);
+        }
+        return c;
+    }
+
+    private JSONObject parseReviewJson(String raw) {
+        if (TextUtils.isEmpty(raw)) return null;
+        String clean = raw.trim();
+        int start = clean.indexOf('{');
+        int end = clean.lastIndexOf('}');
+        if (start >= 0 && end > start) clean = clean.substring(start, end + 1);
+        try { return new JSONObject(clean); } catch (Exception e) { return null; }
+    }
+
     private void transition(AiRunStateMachine.State next) {
         if (ctx() == null || ctx().record == null) return;
         try {
@@ -2411,6 +2932,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         clearActiveTurn();
         persistRun();
         if (ctx().record.sessionKey != null) sessionState(ctx().record.sessionKey).clearTurn();
+        maybeRunMemoryReview(ctx());
     }
 
     private void persistRun() {

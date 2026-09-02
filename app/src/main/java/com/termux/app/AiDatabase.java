@@ -20,7 +20,7 @@ import java.util.List;
 public final class AiDatabase extends SQLiteOpenHelper {
 
     private static final String DATABASE_NAME = "termux_ai_runtime.db";
-    private static final int DATABASE_VERSION = 10;
+    private static final int DATABASE_VERSION = 12;
 
     public static final class RunRecord {
         public String id;
@@ -58,6 +58,8 @@ public final class AiDatabase extends SQLiteOpenHelper {
         createV4Schema(db);
         createV8Schema(db);
         createV10Schema(db);
+        createV11Schema(db);
+        createV12Schema(db);
     }
 
     private void createV8Schema(SQLiteDatabase db) {
@@ -84,6 +86,32 @@ public final class AiDatabase extends SQLiteOpenHelper {
 
     private void createV10Schema(SQLiteDatabase db) {
         try { db.execSQL("ALTER TABLE mcp_servers ADD COLUMN oauth_json TEXT"); } catch (Exception ignored) {}
+    }
+
+    private void createV11Schema(SQLiteDatabase db) {
+        try {
+            db.execSQL("CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(" +
+                "content, role UNINDEXED, session_id UNINDEXED, message_id UNINDEXED)");
+            db.execSQL("CREATE TRIGGER IF NOT EXISTS messages_ai_fts AFTER INSERT ON messages BEGIN " +
+                "INSERT INTO messages_fts(rowid, content, role, session_id, message_id) VALUES (new.id, new.content, new.role, new.session_id, new.id); END");
+            db.execSQL("CREATE TRIGGER IF NOT EXISTS messages_ad_fts AFTER DELETE ON messages BEGIN " +
+                "DELETE FROM messages_fts WHERE rowid = old.id; END");
+            db.execSQL("CREATE TRIGGER IF NOT EXISTS messages_au_fts AFTER UPDATE ON messages BEGIN " +
+                "DELETE FROM messages_fts WHERE rowid = old.id; " +
+                "INSERT INTO messages_fts(rowid, content, role, session_id, message_id) VALUES (new.id, new.content, new.role, new.session_id, new.id); END");
+            db.execSQL("INSERT OR IGNORE INTO messages_fts(rowid, content, role, session_id, message_id) " +
+                "SELECT id, content, role, session_id, id FROM messages WHERE active=1");
+        } catch (Exception ignored) {
+            // Android vendor SQLite builds can omit FTS5. session_search falls
+            // back to LIKE without changing the model-facing tool contract.
+        }
+    }
+
+    private void createV12Schema(SQLiteDatabase db) {
+        try { db.execSQL("ALTER TABLE messages ADD COLUMN compacted INTEGER DEFAULT 0"); } catch (Exception ignored) {}
+        try { db.execSQL("ALTER TABLE messages ADD COLUMN _compressed_summary INTEGER DEFAULT 0"); } catch (Exception ignored) {}
+        try { db.execSQL("ALTER TABLE messages ADD COLUMN api_content TEXT"); } catch (Exception ignored) {}
+        try { db.execSQL("CREATE INDEX IF NOT EXISTS messages_compaction_flags ON messages(session_id, active, compacted, _compressed_summary, id)"); } catch (Exception ignored) {}
     }
 
     /** One MCP server configuration: transport 'http' (Streamable HTTP, url)
@@ -318,6 +346,12 @@ public final class AiDatabase extends SQLiteOpenHelper {
         if (oldVersion < 10) {
             createV10Schema(db);
         }
+        if (oldVersion < 11) {
+            createV11Schema(db);
+        }
+        if (oldVersion < 12) {
+            createV12Schema(db);
+        }
         if (oldVersion < 6) {
             // Title provenance (katheer title_source): 'message' = derived from
             // the first user message, 'ai' = model-generated summary. Existing
@@ -446,6 +480,95 @@ public final class AiDatabase extends SQLiteOpenHelper {
         getWritableDatabase().update("runs", runUpdate, "id=?", new String[]{sessionId});
     }
 
+    /** Searchable, durable tool transcript rows. They are intentionally not
+     * active replay rows: provider replay needs structured tool_call IDs kept
+     * in chatMessagesJson, while session_search/compaction need a searchable
+     * record of what tools were requested and returned. */
+    public synchronized void appendToolTranscript(String sessionId, String content, String apiContent) {
+        ContentValues v = new ContentValues();
+        v.put("session_id", sessionId);
+        v.put("role", "tool");
+        v.put("content", content == null ? "" : content);
+        v.put("active", 0);
+        v.put("compacted", 0);
+        v.put("_compressed_summary", 0);
+        v.put("api_content", apiContent == null ? "" : apiContent);
+        v.put("created_at", System.currentTimeMillis());
+        getWritableDatabase().insertOrThrow("messages", null, v);
+        ContentValues runUpdate = new ContentValues();
+        runUpdate.put("updated_at", System.currentTimeMillis());
+        getWritableDatabase().update("runs", runUpdate, "id=?", new String[]{sessionId});
+    }
+
+    public synchronized void appendCompactionSummary(String sessionId, String content) {
+        ContentValues v = new ContentValues();
+        v.put("session_id", sessionId);
+        v.put("role", "user");
+        v.put("content", content);
+        v.put("active", 1);
+        v.put("compacted", 0);
+        v.put("_compressed_summary", 1);
+        v.put("created_at", System.currentTimeMillis());
+        getWritableDatabase().insertOrThrow("messages", null, v);
+    }
+
+    public synchronized JSONObject compactSession(String sessionId, String summary, int protectLast) {
+        JSONObject out = new JSONObject();
+        SQLiteDatabase db = getWritableDatabase();
+        int protectedTail = Math.max(1, protectLast);
+        ArrayList<Long> protectedIds = new ArrayList<>();
+        long cutoffId = Long.MAX_VALUE;
+        int archived = 0;
+        long summaryId = -1;
+        db.beginTransaction();
+        try {
+            Cursor tail = db.query("messages", new String[]{"id"},
+                "session_id=? AND active=1 AND COALESCE(_compressed_summary, 0)=0",
+                new String[]{sessionId}, null, null, "id DESC", String.valueOf(protectedTail));
+            try {
+                while (tail.moveToNext()) {
+                    long id = tail.getLong(0);
+                    protectedIds.add(id);
+                    if (id < cutoffId) cutoffId = id;
+                }
+            } finally {
+                tail.close();
+            }
+            if (protectedIds.size() < 2) {
+                return out.put("success", false).put("error", "Not enough active transcript messages to compact.");
+            }
+            ContentValues archivedValues = new ContentValues();
+            archivedValues.put("active", 0);
+            archivedValues.put("compacted", 1);
+            archived = db.update("messages", archivedValues,
+                "session_id=? AND active=1 AND COALESCE(_compressed_summary, 0)=0 AND id<?",
+                new String[]{sessionId, String.valueOf(cutoffId)});
+            ContentValues summaryValues = new ContentValues();
+            summaryValues.put("session_id", sessionId);
+            summaryValues.put("role", "user");
+            summaryValues.put("content", summary);
+            summaryValues.put("active", 1);
+            summaryValues.put("compacted", 0);
+            summaryValues.put("_compressed_summary", 1);
+            summaryValues.put("created_at", System.currentTimeMillis());
+            summaryId = db.insertOrThrow("messages", null, summaryValues);
+            ContentValues runUpdate = new ContentValues();
+            runUpdate.put("updated_at", System.currentTimeMillis());
+            db.update("runs", runUpdate, "id=?", new String[]{sessionId});
+            db.setTransactionSuccessful();
+            out.put("success", true);
+            out.put("archived_messages", archived);
+            out.put("summary_message_id", summaryId);
+            out.put("protected_tail", protectedIds.size());
+            return out;
+        } catch (Exception e) {
+            try { out.put("success", false).put("error", "Compaction failed: " + e.getMessage()); } catch (Exception ignored) {}
+            return out;
+        } finally {
+            db.endTransaction();
+        }
+    }
+
     private static String boundTitle(String content) {
         if (content == null) return null;
         String clean = content.replace('\n', ' ').replace('\r', ' ').trim();
@@ -459,6 +582,13 @@ public final class AiDatabase extends SQLiteOpenHelper {
         Cursor c = getReadableDatabase().query("messages", new String[]{"content"}, "session_id=? AND active=1", new String[]{sessionId}, null, null, "id ASC", String.valueOf(limit));
         try { while (c.moveToNext()) out.add(c.getString(0)); } finally { c.close(); }
         return out;
+    }
+
+    public synchronized int countUserMessages(String sessionId) {
+        Cursor c = getReadableDatabase().rawQuery(
+            "SELECT COUNT(*) FROM messages WHERE session_id=? AND active=1 AND role='user'",
+            new String[]{sessionId});
+        try { return c.moveToFirst() ? c.getInt(0) : 0; } finally { c.close(); }
     }
 
     /** One-time hygiene: older builds persisted the final chat reply twice
@@ -596,19 +726,186 @@ public final class AiDatabase extends SQLiteOpenHelper {
     public synchronized JSONArray getTranscript(String sessionId, int limit) {
         JSONArray out = new JSONArray();
         Cursor c = getReadableDatabase().query("messages",
-            new String[]{"role", "content"}, "session_id=? AND active=1",
-            new String[]{sessionId}, null, null, "id ASC", String.valueOf(limit));
+            new String[]{"id", "role", "content", "created_at"}, "session_id=? AND active=1",
+            new String[]{sessionId}, null, null, "_compressed_summary DESC, id ASC", String.valueOf(limit));
         try {
             while (c.moveToNext()) {
                 try {
                     JSONObject row = new JSONObject();
-                    row.put("role", c.getString(0));
-                    row.put("content", c.getString(1));
+                    row.put("id", c.getLong(0));
+                    row.put("role", c.getString(1));
+                    row.put("content", c.getString(2));
+                    row.put("created_at", c.getLong(3));
                     out.put(row);
                 } catch (Exception ignored) {}
             }
         } finally { c.close(); }
         return out;
+    }
+
+    public synchronized JSONArray getHistoricalTranscript(String sessionId, int limit) {
+        JSONArray out = new JSONArray();
+        Cursor c = getReadableDatabase().query("messages",
+            new String[]{"id", "role", "content", "created_at"}, "session_id=?",
+            new String[]{sessionId}, null, null, "id ASC", String.valueOf(limit));
+        try {
+            while (c.moveToNext()) {
+                try { out.put(messageRow(c)); } catch (Exception ignored) {}
+            }
+        } finally { c.close(); }
+        return out;
+    }
+
+    public synchronized JSONObject sessionSearch(JSONObject args, String currentSessionId) {
+        JSONObject out = new JSONObject();
+        try {
+            String query = args == null ? "" : args.optString("query", "").trim();
+            String sessionId = args == null ? "" : args.optString("session_id", "").trim();
+            long around = args == null ? 0 : args.optLong("around_message_id", 0);
+            int limit = Math.max(1, Math.min(20, args == null ? 8 : args.optInt("limit", 8)));
+            int window = Math.max(1, Math.min(20, args == null ? 5 : args.optInt("window", 5)));
+            if (!TextUtils.isEmpty(sessionId) && around > 0) return messagesAround(sessionId, around, window);
+            if (!TextUtils.isEmpty(sessionId)) return readSession(sessionId, Math.max(20, limit * 10));
+            if (!TextUtils.isEmpty(query)) return discoverSessions(query, currentSessionId, limit, window);
+            return browseSessions(limit);
+        } catch (Exception e) {
+            try { out.put("success", false).put("error", "session_search failed: " + e.getMessage()); } catch (Exception ignored) {}
+            return out;
+        }
+    }
+
+    private JSONObject browseSessions(int limit) throws Exception {
+        JSONObject out = new JSONObject();
+        JSONArray rows = new JSONArray();
+        for (RunRecord r : getSessions(limit)) rows.put(sessionSummary(r, null));
+        out.put("success", true);
+        out.put("mode", "browse");
+        out.put("sessions", rows);
+        return out;
+    }
+
+    private JSONObject readSession(String sessionId, int limit) throws Exception {
+        JSONObject out = new JSONObject();
+        RunRecord r = getRun(sessionId);
+        if (r == null) return out.put("success", false).put("error", "Session not found: " + sessionId);
+        out.put("success", true);
+        out.put("mode", "read");
+        out.put("session", sessionSummary(r, null));
+        out.put("messages", getHistoricalTranscript(sessionId, limit));
+        return out;
+    }
+
+    private JSONObject messagesAround(String sessionId, long aroundMessageId, int window) throws Exception {
+        JSONObject out = new JSONObject();
+        JSONArray before = new JSONArray();
+        JSONArray after = new JSONArray();
+        JSONObject anchor = null;
+        SQLiteDatabase db = getReadableDatabase();
+        Cursor c = db.query("messages", new String[]{"id", "role", "content", "created_at"},
+            "session_id=? AND id<?", new String[]{sessionId, String.valueOf(aroundMessageId)}, null, null, "id DESC", String.valueOf(window));
+        try {
+            ArrayList<JSONObject> rev = new ArrayList<>();
+            while (c.moveToNext()) rev.add(messageRow(c));
+            for (int i = rev.size() - 1; i >= 0; i--) before.put(rev.get(i));
+        } finally { c.close(); }
+        c = db.query("messages", new String[]{"id", "role", "content", "created_at"},
+            "session_id=? AND id=?", new String[]{sessionId, String.valueOf(aroundMessageId)}, null, null, null, "1");
+        try { if (c.moveToFirst()) anchor = messageRow(c); } finally { c.close(); }
+        c = db.query("messages", new String[]{"id", "role", "content", "created_at"},
+            "session_id=? AND id>?", new String[]{sessionId, String.valueOf(aroundMessageId)}, null, null, "id ASC", String.valueOf(window));
+        try { while (c.moveToNext()) after.put(messageRow(c)); } finally { c.close(); }
+        if (anchor == null) return out.put("success", false).put("error", "Message not found in session.");
+        JSONArray messages = new JSONArray();
+        for (int i = 0; i < before.length(); i++) messages.put(before.opt(i));
+        messages.put(anchor);
+        for (int i = 0; i < after.length(); i++) messages.put(after.opt(i));
+        out.put("success", true);
+        out.put("mode", "scroll");
+        out.put("session_id", sessionId);
+        out.put("around_message_id", aroundMessageId);
+        out.put("messages", messages);
+        return out;
+    }
+
+    private JSONObject discoverSessions(String query, String currentSessionId, int limit, int window) throws Exception {
+        JSONObject out = new JSONObject();
+        JSONArray results = new JSONArray();
+        ArrayList<String> seen = new ArrayList<>();
+        Cursor c = openSearchCursor(query, limit * 12);
+        boolean usedFts = c != null;
+        if (c == null) {
+            c = getReadableDatabase().query("messages",
+                new String[]{"id", "session_id", "role", "content", "created_at"},
+                "content LIKE ? ESCAPE '\\'",
+                new String[]{"%" + escapeLike(query) + "%"},
+                null, null, "created_at DESC", String.valueOf(limit * 12));
+        }
+        try {
+            while (c.moveToNext() && results.length() < limit) {
+                String sid = c.getString(1);
+                if (!TextUtils.isEmpty(currentSessionId) && currentSessionId.equals(sid)) continue;
+                if (seen.contains(sid)) continue;
+                seen.add(sid);
+                RunRecord run = getRun(sid);
+                if (run == null || run.archived) continue;
+                JSONObject anchor = new JSONObject();
+                anchor.put("id", c.getLong(0));
+                anchor.put("role", c.getString(2));
+                anchor.put("content", c.getString(3));
+                anchor.put("created_at", c.getLong(4));
+                JSONObject hit = sessionSummary(run, anchor);
+                hit.put("window", messagesAround(sid, c.getLong(0), window).optJSONArray("messages"));
+                results.put(hit);
+            }
+        } finally { c.close(); }
+        out.put("success", true);
+        out.put("mode", "discovery");
+        out.put("query", query);
+        out.put("results", results);
+        out.put("backend", usedFts ? "fts5" : "like_fallback");
+        return out;
+    }
+
+    @Nullable
+    private Cursor openSearchCursor(String query, int limit) {
+        try {
+            String phrase = "\"" + (query == null ? "" : query.replace("\"", "\"\"")) + "\"";
+            return getReadableDatabase().rawQuery(
+                "SELECT m.id, m.session_id, m.role, m.content, m.created_at " +
+                    "FROM messages_fts f JOIN messages m ON m.id = f.message_id " +
+                    "WHERE messages_fts MATCH ? " +
+                    "ORDER BY rank LIMIT ?",
+                new String[]{phrase, String.valueOf(limit)});
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private JSONObject sessionSummary(RunRecord r, @Nullable JSONObject anchor) throws Exception {
+        JSONObject o = new JSONObject();
+        o.put("session_id", r.id);
+        o.put("title", r.title);
+        o.put("provider", r.harnessId);
+        o.put("model", TextUtils.isEmpty(r.modelOverride) ? r.lastResolvedModel : r.modelOverride);
+        o.put("workspace", r.workspace);
+        o.put("created_at", r.createdAt);
+        o.put("updated_at", r.updatedAt);
+        if (anchor != null) o.put("anchor", anchor);
+        return o;
+    }
+
+    private JSONObject messageRow(Cursor c) throws Exception {
+        JSONObject row = new JSONObject();
+        row.put("id", c.getLong(0));
+        row.put("role", c.getString(1));
+        row.put("content", c.getString(2));
+        row.put("created_at", c.getLong(3));
+        return row;
+    }
+
+    private static String escapeLike(String input) {
+        if (input == null) return "";
+        return input.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
     }
 
     private RunRecord readRun(Cursor cursor) {

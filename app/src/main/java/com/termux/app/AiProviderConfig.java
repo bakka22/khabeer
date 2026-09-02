@@ -29,6 +29,11 @@ public final class AiProviderConfig {
     private static final String KEY_MODEL = "model";
     private static final String KEY_BASE_URL = "base_url";
     private static final String KEY_SECRET_PREFIX = "secret_";
+    private static final String KEY_MEMORY_ENABLED = "memory_enabled";
+    private static final String KEY_USER_MEMORY_ENABLED = "user_memory_enabled";
+    private static final String KEY_MEMORY_WRITE_APPROVAL = "memory_write_approval";
+    private static final String KEY_MEMORY_NUDGE_ENABLED = "memory_nudge_enabled";
+    private static final String KEY_MEMORY_NUDGE_INTERVAL = "memory_nudge_interval";
 
     private final SharedPreferences mPrefs;
 
@@ -65,6 +70,52 @@ public final class AiProviderConfig {
         if (profile == null) return;
         mPrefs.edit().putString(KEY_BASE_URL + "_" + profile.id,
             baseUrl == null ? "" : baseUrl.trim()).apply();
+    }
+
+    // ---- Hermes-style built-in memory settings ----
+
+    public boolean isMemoryEnabled() {
+        return mPrefs.getBoolean(KEY_MEMORY_ENABLED, true);
+    }
+
+    public void setMemoryEnabled(boolean enabled) {
+        mPrefs.edit().putBoolean(KEY_MEMORY_ENABLED, enabled).apply();
+    }
+
+    public boolean isUserMemoryEnabled() {
+        return mPrefs.getBoolean(KEY_USER_MEMORY_ENABLED, true);
+    }
+
+    public void setUserMemoryEnabled(boolean enabled) {
+        mPrefs.edit().putBoolean(KEY_USER_MEMORY_ENABLED, enabled).apply();
+    }
+
+    public boolean isAnyBuiltInMemoryEnabled() {
+        return isMemoryEnabled() || isUserMemoryEnabled();
+    }
+
+    public boolean isMemoryWriteApprovalEnabled() {
+        return mPrefs.getBoolean(KEY_MEMORY_WRITE_APPROVAL, false);
+    }
+
+    public void setMemoryWriteApprovalEnabled(boolean enabled) {
+        mPrefs.edit().putBoolean(KEY_MEMORY_WRITE_APPROVAL, enabled).apply();
+    }
+
+    public boolean isMemoryNudgeEnabled() {
+        return mPrefs.getBoolean(KEY_MEMORY_NUDGE_ENABLED, true);
+    }
+
+    public void setMemoryNudgeEnabled(boolean enabled) {
+        mPrefs.edit().putBoolean(KEY_MEMORY_NUDGE_ENABLED, enabled).apply();
+    }
+
+    public int getMemoryNudgeInterval() {
+        return Math.max(1, mPrefs.getInt(KEY_MEMORY_NUDGE_INTERVAL, 10));
+    }
+
+    public void setMemoryNudgeInterval(int interval) {
+        mPrefs.edit().putInt(KEY_MEMORY_NUDGE_INTERVAL, Math.max(1, interval)).apply();
     }
 
     public boolean hasApiKey(AiProviderProfile profile) {
