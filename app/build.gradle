@@ -119,6 +119,13 @@ android {
     testOptions {
         unitTests {
             includeAndroidResources = true
+            all {
+                def localTestHome = new File(rootProject.buildDir, "test-user-home")
+                systemProperty "user.home", localTestHome.absolutePath
+                doFirst {
+                    localTestHome.mkdirs()
+                }
+            }
         }
     }
 

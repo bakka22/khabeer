@@ -495,6 +495,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
 
     private void showSessionsPage() {
         if (mSessionsPage == null) return;
+        setMorePageVisible(false);
         mHomePanel.setVisibility(View.GONE);
         mSetupPanel.setVisibility(View.GONE);
         mChatPage.setVisibility(View.GONE);
@@ -573,6 +574,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             showError("Native runtime is still starting.");
             return;
         }
+        setMorePageVisible(false);
         mRuntimeService.newSession();
         mCurrentRunId = null;
         mRunActive = false;
@@ -685,6 +687,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     private void showOpenCodeSetupPage(boolean sessionMode) {
         mPickingSessionProvider = sessionMode;
         mSelectedProfile = AiProviderProfile.find("opencode");
+        setMorePageVisible(false);
         mHomePanel.setVisibility(View.GONE);
         mSetupPanel.setVisibility(View.GONE);
         mChatPage.setVisibility(View.GONE);
@@ -839,7 +842,15 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         if (extensions != null) extensions.setVisibility(View.GONE);
         mChatTitle.setText("More");
         populateMorePage((LinearLayout) morePage);
-        morePage.setVisibility(View.VISIBLE);
+        setMorePageVisible(true);
+    }
+
+    private void setMorePageVisible(boolean visible) {
+        View scroll = findViewById(R.id.ai_more_scroll);
+        View page = findViewById(R.id.ai_more_page);
+        if (scroll != null) scroll.setVisibility(visible ? View.VISIBLE : View.GONE);
+        if (page != null) page.setVisibility(View.VISIBLE);
+        if (visible && scroll instanceof NestedScrollView) ((NestedScrollView) scroll).scrollTo(0, 0);
     }
 
     private void populateMorePage(LinearLayout morePage) {
@@ -1683,6 +1694,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
      * one from a desktop katheer install) and it appears here. */
     private void showExtensionsPage() {
         if (mExtensionsPage == null) return;
+        setMorePageVisible(false);
         mHomePanel.setVisibility(View.GONE);
         mSetupPanel.setVisibility(View.GONE);
         mChatPage.setVisibility(View.GONE);
@@ -2713,6 +2725,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
 
     private void showFeaturedProviders() {
         mShowingProviderDirectory = false;
+        setMorePageVisible(false);
         mProviderGrid.removeAllViews();
         mHomeTitle.setText("Choose your agent");
         mHomeBody.setText("Start with OpenAI, Anthropic, or OpenCode. More providers opens the full katheer registry.");
@@ -2733,6 +2746,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
 
     private void showProviderDirectory() {
         mShowingProviderDirectory = true;
+        setMorePageVisible(false);
         mProviderGrid.removeAllViews();
         mHomeTitle.setText(mPickingSessionProvider ? "Choose a provider for this session" : "More providers");
         mHomeBody.setText(mPickingSessionProvider
@@ -3036,6 +3050,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     }
 
     private void showSetupPage() {
+        setMorePageVisible(false);
         mHomePanel.setVisibility(View.GONE);
         mSetupPanel.setVisibility(View.VISIBLE);
         mChatPage.setVisibility(View.GONE);
@@ -3060,6 +3075,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             return;
         }
         if (validateWorkspace() == null) return;
+        setMorePageVisible(false);
         mHomePanel.setVisibility(View.GONE);
         mSetupPanel.setVisibility(View.GONE);
         mChatPage.setVisibility(View.VISIBLE);

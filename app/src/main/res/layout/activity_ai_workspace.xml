@@ -80,7 +80,23 @@
             android:layout_height="0dp"
             android:layout_weight="1">
 
-            <LinearLayout android:id="@+id/ai_more_page" android:layout_width="match_parent" android:layout_height="match_parent" android:background="@drawable/bg_gradient_main" android:orientation="vertical" android:visibility="gone" />
+            <androidx.core.widget.NestedScrollView
+                android:id="@+id/ai_more_scroll"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:background="@drawable/bg_gradient_main"
+                android:clipToPadding="false"
+                android:fillViewport="true"
+                android:scrollbars="none"
+                android:overScrollMode="never"
+                android:visibility="gone">
+
+                <LinearLayout
+                    android:id="@+id/ai_more_page"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical" />
+            </androidx.core.widget.NestedScrollView>
             <androidx.core.widget.NestedScrollView
                 android:id="@+id/ai_home_panel"
                 android:layout_width="match_parent"

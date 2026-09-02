@@ -292,7 +292,7 @@ Still missing/needs hardening:
 
 ### Phase 7 — Full verification
 
-Status: partially verified; on-device install/launch blocked because ADB currently lists no devices.
+Status: implemented and locally/on-device verified for build, install, launch, memory file seeding, Memory UI reachability, Journey UI, and core memory/database unit behavior. Live provider behavior still needs real-session validation for provider-specific streaming/quiet-call quirks.
 
 Verified:
 
@@ -303,17 +303,38 @@ Verified:
   - `AiDatabaseMemoryTest`
 - Full `:app:testDebugUnitTest`
 
-Still need:
+Verified:
 
-- Install on connected phone
-- Launch app
-- Create/edit `SOUL.md`, `USER.md`, `MEMORY.md`
-- Verify memory appears in new session prompt behavior
-- Verify model can write memory
-- Verify approval staging
-- Verify `session_search`
-- Verify background nudge does not freeze chat
-- Verify manual compaction preserves recovery through `session_search`
+- Install on connected phone (`pfww8llbfe6tr88x`) with `adb install -r`.
+- Launch `com.termux/.app.AiActivity`; process stayed alive and filtered logcat showed no Termux/katheer fatal crash.
+- First-run memory file seeding on device under `/data/data/com.termux/files/home/.katheer`:
+  - `SOUL.md`
+  - `memories/MEMORY.md`
+  - `memories/USER.md`
+- More page contains a Memory entry.
+- Memory page shows:
+  - Memory status/caps
+  - MEMORY.md/USER.md toggles
+  - Write approval toggle
+  - Nudge toggle
+  - Reset buttons
+  - Journey card
+  - Manual session compaction card with provider/model, active replay count, and readiness text
+  - Pending staged writes card
+  - Editable `SOUL.md`, `USER.md`, and `MEMORY.md` text areas with save buttons
+- Memory page is now hosted in `ai_more_scroll`; uiautomator reports it scrollable and swipes expose all lower controls, including `Save MEMORY.md`.
+- Journey opens and shows `USER.md nodes`, `MEMORY.md nodes`, and real skill nodes.
+- Core prompt/file/database behavior is covered by passing unit tests:
+  - `AiMemoryStoreTest`
+  - `AiDatabaseMemoryTest`
+
+Still need live provider validation:
+
+- Prove a real model turn sees the frozen memory snapshot inside a new session prompt.
+- Prove a real model can call the `memory` tool and write/stage through the configured gate.
+- Prove `session_search` works from an actual provider turn, not only DB unit tests.
+- Prove the background nudge quiet-call path works with configured provider credentials without freezing chat.
+- Prove manual compaction generation works with configured provider credentials and preserves recovery through model-invoked `session_search`.
 
 ## Running notes
 
@@ -325,3 +346,5 @@ Still need:
 - 2026-09-02: Final hardening build verification passed: `assembleDebug` successful after the `session_search` recovery/tool transcript/threat scanner changes. ADB still shows an empty device list, so install/launch and live memory-flow verification remain pending until the phone is visible to ADB.
 - 2026-09-02: Added executable verification. `AiMemoryStoreTest` covers seeding/prompt injection format, Hermes strict threat blocking, batch remove+add final-budget behavior, and strict UTF-8 unreadable-file refusal without wipe. `AiDatabaseMemoryTest` covers manual compaction trimming active replay while `session_search` recovers archived/tool history. Focused tests and full `:app:testDebugUnitTest` passed, followed by successful `assembleDebug`.
 - 2026-09-02: Closed the local context-size/status UI gap for manual compaction. The Memory page now shows provider/model, active replay message count, and readiness before the user confirms compaction. Re-ran `compileDebugJavaWithJavac`, full `:app:testDebugUnitTest`, and `assembleDebug`; all passed.
+- 2026-09-02: Fixed the real on-device Memory page reachability bug. The More/Memory dynamic page is now wrapped in `ai_more_scroll` (`NestedScrollView`) and all page switches hide/show the scroll container consistently. Installed on connected phone, launched without fatal crash, verified memory files seeded, verified Memory page scrolls to manual compaction/pending writes/SOUL/USER/MEMORY editors, and verified Journey opens with USER.md/MEMORY.md/skill nodes.
+- 2026-09-02: Hardened Windows/Robolectric test execution. Gradle/Robolectric was failing before assertions because it tried to create `.robolectric-download-lock` in the Windows home root. Unit test JVMs now set `user.home` to `build/test-user-home` and create that directory before tests. Full `:app:testDebugUnitTest` passes again with the repo-local Gradle cache.
