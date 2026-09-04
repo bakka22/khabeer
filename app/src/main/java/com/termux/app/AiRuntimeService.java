@@ -1828,6 +1828,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         } else {
             connection.setRequestProperty("x-api-key", apiKey == null ? "" : apiKey);
             connection.setRequestProperty("anthropic-version", "2023-06-01");
+            applyOpenCodeSessionHeader(connection, anthropicMessagesUrl(baseUrl), turnSessionId(ctx()));
         }
         try (OutputStream output = connection.getOutputStream()) {
             output.write(body.toString().getBytes(StandardCharsets.UTF_8));
@@ -2059,6 +2060,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         connection.setRequestProperty("Accept", "text/event-stream");
         if (!TextUtils.isEmpty(apiKey)) connection.setRequestProperty("Authorization", "Bearer " + apiKey);
         connection.setRequestProperty("X-Title", "Termux khabeer");
+        applyOpenCodeSessionHeader(connection, chatCompletionsUrl(baseUrl), turnSessionId(ctx()));
         if ("github-copilot".equals(providerId)) {
             for (int i = 0; i < ProviderLogin.COPILOT_REQUEST_HEADERS.length; i += 2)
                 connection.setRequestProperty(ProviderLogin.COPILOT_REQUEST_HEADERS[i], ProviderLogin.COPILOT_REQUEST_HEADERS[i + 1]);
@@ -2092,6 +2094,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         connection.setRequestProperty("Content-Type", "application/json");
         if (!TextUtils.isEmpty(apiKey)) connection.setRequestProperty("Authorization", "Bearer " + apiKey);
         connection.setRequestProperty("X-Title", "Termux khabeer");
+        applyOpenCodeSessionHeader(connection, chatCompletionsUrl(baseUrl), turnSessionId(ctx()));
         try (OutputStream output = connection.getOutputStream()) {
             output.write(body.toString().getBytes(StandardCharsets.UTF_8));
         }
@@ -2270,6 +2273,23 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         return clean + "/chat/completions";
     }
 
+    /** OpenCode Go (and Zen, same infra) requires x-opencode-session: one
+     * stable ID per conversation — the session/run id. Missing headers may
+     * error from 2026-09-06. Gated by URL so Free/Zen/Go all carry it and
+     * every other provider is untouched. */
+    private static void applyOpenCodeSessionHeader(HttpURLConnection c, String url, @Nullable String sessionId) {
+        if (c == null || TextUtils.isEmpty(sessionId)) return;
+        String u = url == null ? "" : url;
+        if (u.contains("opencode.ai/zen")) {
+            c.setRequestProperty("x-opencode-session", sessionId);
+        }
+    }
+
+    private static String turnSessionId(RunContext c) {
+        if (c == null || c.record == null || TextUtils.isEmpty(c.record.id)) return null;
+        return c.record.id;
+    }
+
     private JSONObject callResponsesApi(String providerId, String baseUrl, String apiKey, String model,
                                         @Nullable String effort, JSONArray input) throws Exception {
         JSONObject body = new JSONObject()
@@ -2291,6 +2311,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
             connection.setRequestProperty("HTTP-Referer", "https://termux.local/khabeer");
             connection.setRequestProperty("X-Title", "Termux khabeer");
         }
+        applyOpenCodeSessionHeader(connection, baseUrl, turnSessionId(ctx()));
         try (OutputStream output = connection.getOutputStream()) {
             output.write(body.toString().getBytes(StandardCharsets.UTF_8));
         }
@@ -3378,7 +3399,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         new Thread(() -> {
             try {
                 if (TextUtils.isEmpty(providerId) || TextUtils.isEmpty(baseUrl) || TextUtils.isEmpty(model)) return;
-                String review = callBackgroundMemoryReview(providerId, baseUrl, apiKey, model, transcript, memoryEnabled, userEnabled);
+                String review = callBackgroundMemoryReview(providerId, baseUrl, apiKey, model, transcript, memoryEnabled, userEnabled, runId);
                 JSONObject parsed = parseReviewJson(review);
                 JSONArray ops = parsed == null ? null : parsed.optJSONArray("operations");
                 if (ops == null || ops.length() == 0) return;
@@ -3433,16 +3454,16 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
     }
 
     private String callBackgroundMemoryReview(String providerId, String baseUrl, String apiKey, String model, JSONArray transcript,
-                                              boolean memoryEnabled, boolean userEnabled) throws Exception {
+                                              boolean memoryEnabled, boolean userEnabled, @Nullable String sessionId) throws Exception {
         String prompt = "You are the khabeer background memory reviewer. Inspect the recent transcript and return ONLY JSON. " +
             "If nothing durable should be saved, return {\"operations\":[]}. " +
             "Otherwise return {\"operations\":[{\"target\":\"memory|user\",\"action\":\"add|replace|remove\",\"content\":\"...\",\"old_text\":\"...\"}]}. " +
             "Save user preferences/corrections/profile to user. Save stable environment/project/tool lessons to memory. " +
             "Skip task progress, transient paths, raw dumps, and procedures that belong in skills. Write declarative facts, not imperatives. " +
             "Enabled targets: memory=" + memoryEnabled + ", user=" + userEnabled + ". Transcript JSON:\n" + transcript.toString();
-        if (ANTHROPIC_MESSAGES_PROVIDERS.contains(providerId)) return callBackgroundAnthropic(baseUrl, apiKey, model, prompt);
-        if (usesChatCompletions(providerId)) return callBackgroundChatCompletions(providerId, baseUrl, apiKey, model, prompt);
-        return callBackgroundResponses(baseUrl, apiKey, model, prompt);
+        if (ANTHROPIC_MESSAGES_PROVIDERS.contains(providerId)) return callBackgroundAnthropic(baseUrl, apiKey, model, prompt, 1024, "Return strict JSON only.", sessionId);
+        if (usesChatCompletions(providerId)) return callBackgroundChatCompletions(providerId, baseUrl, apiKey, model, prompt, 1024, "Return strict JSON only.", sessionId);
+        return callBackgroundResponses(baseUrl, apiKey, model, prompt, 1024, "Return strict JSON only.", sessionId);
     }
 
     private String callBackgroundCompactionSummary(String providerId, String baseUrl, String apiKey, String model,
@@ -3467,9 +3488,9 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
             "Context Recovery must include this exact callable hint: session_search(query='<keywords>', session_id='" + sessionId + "'), replacing <keywords> with high-signal terms.\n\n" +
             "Transcript JSON:\n" + transcript.toString();
         String system = "Return the final compaction summary text only.";
-        if (ANTHROPIC_MESSAGES_PROVIDERS.contains(providerId)) return callBackgroundAnthropic(baseUrl, apiKey, model, prompt, 4096, system);
-        if (usesChatCompletions(providerId)) return callBackgroundChatCompletions(providerId, baseUrl, apiKey, model, prompt, 4096, system);
-        return callBackgroundResponses(baseUrl, apiKey, model, prompt, 4096, system);
+        if (ANTHROPIC_MESSAGES_PROVIDERS.contains(providerId)) return callBackgroundAnthropic(baseUrl, apiKey, model, prompt, 4096, system, sessionId);
+        if (usesChatCompletions(providerId)) return callBackgroundChatCompletions(providerId, baseUrl, apiKey, model, prompt, 4096, system, sessionId);
+        return callBackgroundResponses(baseUrl, apiKey, model, prompt, 4096, system, sessionId);
     }
 
     private String compactionPrefix() {
@@ -3483,12 +3504,16 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
     }
 
     private String callBackgroundChatCompletions(String providerId, String baseUrl, String apiKey, String model, String prompt, int maxTokens, String system) throws Exception {
+        return callBackgroundChatCompletions(providerId, baseUrl, apiKey, model, prompt, maxTokens, system, null);
+    }
+
+    private String callBackgroundChatCompletions(String providerId, String baseUrl, String apiKey, String model, String prompt, int maxTokens, String system, @Nullable String sessionId) throws Exception {
         JSONArray messages = new JSONArray()
             .put(new JSONObject().put("role", "system").put("content", system))
             .put(new JSONObject().put("role", "user").put("content", prompt));
         JSONObject body = new JSONObject().put("model", model).put("messages", messages).put("stream", false);
         if (maxTokens > 0) body.put("max_tokens", maxTokens);
-        String text = postJson(chatCompletionsUrl(baseUrl), body, apiKey, providerId);
+        String text = postJson(chatCompletionsUrl(baseUrl), body, apiKey, providerId, sessionId);
         JSONObject o = new JSONObject(text);
         JSONArray choices = o.optJSONArray("choices");
         JSONObject first = choices == null || choices.length() == 0 ? null : choices.optJSONObject(0);
@@ -3501,12 +3526,16 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
     }
 
     private String callBackgroundResponses(String baseUrl, String apiKey, String model, String prompt, int maxOutputTokens, String system) throws Exception {
+        return callBackgroundResponses(baseUrl, apiKey, model, prompt, maxOutputTokens, system, null);
+    }
+
+    private String callBackgroundResponses(String baseUrl, String apiKey, String model, String prompt, int maxOutputTokens, String system, @Nullable String sessionId) throws Exception {
         JSONObject body = new JSONObject()
             .put("model", model)
             .put("instructions", system)
             .put("input", prompt);
         if (maxOutputTokens > 0) body.put("max_output_tokens", maxOutputTokens);
-        String text = postJson(baseUrl, body, apiKey, "");
+        String text = postJson(baseUrl, body, apiKey, "", sessionId);
         JSONObject o = new JSONObject(text);
         String out = o.optString("output_text", "");
         return TextUtils.isEmpty(out) ? text : out;
@@ -3517,6 +3546,10 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
     }
 
     private String callBackgroundAnthropic(String baseUrl, String apiKey, String model, String prompt, int maxTokens, String system) throws Exception {
+        return callBackgroundAnthropic(baseUrl, apiKey, model, prompt, maxTokens, system, null);
+    }
+
+    private String callBackgroundAnthropic(String baseUrl, String apiKey, String model, String prompt, int maxTokens, String system, @Nullable String sessionId) throws Exception {
         JSONObject body = new JSONObject()
             .put("model", model)
             .put("max_tokens", Math.max(1, maxTokens))
@@ -3525,7 +3558,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
                 .put("role", "user")
                 .put("content", prompt)));
         boolean oauth = isAnthropicOAuthToken(apiKey);
-        HttpURLConnection c = openJsonConnection(anthropicMessagesUrl(baseUrl), oauth ? apiKey : "", "");
+        HttpURLConnection c = openJsonConnection(anthropicMessagesUrl(baseUrl), oauth ? apiKey : "", "", sessionId);
         if (oauth) {
             c.setRequestProperty("anthropic-beta", "oauth-2025-04-20");
             c.setRequestProperty("Authorization", "Bearer " + apiKey);
@@ -3543,8 +3576,8 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         return text;
     }
 
-    private String postJson(String url, JSONObject body, String apiKey, String providerId) throws Exception {
-        HttpURLConnection c = openJsonConnection(url, apiKey, providerId);
+    private String postJson(String url, JSONObject body, String apiKey, String providerId, @Nullable String sessionId) throws Exception {
+        HttpURLConnection c = openJsonConnection(url, apiKey, providerId, sessionId);
         try (OutputStream output = c.getOutputStream()) { output.write(body.toString().getBytes(StandardCharsets.UTF_8)); }
         int code = c.getResponseCode();
         String text = readFully(code >= 200 && code < 300 ? c.getInputStream() : c.getErrorStream());
@@ -3552,7 +3585,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         return text;
     }
 
-    private HttpURLConnection openJsonConnection(String url, String apiKey, String providerId) throws Exception {
+    private HttpURLConnection openJsonConnection(String url, String apiKey, String providerId, @Nullable String sessionId) throws Exception {
         HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
         c.setRequestMethod("POST");
         c.setConnectTimeout(MODEL_CONNECT_TIMEOUT_MS);
@@ -3561,6 +3594,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         c.setRequestProperty("Content-Type", "application/json");
         if (!TextUtils.isEmpty(apiKey)) c.setRequestProperty("Authorization", "Bearer " + apiKey);
         c.setRequestProperty("X-Title", "Termux khabeer");
+        applyOpenCodeSessionHeader(c, url, sessionId);
         if ("github-copilot".equals(providerId)) {
             for (int i = 0; i < ProviderLogin.COPILOT_REQUEST_HEADERS.length; i += 2)
                 c.setRequestProperty(ProviderLogin.COPILOT_REQUEST_HEADERS[i], ProviderLogin.COPILOT_REQUEST_HEADERS[i + 1]);
@@ -3768,6 +3802,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
             connection.setDoOutput(true);
             connection.setRequestProperty("Content-Type", "application/json");
             if (!TextUtils.isEmpty(apiKey)) connection.setRequestProperty("Authorization", "Bearer " + apiKey);
+            applyOpenCodeSessionHeader(connection, chatCompletionsUrl(baseUrl), runId);
             try (OutputStream output = connection.getOutputStream()) {
                 output.write(body.toString().getBytes(StandardCharsets.UTF_8));
             }
