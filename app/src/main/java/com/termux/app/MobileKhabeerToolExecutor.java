@@ -17,8 +17,8 @@ import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
-/** Native katheer-mobile tool executor backed by the bundled Termux environment. */
-public final class MobileKatheerToolExecutor {
+/** Native khabeer-mobile tool executor backed by the bundled Termux environment. */
+public final class MobileKhabeerToolExecutor {
 
     private static final int MAX_CAPTURE_BYTES = 64 * 1024;
     private static final int DEFAULT_TIMEOUT_SECONDS = 300;
@@ -26,7 +26,7 @@ public final class MobileKatheerToolExecutor {
 
     private final Context mContext;
 
-    public MobileKatheerToolExecutor(Context context) {
+    public MobileKhabeerToolExecutor(Context context) {
         mContext = context.getApplicationContext();
     }
 
@@ -95,9 +95,9 @@ public final class MobileKatheerToolExecutor {
             CountDownLatch readersDone = new CountDownLatch(2);
             Process finalProcess = process;
             new Thread(() -> drain(finalProcess.getInputStream(), stdout, readersDone),
-                "katheer-stdout").start();
+                "khabeer-stdout").start();
             new Thread(() -> drain(finalProcess.getErrorStream(), stderr, readersDone),
-                "katheer-stderr").start();
+                "khabeer-stderr").start();
 
             boolean finished = process.waitFor(timeout, TimeUnit.SECONDS);
             if (!finished) {

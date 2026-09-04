@@ -5,12 +5,12 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 
-public final class KatheerInterruptManager {
+public final class KhabeerInterruptManager {
     private static final Object LOCK = new Object();
     private static final Set<Long> INTERRUPTED_THREADS = new HashSet<>();
     private static final Map<Long, String> REASONS = new HashMap<>();
 
-    private KatheerInterruptManager() {}
+    private KhabeerInterruptManager() {}
 
     public static void setInterrupt(boolean active, Long threadId, String reason) {
         long tid = threadId != null ? threadId : Thread.currentThread().getId();

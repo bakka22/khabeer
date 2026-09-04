@@ -6,7 +6,7 @@ import android.os.Looper;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 
-public final class KatheerStreamConsumer {
+public final class KhabeerStreamConsumer {
     public interface Sink {
         void onText(String text, boolean isFinal);
         void onToolProgress(String line);
@@ -25,7 +25,7 @@ public final class KatheerStreamConsumer {
     private int floodStrikes;
     private static final int MAX_FLOOD_STRIKES = 3;
 
-    public KatheerStreamConsumer(Sink sink, long editIntervalMs) {
+    public KhabeerStreamConsumer(Sink sink, long editIntervalMs) {
         this.sink = sink;
         this.editIntervalMs = editIntervalMs;
     }
@@ -38,7 +38,7 @@ public final class KatheerStreamConsumer {
     }
 
     public void start() {
-        new Thread(this::loop, "katheer-stream-consumer").start();
+        new Thread(this::loop, "khabeer-stream-consumer").start();
     }
 
     private void loop() {

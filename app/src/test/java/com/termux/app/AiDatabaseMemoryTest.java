@@ -68,4 +68,43 @@ public class AiDatabaseMemoryTest {
         assertTrue(found.toString(), found.optBoolean("success"));
         assertTrue(found.toString().contains(run.id));
     }
+
+    @Test
+    public void discoveryDemotesToolRowsBelowUserHits() throws Exception {
+        AiDatabase.RunRecord toolOnly = db.createRun("opencode", "/tool-project");
+        db.appendToolTranscript(toolOnly.id, "[tool_result] terminal\noutput: demote-zebra-nine", "{}");
+        AiDatabase.RunRecord userHit = db.createRun("opencode", "/user-project");
+        db.appendMessage(userHit.id, "user", "please investigate demote-zebra-nine today");
+
+        JSONObject found = db.sessionSearch(new JSONObject().put("query", "demote-zebra-nine").put("limit", 5), null);
+        assertTrue(found.toString(), found.optBoolean("success"));
+        JSONArray results = found.optJSONArray("results");
+        assertTrue(found.toString(), results != null && results.length() == 2);
+        assertEquals(userHit.id, results.optJSONObject(0).optString("session_id"));
+        assertEquals(toolOnly.id, results.optJSONObject(1).optString("session_id"));
+        assertTrue(results.optJSONObject(0).has("window"));
+        assertFalse(results.optJSONObject(1).has("window"));
+    }
+
+    @Test
+    public void scrollReportsCountsAndReadTruncatesMiddle() throws Exception {
+        AiDatabase.RunRecord run = db.createRun("opencode", "/scroll-project");
+        for (int i = 0; i < 40; i++) db.appendMessage(run.id, i % 2 == 0 ? "user" : "assistant", "scroll message " + i);
+        JSONArray all = db.getHistoricalTranscript(run.id, 100);
+        long anchor = all.optJSONObject(20).optLong("id");
+
+        JSONObject scrolled = db.sessionSearch(
+            new JSONObject().put("session_id", run.id).put("around_message_id", anchor).put("window", 5), null);
+        assertTrue(scrolled.toString(), scrolled.optBoolean("success"));
+        assertEquals("scroll", scrolled.optString("mode"));
+        assertEquals(20, scrolled.optInt("messages_before"));
+        assertEquals(19, scrolled.optInt("messages_after"));
+        assertTrue(scrolled.has("hint"));
+
+        JSONObject read = db.sessionSearch(new JSONObject().put("session_id", run.id).put("limit", 2), null);
+        assertTrue(read.toString(), read.optBoolean("success"));
+        assertEquals("read", read.optString("mode"));
+        assertEquals(10, read.optInt("truncated_middle"));
+        assertTrue(read.has("hint"));
+    }
 }

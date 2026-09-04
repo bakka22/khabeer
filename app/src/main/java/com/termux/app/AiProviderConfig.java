@@ -17,7 +17,7 @@ import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.GCMParameterSpec;
 
-/** Stores katheer-mobile provider settings. Secrets are encrypted with Android Keystore. */
+/** Stores khabeer-mobile provider settings. Secrets are encrypted with Android Keystore. */
 public final class AiProviderConfig {
 
     private static final String PREFS = "mobile_hermes_provider_config";
@@ -34,6 +34,12 @@ public final class AiProviderConfig {
     private static final String KEY_MEMORY_WRITE_APPROVAL = "memory_write_approval";
     private static final String KEY_MEMORY_NUDGE_ENABLED = "memory_nudge_enabled";
     private static final String KEY_MEMORY_NUDGE_INTERVAL = "memory_nudge_interval";
+    private static final String KEY_MEMORY_WARN_PCT = "memory_warn_pct";
+    private static final String KEY_MEMORY_AUTO_PCT = "memory_auto_pct";
+    private static final String KEY_MEMORY_NOTIFY_MODE = "memory_notify_mode";
+    private static final String KEY_LAST_PROVIDER = "last_provider_id";
+    private static final String KEY_LAST_MODEL = "last_model";
+    private static final String KEY_LAST_ROUTE = "last_route";
 
     private final SharedPreferences mPrefs;
 
@@ -116,6 +122,36 @@ public final class AiProviderConfig {
 
     public void setMemoryNudgeInterval(int interval) {
         mPrefs.edit().putInt(KEY_MEMORY_NUDGE_INTERVAL, Math.max(1, interval)).apply();
+    }
+
+    /** Context-window gating (§5.1): warn at this replay usage %, compact
+     * automatically at the auto threshold. Manual compaction anytime. */
+    public int getMemoryWarnPct() {
+        return Math.max(1, Math.min(99, mPrefs.getInt(KEY_MEMORY_WARN_PCT, 90)));
+    }
+
+    public void setMemoryWarnPct(int pct) {
+        mPrefs.edit().putInt(KEY_MEMORY_WARN_PCT, Math.max(1, Math.min(99, pct))).apply();
+    }
+
+    public int getMemoryAutoPct() {
+        return Math.max(1, Math.min(100, mPrefs.getInt(KEY_MEMORY_AUTO_PCT, 95)));
+    }
+
+    public void setMemoryAutoPct(int pct) {
+        mPrefs.edit().putInt(KEY_MEMORY_AUTO_PCT, Math.max(1, Math.min(100, pct))).apply();
+    }
+
+    /** Background-review surfacing: off | on ("Memory updated") | verbose (previews). */
+    public String getMemoryNotifyMode() {
+        String mode = mPrefs.getString(KEY_MEMORY_NOTIFY_MODE, "on");
+        if ("off".equals(mode) || "verbose".equals(mode)) return mode;
+        return "on";
+    }
+
+    public void setMemoryNotifyMode(String mode) {
+        if (!"off".equals(mode) && !"verbose".equals(mode)) mode = "on";
+        mPrefs.edit().putString(KEY_MEMORY_NOTIFY_MODE, mode).apply();
     }
 
     public boolean hasApiKey(AiProviderProfile profile) {
@@ -229,6 +265,63 @@ public final class AiProviderConfig {
     public String getOpenCodeRouteModel(String route) {
         return mPrefs.getString(KEY_OC_ROUTE_MODEL + (route == null ? OC_ROUTE_FREE : route),
             ocRouteDefaultModel(route));
+    }
+
+    // ---- New-session flow: last used + readiness ----
+
+    public void setLastUsed(String providerId, String model, String route) {
+        mPrefs.edit().putString(KEY_LAST_PROVIDER, providerId == null ? "" : providerId)
+            .putString(KEY_LAST_MODEL, model == null ? "" : model)
+            .putString(KEY_LAST_ROUTE, route == null ? "" : route).apply();
+    }
+
+    public String getLastProviderId() {
+        return mPrefs.getString(KEY_LAST_PROVIDER, "");
+    }
+
+    public String getLastModel() {
+        return mPrefs.getString(KEY_LAST_MODEL, "");
+    }
+
+    public String getLastRoute() {
+        return mPrefs.getString(KEY_LAST_ROUTE, "");
+    }
+
+    /** An OpenCode route is usable when it needs no key (Free) or its key is set. */
+    public boolean isRouteConfigured(String route) {
+        if (TextUtils.isEmpty(route)) route = OC_ROUTE_FREE;
+        if (!ocRouteNeedsKey(route)) return true;
+        return !TextUtils.isEmpty(getOpenCodeRouteKey(route));
+    }
+
+    /** A provider is offerable for new sessions: implemented, chat-capable,
+     * and credentialed (key, login, or keyless with an endpoint). */
+    public boolean isProviderConfigured(AiProviderProfile profile) {
+        if (profile == null || profile.terminalOnly || !profile.implemented) return false;
+        if ("opencode".equals(profile.id)) return isRouteConfigured(getOpenCodeSelectedRoute());
+        if (profile.apiKeyAuth) return hasApiKey(profile) || hasProviderLogin(profile.id);
+        if (profile.oauthAuth) return hasProviderLogin(profile.id);
+        return !TextUtils.isEmpty(getBaseUrl(profile));
+    }
+
+    public String configuredSummary(AiProviderProfile profile) {
+        if (profile == null) return "";
+        if (profile.terminalOnly) return "Raw terminal — no agent chat.";
+        if (!profile.implemented) return "Coming next.";
+        if ("opencode".equals(profile.id)) {
+            String route = getOpenCodeSelectedRoute();
+            if (!isRouteConfigured(route))
+                return "OpenCode " + ocRouteLabel(route) + " needs an API key.";
+            return "✓ " + ocRouteLabel(route) + " · " + getOpenCodeRouteModel(route);
+        }
+        if (!isProviderConfigured(profile)) {
+            if (profile.apiKeyAuth && profile.oauthAuth) return "Needs an API key or sign-in.";
+            if (profile.apiKeyAuth) return "Needs an API key.";
+            if (profile.oauthAuth) return "Sign-in required.";
+            return "Needs an endpoint.";
+        }
+        String model = getModel(profile);
+        return "✓ " + (TextUtils.isEmpty(model) ? profile.defaultModel : model);
     }
 
     public void setOpenCodeRouteModel(String route, String model) {

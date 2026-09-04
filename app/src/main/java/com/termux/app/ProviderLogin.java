@@ -16,7 +16,7 @@ import java.util.Map;
 
 /**
  * Wire-level login flows for providers that don't take a plain API key
- * (port of the katheer reference provider logins). HTTP-only, no UI —
+ * (port of the khabeer reference provider logins). HTTP-only, no UI —
  * the activity drives the steps and stores the results through
  * AiProviderConfig's Keystore-backed secrets.
  */
@@ -94,7 +94,7 @@ public final class ProviderLogin {
         form.put("client_id", CODEX_CLIENT_ID);
         form.put("code_verifier", codeVerifier);
         JSONObject tokens = httpPostForm(CODEX_TOKEN_URL, form,
-            new String[]{"User-Agent", "katheer/1.0"});
+            new String[]{"User-Agent", "khabeer/1.0"});
         if (TextUtils.isEmpty(tokens.optString("access_token")))
             throw new Exception("Token exchange returned no access_token");
         return tokens;
@@ -107,7 +107,7 @@ public final class ProviderLogin {
         form.put("refresh_token", refreshToken);
         form.put("client_id", CODEX_CLIENT_ID);
         JSONObject tokens = httpPostForm(CODEX_TOKEN_URL, form,
-            new String[]{"User-Agent", "katheer/1.0", "Accept", "application/json"});
+            new String[]{"User-Agent", "khabeer/1.0", "Accept", "application/json"});
         if (TextUtils.isEmpty(tokens.optString("access_token")))
             throw new Exception("Refresh returned no access_token");
         return tokens;
@@ -214,7 +214,7 @@ public final class ProviderLogin {
         java.util.Map<String, String> headers = new java.util.LinkedHashMap<>();
         headers.put("Authorization", "Bearer " + accessToken);
         headers.put("Accept", "application/json");
-        headers.put("User-Agent", "katheer/1.0");
+        headers.put("User-Agent", "khabeer/1.0");
         if (!TextUtils.isEmpty(accountId)) headers.put("ChatGPT-Account-Id", accountId);
         return httpGetJson(CODEX_BASE_URL + "/models?client_version=1.0.0", headers);
     }

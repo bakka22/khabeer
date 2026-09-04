@@ -94,7 +94,7 @@ public final class AiMemoryStore {
     }
 
     private static final String DEFAULT_SOUL =
-        "You are katheer, a native mobile AI agent inspired by Hermes Agent. " +
+        "You are khabeer, a native mobile AI agent inspired by Hermes Agent. " +
         "Be direct: match the length of your reply to the weight of the ask. " +
         "Finished work gets a short report of what changed, what was verified, " +
         "and what is left. No filler, no restating the request, no fake certainty. " +
@@ -104,7 +104,7 @@ public final class AiMemoryStore {
 
     public static File dataRoot() {
         if (sDataRootOverride != null) return sDataRootOverride;
-        return new File(TermuxConstants.TERMUX_HOME_DIR_PATH, ".katheer");
+        return new File(TermuxConstants.TERMUX_HOME_DIR_PATH, ".khabeer");
     }
 
     static synchronized void setDataRootForTests(File root) {
@@ -153,18 +153,45 @@ public final class AiMemoryStore {
         return readFile(fileFor(target));
     }
 
-    /** Direct human edit path for the Memory page. */
+    /** Direct human edit path for the Memory page. Same gates as agent
+     * writes: strict UTF-8 current-read (wipe protection), threat scan,
+     * file lock, drift guard, dedupe, atomic write. Over-limit saves are
+     * rejected with usage + inventory — never silently truncated. */
     public static synchronized JSONObject saveRaw(String target, String content) {
         ensureDefaults();
         String cleanTarget = normalizeAnyTarget(target);
         if (cleanTarget == null) return error("Invalid target. Use soul, memory, or user.");
         String text = content == null ? "" : content.trim();
-        int limit = limitFor(cleanTarget);
-        if (text.length() > limit) return error(label(cleanTarget) + " is over the " + limit + " character limit.");
-        String threat = threatMessage(text);
-        if (threat != null) return error(threat);
-        writeTextAtomic(fileFor(cleanTarget), text);
-        return ok(cleanTarget, "saved", text.length(), limit, TARGET_SOUL.equals(cleanTarget) ? 1 : parseEntries(text).size());
+        File path = fileFor(cleanTarget);
+        String current = readFileStrict(path);
+        if (current == null) {
+            if (TextUtils.isEmpty(text)) return unreadableError(cleanTarget);
+            current = "";
+        }
+        return withFileLock(cleanTarget, () -> {
+            int limit = limitFor(cleanTarget);
+            if (TARGET_SOUL.equals(cleanTarget)) {
+                if (text.length() > limit) {
+                    return error(label(cleanTarget) + " is at " + text.length() + "/" + limit +
+                        " chars — over the limit. Shorten it before saving; nothing was written.");
+                }
+                String threat = threatMessage(text);
+                if (threat != null) return error(threat);
+                writeTextAtomic(path, text);
+                return ok(cleanTarget, "saved", text.length(), limit, TextUtils.isEmpty(text) ? 0 : 1);
+            }
+            List<String> entries = dedupe(parseEntries(text));
+            String serialized = String.join(ENTRY_DELIMITER, entries);
+            if (serialized.length() > limit) {
+                return errorWithInventory(label(cleanTarget) + " is at " + serialized.length() + "/" + limit +
+                    " chars — over the limit. Remove or shorten entries before saving; nothing was written.",
+                    entries, cleanTarget);
+            }
+            String threat = threatMessage(serialized);
+            if (threat != null) return error(threat);
+            writeTextAtomic(path, serialized);
+            return ok(cleanTarget, "saved", serialized.length(), limit, entries.size());
+        });
     }
 
     public static synchronized String systemPromptSnapshot() {
@@ -178,13 +205,13 @@ public final class AiMemoryStore {
         if (TextUtils.isEmpty(soul.trim())) soul = DEFAULT_SOUL;
         out.append(soul.trim());
 
-        if (userEnabled) {
-            String user = renderBlock(TARGET_USER, "USER PROFILE (who the user is)", USER_LIMIT);
-            if (!TextUtils.isEmpty(user)) out.append("\n\n").append(user);
-        }
         if (memoryEnabled) {
             String memory = renderBlock(TARGET_MEMORY, "MEMORY (your personal notes)", MEMORY_LIMIT);
             if (!TextUtils.isEmpty(memory)) out.append("\n\n").append(memory);
+        }
+        if (userEnabled) {
+            String user = renderBlock(TARGET_USER, "USER PROFILE (who the user is)", USER_LIMIT);
+            if (!TextUtils.isEmpty(user)) out.append("\n\n").append(user);
         }
         return out.toString();
     }
@@ -359,6 +386,8 @@ public final class AiMemoryStore {
         return withFileLock(target, () -> {
             String raw = readFileStrict(fileFor(target));
             if (raw == null) return unreadableError(target);
+            JSONObject drift = driftErrorIfNeeded(target, raw);
+            if (drift != null) return drift;
             List<String> entries = parseEntries(raw);
             if (entries.contains(clean)) return ok(target, "duplicate", serializedLength(entries), limitFor(target), entries.size());
             entries.add(clean);

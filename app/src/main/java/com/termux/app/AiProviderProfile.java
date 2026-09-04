@@ -2,7 +2,7 @@ package com.termux.app;
 
 import androidx.annotation.Nullable;
 
-/** katheer-style provider profile shown by the mobile app. */
+/** khabeer-style provider profile shown by the mobile app. */
 public final class AiProviderProfile {
 
     public final String id;

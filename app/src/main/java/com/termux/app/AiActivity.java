@@ -136,6 +136,13 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     private LinearLayout mSessionsList;
     private MaterialButton mProviderButton;
     private boolean mPickingSessionProvider;
+    // New-session / in-chat-switch flow (Home grid reused as the flow page).
+    private boolean mNsActive;
+    private String mSelectedRoute;
+    private boolean mNsForSession;
+    private int mNsStep; // 0 providers, 1 routes, 2 models
+    private AiProviderProfile mNsProfile;
+    private String mNsRoute;
     private com.google.android.material.button.MaterialButton mUseSavedConfigButton;
     private View mOpenCodePage;
     private View mExtensionsPage;
@@ -245,7 +252,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         setupProviderTiles();
         setupActions();
         selectProvider(AiProviderProfile.find(mProviderConfig.getSelectedProviderId()), false);
-        mChatTitle.setText("katheer");
+        mChatTitle.setText("khabeer");
         bindRuntime();
         bindTermux();
     }
@@ -271,6 +278,9 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             if (mPickingSessionProvider) {
                 mPickingSessionProvider = false;
                 showChatPage();
+            } else if (mNsActive) {
+                mNsStep = 1;
+                renderNsStep();
             } else {
                 mHomePanel.setVisibility(View.VISIBLE);
                 showFeaturedProviders();
@@ -289,6 +299,21 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             showFeaturedProviders();
             return;
         }
+        if (mNsActive) {
+            if (mNsStep > 0) {
+                if (mNsStep == 2 && (mNsProfile == null || !"opencode".equals(mNsProfile.id))) mNsStep = 0;
+                else mNsStep--;
+                if (mNsStep == 0) mNsProfile = null;
+                renderNsStep();
+            } else if (mNsForSession) {
+                mNsActive = false;
+                showChatPage();
+            } else {
+                mNsActive = false;
+                showFeaturedProviders();
+            }
+            return;
+        }
         if (mShowingProviderDirectory) {
             showFeaturedProviders();
             return;
@@ -297,7 +322,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             mSetupPanel.setVisibility(View.GONE);
             mChatPage.setVisibility(View.GONE);
             mHomePanel.setVisibility(View.VISIBLE);
-            mChatTitle.setText("katheer");
+            mChatTitle.setText("khabeer");
             showFeaturedProviders();
             return;
         }
@@ -305,7 +330,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             mChatPage.setVisibility(View.GONE);
             mSetupPanel.setVisibility(View.GONE);
             mHomePanel.setVisibility(View.VISIBLE);
-            mChatTitle.setText("katheer");
+            mChatTitle.setText("khabeer");
             showFeaturedProviders();
             return;
         }
@@ -385,7 +410,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     }
 
     private void setupChrome() {
-        mChatTitle.setText("katheer");
+        mChatTitle.setText("khabeer");
         if (mMenuButton != null) mMenuButton.setOnClickListener(view -> { if (mDrawer != null) mDrawer.openDrawer(findViewById(R.id.ai_drawer_panel)); });
         if (mSettingsButton != null) mSettingsButton.setOnClickListener(view -> showAppSettingsDialog());
         if (mStopButton != null) mStopButton.setVisibility(View.GONE);
@@ -405,6 +430,10 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             if (mPickingSessionProvider) {
                 mPickingSessionProvider = false;
                 showChatPage();
+                return;
+            }
+            if (mNsActive) {
+                renderNsStep();
                 return;
             }
             showFeaturedProviders();
@@ -476,7 +505,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mThinkingButton.setOnClickListener(view -> toggleThinkingDetails());
         mAttachButton.setOnClickListener(view -> showAttachDialog());
         mNewSessionButton.setOnClickListener(view -> {
-            createNewSessionChat();
+            showNewSessionPage(false);
             if (mDrawer != null) mDrawer.closeDrawer(findViewById(R.id.ai_drawer_panel));
         });
         findViewById(R.id.ai_suggestion_project_plan).setOnClickListener(view ->
@@ -518,11 +547,14 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         heading.setLetterSpacing(0.08f);
         heading.setPadding(0, dp(8), 0, dp(10));
         mSessionsList.addView(heading);
+        MaterialButton newSession = smallMemoryButton("+ New session");
+        newSession.setOnClickListener(v -> showNewSessionPage(false));
+        mSessionsList.addView(newSession);
         java.util.List<AiDatabase.RunRecord> sessions = mRuntimeService == null
             ? new ArrayList<>() : mRuntimeService.getSessions();
         if (sessions.isEmpty()) {
             TextView empty = new TextView(this);
-            empty.setText("No sessions yet. Start one from Home or the + button.");
+            empty.setText("No sessions yet. Use + New session above to start one.");
             empty.setTextColor(color(R.color.ai_text_muted));
             empty.setTextSize(13);
             empty.setPadding(0, dp(6), 0, dp(16));
@@ -564,7 +596,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             openResumedSession(sessions.get(0).id);
             return;
         }
-        createNewSessionChat();
+        showNewSessionPage(false);
     }
 
     /** New session = an instant empty chat wired to the last configured
@@ -574,35 +606,16 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             showError("Native runtime is still starting.");
             return;
         }
-        setMorePageVisible(false);
-        mRuntimeService.newSession();
-        mCurrentRunId = null;
-        mRunActive = false;
-        mHasNativeSession = false;
-        mChatMessages.removeAllViews();
-        mStreamingAgentBubble = null;
-        hideThinkingBubble();
-        clearReasoningBuffer();
-        mReasoningBubble = null;
-        mCurrentToolBubble = null;
-        mStopButton.setVisibility(View.GONE);
-        mEmptyChatHint.setVisibility(View.VISIBLE);
-        mSuggestionStrip.setVisibility(View.VISIBLE);
-        mChatPage.setVisibility(View.VISIBLE);
-        mHomePanel.setVisibility(View.GONE);
-        mSetupPanel.setVisibility(View.GONE);
-        if (mSessionsPage != null) mSessionsPage.setVisibility(View.GONE);
-        if (mOpenCodePage != null) mOpenCodePage.setVisibility(View.GONE);
-        if (mExtensionsPage != null) mExtensionsPage.setVisibility(View.GONE);
-        setStatus("New session ready.", false);
+        // New sessions always go through the provider/model flow — an empty
+        // chat with no selection is a dead end.
+        showNewSessionPage(false);
     }
 
     /** Session provider switching: a full providers page — pick a provider,
      * land on its configuration page, and Continue binds it to THIS session
-     * only (katheer: the session row carries its own route). */
+     * only (khabeer: the session row carries its own route). */
     private void pickSessionProvider() {
-        mPickingSessionProvider = true;
-        showProviderDirectory();
+        showNewSessionPage(true);
     }
 
     /** Setup page in session-picking mode: UI-level selection only — nothing
@@ -806,6 +819,13 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             }
             selectProvider(mSelectedProfile, false);
             setStatus("OpenCode " + AiProviderConfig.ocRouteLabel(route) + " saved.", false);
+            if (mNsActive) {
+                mNsProfile = AiProviderProfile.find("opencode");
+                mNsRoute = route;
+                mNsStep = 2;
+                renderNsStep();
+                return;
+            }
             if (sessionMode) {
                 mPickingSessionProvider = false;
                 showChatPage();
@@ -1414,10 +1434,60 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             if (mProviderConfig != null) mProviderConfig.setMemoryWriteApprovalEnabled(checked);
             showMemoryPage();
         }));
-        box.addView(memoryToggle("Enable 10-turn memory review nudge", mProviderConfig == null || mProviderConfig.isMemoryNudgeEnabled(), checked -> {
+        int nudgeEvery = mProviderConfig == null ? 10 : mProviderConfig.getMemoryNudgeInterval();
+        box.addView(memoryToggle("Enable " + nudgeEvery + "-turn memory review nudge", mProviderConfig == null || mProviderConfig.isMemoryNudgeEnabled(), checked -> {
             if (mProviderConfig != null) mProviderConfig.setMemoryNudgeEnabled(checked);
             showMemoryPage();
         }));
+
+        LinearLayout tuning = new LinearLayout(this);
+        tuning.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams tuningLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        tuningLp.setMargins(0, dp(8), 0, 0);
+        box.addView(tuning, tuningLp);
+
+        MaterialButton nudgeBtn = smallMemoryButton("Review every " + nudgeEvery);
+        MaterialButton warnBtn = smallMemoryButton("Warn " + (mProviderConfig == null ? 90 : mProviderConfig.getMemoryWarnPct()) + "%");
+        MaterialButton autoBtn = smallMemoryButton("Auto " + (mProviderConfig == null ? 95 : mProviderConfig.getMemoryAutoPct()) + "%");
+        MaterialButton notifyBtn = smallMemoryButton("Notices: " + (mProviderConfig == null ? "on" : mProviderConfig.getMemoryNotifyMode()));
+        tuning.addView(nudgeBtn, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        LinearLayout.LayoutParams tuneLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        tuneLp.setMargins(dp(6), 0, 0, 0);
+        tuning.addView(warnBtn, tuneLp);
+        LinearLayout.LayoutParams tuneLp2 = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        tuneLp2.setMargins(dp(6), 0, 0, 0);
+        tuning.addView(autoBtn, tuneLp2);
+        LinearLayout.LayoutParams tuneLp3 = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        tuneLp3.setMargins(dp(6), 0, 0, 0);
+        tuning.addView(notifyBtn, tuneLp3);
+
+        nudgeBtn.setOnClickListener(v -> showMemoryNumberDialog("Review every N user turns", nudgeEvery, 1, 100, value -> {
+            if (mProviderConfig != null) mProviderConfig.setMemoryNudgeInterval(value);
+            showMemoryPage();
+        }));
+        warnBtn.setOnClickListener(v -> showMemoryNumberDialog("Warn when context reaches %", mProviderConfig == null ? 90 : mProviderConfig.getMemoryWarnPct(), 50, 99, value -> {
+            if (mProviderConfig != null) mProviderConfig.setMemoryWarnPct(value);
+            showMemoryPage();
+        }));
+        autoBtn.setOnClickListener(v -> showMemoryNumberDialog("Auto-compact when context reaches %", mProviderConfig == null ? 95 : mProviderConfig.getMemoryAutoPct(), 50, 100, value -> {
+            if (mProviderConfig != null) mProviderConfig.setMemoryAutoPct(value);
+            showMemoryPage();
+        }));
+        notifyBtn.setOnClickListener(v -> {
+            String[] modes = new String[]{"off", "on", "verbose"};
+            String current = mProviderConfig == null ? "on" : mProviderConfig.getMemoryNotifyMode();
+            int checked = "off".equals(current) ? 0 : "verbose".equals(current) ? 2 : 1;
+            new MaterialAlertDialogBuilder(this)
+                .setTitle("Background review notices")
+                .setSingleChoiceItems(modes, checked, (dialog, which) -> {
+                    if (mProviderConfig != null) mProviderConfig.setMemoryNotifyMode(modes[which]);
+                    dialog.dismiss();
+                    showMemoryPage();
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+        });
 
         LinearLayout buttons = new LinearLayout(this);
         buttons.setOrientation(LinearLayout.HORIZONTAL);
@@ -1439,6 +1509,31 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     }
 
     private interface BoolConsumer { void accept(boolean checked); }
+
+    private interface IntConsumer { void accept(int value); }
+
+    private void showMemoryNumberDialog(String title, int current, int min, int max, IntConsumer onSave) {
+        EditText editor = new EditText(this);
+        editor.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        editor.setText(String.valueOf(current));
+        editor.setSelection(editor.length());
+        editor.setTextColor(color(R.color.ai_text));
+        editor.setHintTextColor(color(R.color.ai_text_dim));
+        editor.setBackgroundColor(color(R.color.ai_surface_muted));
+        editor.setPadding(dp(12), dp(10), dp(12), dp(10));
+        new MaterialAlertDialogBuilder(this)
+            .setTitle(title)
+            .setView(editor)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Save", (dialog, which) -> {
+                int value;
+                try { value = Integer.parseInt(editor.getText() == null ? "" : editor.getText().toString().trim()); }
+                catch (Exception e) { showError("Enter a number between " + min + " and " + max + "."); return; }
+                if (value < min || value > max) { showError("Enter a number between " + min + " and " + max + "."); return; }
+                onSave.accept(value);
+            })
+            .show();
+    }
 
     private View memoryToggle(String text, boolean checked, BoolConsumer onChange) {
         CheckBox cb = new CheckBox(this);
@@ -1493,7 +1588,9 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
                 "MEMORY.md: " + statusLine(memory) + "\n" +
                 "Pending staged writes: " + status.optInt("pending_count", 0) + "\n" +
                 "Write approval: " + ((mProviderConfig != null && mProviderConfig.isMemoryWriteApprovalEnabled()) ? "on" : "off") + "\n" +
-                "Nudge loop: " + ((mProviderConfig == null || mProviderConfig.isMemoryNudgeEnabled()) ? "on every " + (mProviderConfig == null ? 10 : mProviderConfig.getMemoryNudgeInterval()) + " user turns" : "off");
+                "Nudge loop: " + ((mProviderConfig == null || mProviderConfig.isMemoryNudgeEnabled()) ? "on every " + (mProviderConfig == null ? 10 : mProviderConfig.getMemoryNudgeInterval()) + " user turns" : "off") + "\n" +
+                "Review notices: " + (mProviderConfig == null ? "on" : mProviderConfig.getMemoryNotifyMode()) + "\n" +
+                "Context gating: warn " + (mProviderConfig == null ? 90 : mProviderConfig.getMemoryWarnPct()) + "% · auto-compact " + (mProviderConfig == null ? 95 : mProviderConfig.getMemoryAutoPct()) + "%";
         } catch (Exception e) {
             return "Memory status unavailable.";
         }
@@ -1672,7 +1769,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         return card;
     }
 
-    /** Top-bar gear: the katheer app settings that exist today. */
+    /** Top-bar gear: the khabeer app settings that exist today. */
     private void showAppSettingsDialog() {
         String[] modes = new String[]{"Dark", "Light"};
         String current = AiThemeMode.mode(this);
@@ -1688,10 +1785,10 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             .show();
     }
 
-    /** Skills & extensions page (katheer skills): list installed skills, toggle
+    /** Skills & extensions page (khabeer skills): list installed skills, toggle
      * them, and read the full SKILL.md. The skills root is
-     * $HOME/.katheer/skills — drop a folder with a SKILL.md in there (or sync
-     * one from a desktop katheer install) and it appears here. */
+     * $HOME/.khabeer/skills — drop a folder with a SKILL.md in there (or sync
+     * one from a desktop khabeer install) and it appears here. */
     private void showExtensionsPage() {
         if (mExtensionsPage == null) return;
         setMorePageVisible(false);
@@ -1733,7 +1830,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         toolbar.setLayoutParams(toolbarLp);
 
         TextView pathHint = new TextView(this);
-        pathHint.setText("$HOME/.katheer/skills");
+        pathHint.setText("$HOME/.khabeer/skills");
         pathHint.setTextColor(color(R.color.ai_text_muted));
         pathHint.setTextSize(11);
         pathHint.setTypeface(Typeface.MONOSPACE);
@@ -1787,7 +1884,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         }
         if (!anyVisible) {
             TextView empty = new TextView(this);
-            empty.setText("No skills installed. Skills live in $HOME/.katheer/skills — one folder per skill with a SKILL.md inside.");
+            empty.setText("No skills installed. Skills live in $HOME/.khabeer/skills — one folder per skill with a SKILL.md inside.");
             empty.setTextColor(color(R.color.ai_text_muted));
             empty.setTextSize(13);
             empty.setPadding(0, dp(6), 0, dp(16));
@@ -2188,7 +2285,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
 
     // ------------------------------------------------------------------
     // MCP OAuth 2.0 sign-in (authorization code + PKCE, loopback callback
-    // with a manual paste fallback — katheer mcp_oauth flow)
+    // with a manual paste fallback — khabeer mcp_oauth flow)
     // ------------------------------------------------------------------
 
     private void startMcpOAuthSignIn(AiDatabase.McpServerRecord record) {
@@ -2344,7 +2441,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
 
     // ------------------------------------------------------------------
     // Skill installation: download archive → extract to a quarantine dir →
-    // guard scan → user confirm → move into $HOME/.katheer/skills
+    // guard scan → user confirm → move into $HOME/.khabeer/skills
     // ------------------------------------------------------------------
 
     private void showSkillInstallDialog() {
@@ -2589,7 +2686,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         new MaterialAlertDialogBuilder(this)
             .setTitle("Install " + installable.size() + " skill" + (installable.size() == 1 ? "" : "s") + "?")
             .setMessage(blocked.isEmpty()
-                ? "Scan complete. Install the checked skills into $HOME/.katheer/skills?"
+                ? "Scan complete. Install the checked skills into $HOME/.khabeer/skills?"
                 : blocked.size() + " skill(s) were BLOCKED by the security scan and cannot be installed.")
             .setView(box)
             .setNegativeButton(android.R.string.cancel, null)
@@ -2723,25 +2820,26 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         return trimmed.substring(3).substring(matcher.end()).trim();
     }
 
+    /** Home is configuration only: credentials, endpoints, and default
+     * models per provider. No chat selection and no session creation
+     * happen here — those live in the New Session flow. */
     private void showFeaturedProviders() {
         mShowingProviderDirectory = false;
+        mNsActive = false;
         setMorePageVisible(false);
         mProviderGrid.removeAllViews();
-        mHomeTitle.setText("Choose your agent");
-        mHomeBody.setText("Start with OpenAI, Anthropic, or OpenCode. More providers opens the full katheer registry.");
-        for (String id : AiProviderProfile.FEATURED_PROVIDER_IDS) {
-            AiProviderProfile profile = AiProviderProfile.find(id);
-            if (profile != null) mProviderGrid.addView(createProviderTile(profile));
+        mHomeTitle.setText("Configure");
+        mHomeBody.setText("Set up providers below: API keys, sign-ins, endpoints, and default models. Start chats from Sessions or Chat.");
+        for (AiProviderProfile profile : AiProviderProfile.PROFILES) {
+            mProviderGrid.addView(createProviderTile(profile));
         }
-        mProviderGrid.addView(createMoreProvidersTile());
-        mProviderGrid.addView(createSkillsTile());
         mHomePanel.setVisibility(View.VISIBLE);
         mSetupPanel.setVisibility(View.GONE);
         mChatPage.setVisibility(View.GONE);
         if (mSessionsPage != null) mSessionsPage.setVisibility(View.GONE);
         if (mOpenCodePage != null) mOpenCodePage.setVisibility(View.GONE);
         if (mExtensionsPage != null) mExtensionsPage.setVisibility(View.GONE);
-        mChatTitle.setText("katheer");
+        mChatTitle.setText("khabeer");
     }
 
     private void showProviderDirectory() {
@@ -2751,7 +2849,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mHomeTitle.setText(mPickingSessionProvider ? "Choose a provider for this session" : "More providers");
         mHomeBody.setText(mPickingSessionProvider
             ? "Pick a provider, configure it if needed, then Continue to bind it to this session only."
-            : "katheer provider registry. Adapters marked “coming next” are listed honestly until their native request/auth flow is implemented.");
+            : "khabeer provider registry. Adapters marked “coming next” are listed honestly until their native request/auth flow is implemented.");
         for (AiProviderProfile profile : AiProviderProfile.PROFILES) {
             boolean featured = "openai".equals(profile.id) || "anthropic".equals(profile.id) || "opencode".equals(profile.id);
             if (!featured || mPickingSessionProvider) mProviderGrid.addView(createProviderTile(profile));
@@ -2763,6 +2861,389 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         if (mExtensionsPage != null) mExtensionsPage.setVisibility(View.GONE);
     }
 
+    // ------------------------------------------------------------------
+    // New Session flow (also serves in-chat provider switching when
+    // mNsForSession is true): last-used shortcut → provider → OpenCode
+    // route → live model list → chat. Every step has a way forward and a
+    // way back; nothing here configures credentials (that is Home).
+    // ------------------------------------------------------------------
+
+    private void showNewSessionPage(boolean forSession) {
+        mNsActive = true;
+        mNsForSession = forSession;
+        mNsStep = 0;
+        mNsProfile = null;
+        mNsRoute = null;
+        renderNsStep();
+    }
+
+    private void renderNsStep() {
+        mShowingProviderDirectory = false;
+        setMorePageVisible(false);
+        mHomePanel.setVisibility(View.VISIBLE);
+        mSetupPanel.setVisibility(View.GONE);
+        mChatPage.setVisibility(View.GONE);
+        if (mSessionsPage != null) mSessionsPage.setVisibility(View.GONE);
+        if (mOpenCodePage != null) mOpenCodePage.setVisibility(View.GONE);
+        if (mExtensionsPage != null) mExtensionsPage.setVisibility(View.GONE);
+        mChatTitle.setText(mNsForSession ? "Switch provider" : "New session");
+        mProviderGrid.removeAllViews();
+        if (mNsStep == 1) renderNsRoutes();
+        else if (mNsStep == 2) renderNsModels();
+        else renderNsProviders();
+    }
+
+    private void renderNsProviders() {
+        mHomeTitle.setText(mNsForSession ? "Switch provider" : "New session");
+        mHomeBody.setText(mNsForSession
+            ? "Pick a configured provider, then a model. The transcript stays; the next turn uses the new setup."
+            : "Reuse your last setup or pick a configured provider, then a model.");
+        if (!mNsForSession) addNsLastUsedCard();
+        TextView section = nsSectionLabel("PROVIDERS");
+        mProviderGrid.addView(section);
+        boolean any = false;
+        for (AiProviderProfile profile : AiProviderProfile.PROFILES) {
+            if (profile.terminalOnly || !profile.implemented) continue;
+            mProviderGrid.addView(createProviderTile(profile));
+            any = true;
+        }
+        if (!any) {
+            mProviderGrid.addView(nsNote("No provider is configured yet."));
+        }
+        MaterialButton home = smallMemoryButton("Configure providers on Home");
+        home.setOnClickListener(v -> {
+            mNsActive = false;
+            showFeaturedProviders();
+        });
+        mProviderGrid.addView(home);
+    }
+
+    private void addNsLastUsedCard() {
+        String providerId = mProviderConfig == null ? "" : mProviderConfig.getLastProviderId();
+        String model = mProviderConfig == null ? "" : mProviderConfig.getLastModel();
+        String route = mProviderConfig == null ? "" : mProviderConfig.getLastRoute();
+        AiProviderProfile profile = AiProviderProfile.find(providerId);
+        if (profile == null || TextUtils.isEmpty(model)) return;
+        if (!mProviderConfig.isProviderConfigured(profile)) return;
+        if ("opencode".equals(profile.id) && !TextUtils.isEmpty(route) && !mProviderConfig.isRouteConfigured(route)) return;
+        String label = profile.name + " · " + model
+            + ("opencode".equals(profile.id) && !TextUtils.isEmpty(route)
+                ? " (" + AiProviderConfig.ocRouteLabel(route) + ")" : "");
+        MaterialCardView card = new MaterialCardView(this);
+        card.setCardBackgroundColor(color(R.color.ai_surface_elevated));
+        card.setStrokeColor(color(R.color.ai_accent));
+        card.setStrokeWidth(dp(2));
+        card.setRadius(dp(16));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.setMargins(0, 0, 0, dp(10));
+        card.setLayoutParams(lp);
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.HORIZONTAL);
+        box.setGravity(Gravity.CENTER_VERTICAL);
+        box.setPadding(dp(14), dp(14), dp(14), dp(14));
+        card.addView(box);
+        TextView text = new TextView(this);
+        text.setText("Last used\n" + label);
+        text.setTextColor(color(R.color.ai_text));
+        text.setTextSize(13);
+        LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        box.addView(text, tp);
+        MaterialButton start = smallMemoryButton("Start chat");
+        start.setOnClickListener(v -> {
+            if ("opencode".equals(profile.id) && TextUtils.isEmpty(route)) {
+                mNsProfile = profile;
+                mNsStep = 1;
+                renderNsStep();
+                return;
+            }
+            nsModelPicked(profile, TextUtils.isEmpty(route) ? null : route, model);
+        });
+        box.addView(start);
+        mProviderGrid.addView(card);
+    }
+
+    private TextView nsSectionLabel(String text) {
+        TextView section = new TextView(this);
+        section.setText(text);
+        section.setTextColor(color(R.color.ai_text));
+        section.setTextSize(12);
+        section.setTypeface(Typeface.DEFAULT_BOLD);
+        section.setLetterSpacing(0.08f);
+        section.setPadding(0, dp(8), 0, dp(10));
+        return section;
+    }
+
+    private TextView nsNote(String text) {
+        TextView note = new TextView(this);
+        note.setText(text);
+        note.setTextColor(color(R.color.ai_text_muted));
+        note.setTextSize(13);
+        note.setPadding(0, dp(6), 0, dp(16));
+        return note;
+    }
+
+    private void nsProviderTapped(AiProviderProfile profile) {
+        if (profile == null || profile.terminalOnly || !profile.implemented) {
+            showError("This provider is not available for chat yet.");
+            return;
+        }
+        if (!mProviderConfig.isProviderConfigured(profile)) {
+            Toast.makeText(this, profile.name + " needs configuration first.", Toast.LENGTH_SHORT).show();
+            openProviderConfig(profile);
+            return;
+        }
+        if ("opencode".equals(profile.id)) {
+            mNsProfile = profile;
+            mNsStep = 1;
+            renderNsStep();
+            return;
+        }
+        mNsProfile = profile;
+        mNsRoute = null;
+        mNsStep = 2;
+        renderNsStep();
+    }
+
+    private void renderNsRoutes() {
+        mHomeTitle.setText("OpenCode route");
+        mHomeBody.setText("Each route has its own key and models. Pick the route this session will use.");
+        mNsProfile = AiProviderProfile.find("opencode");
+        mProviderGrid.addView(nsBackRow("Providers", () -> {
+            mNsStep = 0;
+            mNsProfile = null;
+            renderNsStep();
+        }));
+        String[] routes = new String[]{AiProviderConfig.OC_ROUTE_FREE, AiProviderConfig.OC_ROUTE_ZEN, AiProviderConfig.OC_ROUTE_GO};
+        for (String route : routes) {
+            boolean ready = mProviderConfig.isRouteConfigured(route);
+            String status = ready ? "✓ " + mProviderConfig.getOpenCodeRouteModel(route) : "Needs an API key";
+            MaterialCardView card = nsRowCard(AiProviderConfig.ocRouteLabel(route), status, ready);
+            final String tapped = route;
+            card.setOnClickListener(v -> nsRouteTapped(tapped));
+            mProviderGrid.addView(card);
+        }
+    }
+
+    private void nsRouteTapped(String route) {
+        if (!mProviderConfig.isRouteConfigured(route)) {
+            Toast.makeText(this, "OpenCode " + AiProviderConfig.ocRouteLabel(route) + " needs an API key — opening setup.", Toast.LENGTH_LONG).show();
+            showOpenCodeSetupPage(false);
+            return;
+        }
+        mNsRoute = route;
+        mNsStep = 2;
+        renderNsStep();
+    }
+
+    private void renderNsModels() {
+        final AiProviderProfile profile = mNsProfile;
+        if (profile == null) {
+            mNsStep = 0;
+            renderNsStep();
+            return;
+        }
+        String where = profile.name + ("opencode".equals(profile.id) && mNsRoute != null
+            ? " · " + AiProviderConfig.ocRouteLabel(mNsRoute) : "");
+        mHomeTitle.setText("Choose a model");
+        mHomeBody.setText("Live models from " + where + ". Pick one to continue.");
+        mProviderGrid.addView(nsBackRow("opencode".equals(profile.id) ? "Routes" : "Providers", () -> {
+            if ("opencode".equals(profile.id)) mNsStep = 1;
+            else {
+                mNsStep = 0;
+                mNsProfile = null;
+            }
+            renderNsStep();
+        }));
+        TextView loading = nsNote("Loading models from " + where + "…");
+        mProviderGrid.addView(loading);
+        final String route = mNsRoute;
+        new Thread(() -> {
+            List<String> models;
+            try {
+                models = nsFetchModels(profile, route);
+            } catch (Exception e) {
+                String message = e.getMessage() == null ? e.toString() : e.getMessage();
+                runOnUiThread(() -> {
+                    if (!mNsActive || mNsStep != 2 || mNsProfile != profile) return;
+                    renderNsModelsError(message);
+                });
+                return;
+            }
+            final List<String> result = models;
+            runOnUiThread(() -> {
+                if (!mNsActive || mNsStep != 2 || mNsProfile != profile) return;
+                if (result == null || result.isEmpty()) renderNsModelsError("The provider returned no models.");
+                else renderNsModelList(result);
+            });
+        }, "khabeer-ns-models").start();
+    }
+
+    private List<String> nsFetchModels(AiProviderProfile profile, @Nullable String route) throws Exception {
+        if ("openai-codex".equals(profile.id)) {
+            String token = mProviderConfig.getProviderToken("openai-codex");
+            return AiModelCatalog.fetch(profile, ProviderLogin.CODEX_BASE_URL, token,
+                ProviderLogin.codexAccountId(token));
+        }
+        String baseUrl = mProviderConfig.getBaseUrl(profile);
+        String apiKey = mProviderConfig.resolveCredential(profile);
+        if ("opencode".equals(profile.id) && !TextUtils.isEmpty(route)) {
+            baseUrl = AiProviderConfig.ocRouteUrl(route);
+            String routeKey = mProviderConfig.getOpenCodeRouteKey(route);
+            if (!TextUtils.isEmpty(routeKey)) apiKey = routeKey;
+        }
+        return AiModelCatalog.fetch(profile, baseUrl, apiKey);
+    }
+
+    private void renderNsModelList(List<String> models) {
+        mProviderGrid.removeAllViews();
+        renderNsModelsHeader();
+        for (String model : models) {
+            MaterialCardView card = nsRowCard(model, null, true);
+            card.setOnClickListener(v -> nsModelPicked(mNsProfile, mNsRoute, model));
+            mProviderGrid.addView(card);
+        }
+        MaterialButton manual = smallMemoryButton("Enter model ID manually…");
+        manual.setOnClickListener(v -> showNsManualModelDialog());
+        mProviderGrid.addView(manual);
+    }
+
+    private void renderNsModelsHeader() {
+        final AiProviderProfile profile = mNsProfile;
+        String where = profile == null ? "" : profile.name + ("opencode".equals(profile.id) && mNsRoute != null
+            ? " · " + AiProviderConfig.ocRouteLabel(mNsRoute) : "");
+        mHomeTitle.setText("Choose a model");
+        mHomeBody.setText("Live models from " + where + ". Pick one to continue.");
+        mProviderGrid.addView(nsBackRow("opencode".equals(profile == null ? "" : profile.id) ? "Routes" : "Providers", () -> {
+            if (profile != null && "opencode".equals(profile.id)) mNsStep = 1;
+            else {
+                mNsStep = 0;
+                mNsProfile = null;
+            }
+            renderNsStep();
+        }));
+    }
+
+    private void renderNsModelsError(String message) {
+        mProviderGrid.removeAllViews();
+        renderNsModelsHeader();
+        mProviderGrid.addView(nsNote("Couldn’t load live models: " + message));
+        MaterialButton retry = smallMemoryButton("Retry");
+        retry.setOnClickListener(v -> renderNsStep());
+        mProviderGrid.addView(retry);
+        MaterialButton manual = smallMemoryButton("Enter model ID manually…");
+        manual.setOnClickListener(v -> showNsManualModelDialog());
+        mProviderGrid.addView(manual);
+    }
+
+    private void showNsManualModelDialog() {
+        final AiProviderProfile profile = mNsProfile;
+        if (profile == null) return;
+        EditText input = new EditText(this);
+        input.setSingleLine(true);
+        input.setHint("Model ID");
+        input.setTextColor(color(R.color.ai_text));
+        input.setHintTextColor(color(R.color.ai_text_dim));
+        input.setBackgroundColor(color(R.color.ai_surface_muted));
+        input.setPadding(dp(12), dp(10), dp(12), dp(10));
+        new MaterialAlertDialogBuilder(this)
+            .setTitle("Model ID")
+            .setView(input)
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton(R.string.ai_continue, (dialog, which) -> {
+                String id = input.getText() == null ? "" : input.getText().toString().trim();
+                if (TextUtils.isEmpty(id)) {
+                    showError("Enter a model ID.");
+                    return;
+                }
+                nsModelPicked(profile, mNsRoute, id);
+            })
+            .show();
+    }
+
+    private View nsBackRow(String label, Runnable back) {
+        MaterialButton b = smallMemoryButton("‹ " + label);
+        b.setOnClickListener(v -> back.run());
+        return b;
+    }
+
+    private MaterialCardView nsRowCard(String title, @Nullable String status, boolean ready) {
+        MaterialCardView card = new MaterialCardView(this);
+        card.setCardBackgroundColor(color(R.color.ai_surface));
+        card.setStrokeColor(color(R.color.ai_border));
+        card.setStrokeWidth(dp(1));
+        card.setRadius(dp(16));
+        card.setClickable(true);
+        card.setFocusable(true);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.setMargins(0, 0, 0, dp(10));
+        card.setLayoutParams(lp);
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(14), dp(12), dp(14), dp(12));
+        card.addView(box);
+        TextView t = new TextView(this);
+        t.setText(title);
+        t.setTextColor(color(ready ? R.color.ai_text : R.color.ai_text_muted));
+        t.setTextSize(14);
+        t.setTypeface(Typeface.DEFAULT_BOLD);
+        box.addView(t);
+        if (!TextUtils.isEmpty(status)) {
+            TextView s = new TextView(this);
+            s.setText(status);
+            s.setTextColor(color(ready ? R.color.ai_success : R.color.ai_warning));
+            s.setTextSize(11);
+            box.addView(s);
+        }
+        return card;
+    }
+
+    /** Model chosen in the flow: start a session, or rebind the live one. */
+    private void nsModelPicked(AiProviderProfile profile, @Nullable String route, String model) {
+        if (profile == null || TextUtils.isEmpty(model)) return;
+        if (mRuntimeService == null || !mRuntimeBound) {
+            showError("Native runtime is still starting.");
+            return;
+        }
+        mSelectedProfile = profile;
+        mSelectedModel = model;
+        mSelectedRoute = route;
+        syncControlLabels();
+        if (mNsForSession) {
+            mRuntimeService.setSessionProvider(profile.id);
+            if ("opencode".equals(profile.id) && !TextUtils.isEmpty(route)) mRuntimeService.setSessionRoute(route);
+            mRuntimeService.setSessionModel(model);
+            mNsActive = false;
+            showChatPage();
+            return;
+        }
+        // New sessions start on the first typed message: stage the fully
+        // resolved choice and open an empty chat. The send path resolves
+        // route credentials and passes the route to startAgent (F1).
+        mNsActive = false;
+        mChatMessages.removeAllViews();
+        mStreamingAgentBubble = null;
+        hideThinkingBubble();
+        clearReasoningBuffer();
+        mStopButton.setVisibility(View.GONE);
+        mEmptyChatHint.setVisibility(View.VISIBLE);
+        mSuggestionStrip.setVisibility(View.VISIBLE);
+        setStatus(profile.name + " · " + model + " ready. Type your first message.", false);
+        showChatPage();
+    }
+
+    /** Fully resolved endpoint + credential for a flow choice. Never falls
+     * back to profile leftovers for OpenCode routes (F1). */
+    private String[] nsCredentials(AiProviderProfile profile, @Nullable String route) {
+        if ("opencode".equals(profile.id) && !TextUtils.isEmpty(route)) {
+            String key = mProviderConfig.getOpenCodeRouteKey(route);
+            if (TextUtils.isEmpty(key)) key = mProviderConfig.resolveCredential(profile);
+            return new String[]{AiProviderConfig.ocRouteUrl(route), key};
+        }
+        return new String[]{mProviderConfig.getBaseUrl(profile), mProviderConfig.resolveCredential(profile)};
+    }
+
     private MaterialCardView createProviderTile(AiProviderProfile profile) {
         MaterialCardView card = new MaterialCardView(this);
         card.setCardBackgroundColor(color(R.color.ai_surface));
@@ -2772,8 +3253,9 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         card.setClickable(true);
         card.setFocusable(true);
         card.setOnClickListener(view -> {
-            if (mPickingSessionProvider) openSessionProviderSetup(profile);
-            else selectProvider(profile, true);
+            if (mNsActive) nsProviderTapped(profile);
+            else if (mPickingSessionProvider) openSessionProviderSetup(profile);
+            else openProviderConfig(profile);
         });
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         lp.setMargins(0, 0, 0, dp(10));
@@ -2805,7 +3287,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         text.addView(title);
 
         TextView body = new TextView(this);
-        body.setText(shortProviderDesc(profile));
+        body.setText(mProviderConfig == null ? shortProviderDesc(profile) : mProviderConfig.configuredSummary(profile));
         body.setTextColor(color(R.color.ai_text_muted));
         body.setTextSize(11);
         body.setMaxLines(2);
@@ -2970,17 +3452,53 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         row.addView(label);
 
         row.setOnClickListener(view -> {
-            selectProvider(profile, true);
+            openProviderConfig(profile);
             if (mDrawer != null) mDrawer.closeDrawer(findViewById(R.id.ai_drawer_panel));
         });
         return row;
+    }
+
+    /** Home-level configuration entry: opens a provider's config surface
+     * without selecting anything for chat. Chat selection lives only in
+     * the New Session flow and the in-chat switch flow. */
+    private void openProviderConfig(AiProviderProfile profile) {
+        if (profile == null) return;
+        mSelectedProfile = profile;
+        syncControlLabels();
+        mSelectedProviderIcon.setImageResource(iconForProvider(mSelectedProfile.id));
+        mSelectedProviderTitle.setText(mSelectedProfile.name);
+        mSelectedProviderBody.setText(mSelectedProfile.description);
+        if ("opencode".equals(mSelectedProfile.id)) {
+            showOpenCodeSetupPage(false);
+            return;
+        }
+        if ("openai-codex".equals(mSelectedProfile.id)) {
+            showCodexLoginDialog(false);
+            return;
+        }
+        if ("nous".equals(mSelectedProfile.id) || "github-copilot".equals(mSelectedProfile.id)
+            || "qwen-oauth".equals(mSelectedProfile.id)) {
+            showProviderLoginChooser(mSelectedProfile, false);
+            return;
+        }
+        if ("anthropic".equals(mSelectedProfile.id) || "xai".equals(mSelectedProfile.id)) {
+            showProviderLoginChooser(mSelectedProfile, false);
+            return;
+        }
+        showSetupPage();
     }
 
     private void selectProvider(@Nullable AiProviderProfile profile, boolean userInitiated) {
         mSelectedProfile = profile == null ? AiProviderProfile.firstAgentProfile() : profile;
         mProviderConfig.setSelectedProviderId(mSelectedProfile.id);
         mSelectedModel = mProviderConfig.getModel(mSelectedProfile);
-        if ("opencode".equals(mSelectedProfile.id) && (mSelectedModel == null || mSelectedModel.equals("gpt-4o") || mSelectedModel.isEmpty())) mSelectedModel = "big-pickle";
+        // F2 fix: an OpenCode default is its selected route's model, not the
+        // profile-level leftover.
+        if ("opencode".equals(mSelectedProfile.id)) {
+            String routeModel = mProviderConfig.getOpenCodeRouteModel(mProviderConfig.getOpenCodeSelectedRoute());
+            if (mSelectedModel == null || mSelectedModel.equals("gpt-4o") || mSelectedModel.isEmpty()
+                || mSelectedModel.equals(mSelectedProfile.defaultModel)) mSelectedModel = routeModel;
+        }
         syncControlLabels();
         mSelectedProviderIcon.setImageResource(iconForProvider(mSelectedProfile.id));
         mSelectedProviderTitle.setText(mSelectedProfile.name);
@@ -3065,7 +3583,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             return;
         }
         if (!mSelectedProfile.implemented) {
-            showError(mSelectedProfile.name + " is registered from katheer, but its native mobile adapter is not implemented yet.");
+            showError(mSelectedProfile.name + " is registered from khabeer, but its native mobile adapter is not implemented yet.");
             showSetupPage();
             return;
         }
@@ -3098,7 +3616,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mCurrentToolBubble = null;
         mStopButton.setVisibility(View.GONE);
         mEmptyChatHint.setVisibility(View.VISIBLE);
-        mChatTitle.setText("katheer");
+        mChatTitle.setText("khabeer");
         mChatPage.setVisibility(View.GONE);
         mSetupPanel.setVisibility(View.GONE);
         mHomePanel.setVisibility(View.VISIBLE);
@@ -3122,7 +3640,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         String workspace = validateWorkspace();
         if (profile == null || workspace == null) return;
         // Slash-skill invocation: "/skill-name extra text" loads the skill's
-        // full SKILL.md into the outgoing message (katheer skill_commands).
+        // full SKILL.md into the outgoing message (khabeer skill_commands).
         // Anything that doesn't resolve to an installed skill is sent as-is.
         String typedPrompt = prompt;
         String[] invocation = AiSkillRegistry.buildSkillInvocationMessage(prompt);
@@ -3139,13 +3657,24 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mStopButton.setVisibility(View.VISIBLE);
         if (mHasNativeSession) {
             // Session-authoritative: provider/model/credentials resolve from
-            // the session row inside the service (katheer session model).
+            // the session row inside the service (khabeer session model).
             mRuntimeService.sendPrompt(prompt, clean(mSelectedEffort), mSelectedApproval);
         } else {
-            String apiKey = mProviderConfig.resolveCredential(profile);
-            String baseUrl = mProviderConfig.getBaseUrl(profile);
-            String model = TextUtils.isEmpty(mSelectedModel) ? profile.defaultModel : mSelectedModel;
-            mRuntimeService.startAgent(profile.id, baseUrl, apiKey, workspace, prompt, model, clean(mSelectedEffort), mSelectedApproval);
+            // F1 fix: resolve route endpoint/key/model here so the FIRST
+            // turn already runs on the right route — never profile leftovers.
+            String route = null;
+            if ("opencode".equals(profile.id)) {
+                route = TextUtils.isEmpty(mSelectedRoute)
+                    ? mProviderConfig.getOpenCodeSelectedRoute() : mSelectedRoute;
+            }
+            String[] creds = nsCredentials(profile, route);
+            String model = mSelectedModel;
+            if (TextUtils.isEmpty(model)) {
+                model = "opencode".equals(profile.id)
+                    ? mProviderConfig.getOpenCodeRouteModel(route) : profile.defaultModel;
+            }
+            mRuntimeService.startAgent(profile.id, creds[0], creds[1], workspace, prompt, model,
+                clean(mSelectedEffort), mSelectedApproval, route);
         }
     }
 
@@ -3293,11 +3822,11 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
                     showModelLoadFailedDialog(profile, message);
                 });
             }
-        }, "katheer-model-catalog").start();
+        }, "khabeer-model-catalog").start();
     }
 
     // ------------------------------------------------------------------
-    // ChatGPT / Codex subscription sign-in (device code — katheer port of
+    // ChatGPT / Codex subscription sign-in (device code — khabeer port of
     // the reference codex login: request user code, user types it at
     // auth.openai.com/codex/device, poll, exchange, store Keystore secrets)
     // ------------------------------------------------------------------
@@ -3407,7 +3936,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
                         hint.setVisibility(View.VISIBLE);
                         openBrowser.setEnabled(true);
                         openBrowser.setAlpha(1f);
-                        status.setText("Type this code in the browser to authorize katheer.");
+                        status.setText("Type this code in the browser to authorize khabeer.");
                     });
                     long deadline = System.currentTimeMillis() + 15 * 60_000L;
                     while (System.currentTimeMillis() < deadline && !mCodexLoginCancelled) {
@@ -3582,7 +4111,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         box.setPadding(dp(22), dp(10), dp(22), 0);
 
         TextView status = new TextView(this);
-        status.setText("Start the sign-in, then approve katheer in your browser.");
+        status.setText("Start the sign-in, then approve khabeer in your browser.");
         status.setTextColor(color(R.color.ai_text));
         status.setTextSize(13);
         box.addView(status);
@@ -3661,7 +4190,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
                             openBrowser.setEnabled(true);
                             openBrowser.setAlpha(1f);
                         }
-                        status.setText("Approve katheer in the browser to finish signing in.");
+                        status.setText("Approve khabeer in the browser to finish signing in.");
                     });
                     long deadline = System.currentTimeMillis() + 15 * 60_000L;
                     while (System.currentTimeMillis() < deadline) {
@@ -3900,7 +4429,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         String cleanModel = model == null ? "" : model.trim();
         if (cleanModel.isEmpty()) cleanModel = profile.defaultModel;
         mSelectedModel = cleanModel;
-        // Session-scoped /model switch (katheer _persist_model_switch_to_session):
+        // Session-scoped /model switch (khabeer _persist_model_switch_to_session):
         // the model lives on the session row so resume restores this choice.
         // Provider config is only the default for NEW sessions; mutating it
         // while a session is active made one session's model bleed into
@@ -3991,7 +4520,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         }
         String workspace = validateWorkspace();
         if (workspace == null) return;
-        TermuxSession session = mTermuxService.createTermuxSession(null, null, null, workspace, false, "katheer shell");
+        TermuxSession session = mTermuxService.createTermuxSession(null, null, null, workspace, false, "khabeer shell");
         if (session == null) {
             showError("Unable to open the optional Termux shell.");
             return;
@@ -4017,7 +4546,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
 
     @Nullable
     private String validateWorkspace() {
-        String path = MobileKatheerToolExecutor.normalizeWorkspace(mWorkspaceInput.getText().toString());
+        String path = MobileKhabeerToolExecutor.normalizeWorkspace(mWorkspaceInput.getText().toString());
         if (path == null) {
             mWorkspaceInputLayout.setError("Choose a readable folder under Termux home or shared storage.");
             return null;
@@ -4045,7 +4574,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         } catch (SecurityException ignored) {
         }
         String path = pathFromTreeUri(uri);
-        if (path == null || MobileKatheerToolExecutor.normalizeWorkspace(path) == null) {
+        if (path == null || MobileKhabeerToolExecutor.normalizeWorkspace(path) == null) {
             showError("That folder is not accessible from the Termux shell.");
             return;
         }
@@ -4087,7 +4616,10 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
                 return;
             }
         }
-        mHasNativeSession = run != null && run.state != AiRunStateMachine.State.FAILED;
+        // A FAILED turn must not orphan its session: the transcript is intact
+        // and the next message retries in place. Only an explicit new-session
+        // action or archiving ends continuability.
+        mHasNativeSession = run != null && !run.archived;
         mRunActive = run != null && run.state != AiRunStateMachine.State.COMPLETED
             && run.state != AiRunStateMachine.State.FAILED
             && run.state != AiRunStateMachine.State.CANCELED;
@@ -4113,7 +4645,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     @Override
     public void onProtocolEvent(String runId, String method, JSONObject payload) {
         if (runId != null && mCurrentRunId != null && !runId.equals(mCurrentRunId)
-            && !method.contains("requestApproval") && !method.startsWith("session/")) return;
+            && !method.contains("requestApproval") && !method.startsWith("session/") && !method.startsWith("memory/")) return;
         if ("turn/started".equals(method)) {
             mStreamingAgentBubble = null;
             clearReasoningBuffer();
@@ -4133,6 +4665,26 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             appendAgentDelta(payload.optString("text"));
         } else if ("item/commandExecution/outputDelta".equals(method)) {
             appendToolOutput(payload.optString("text"));
+        } else if ("turn/toolsDegraded".equals(method)) {
+            setStatus("Model rejected function calling — continuing as plain chat this turn.", true);
+        } else if ("memory/contextWarning".equals(method)) {
+            showError("Context is " + payload.optString("usage_percent", "?") + "% full. Compact this session from Memory soon.");
+        } else if ("memory/contextAutoCompact".equals(method)) {
+            setStatus("Context " + payload.optString("usage_percent", "?") + "% full — compacting automatically…", true);
+        } else if ("memory/contextAutoCompactDone".equals(method)) {
+            Toast.makeText(this, "Session compacted (now " + payload.optString("usage_percent", "?") + "% context). Memory files stay authoritative.", Toast.LENGTH_LONG).show();
+            setStatus("Session compacted.", false);
+        } else if ("memory/reviewApplied".equals(method)) {
+            String target = payload.optString("target", "memory");
+            if (payload.optBoolean("staged")) {
+                setStatus("Memory review staged writes for approval (" + target + ").", false);
+            } else if ("verbose".equals(payload.optString("mode"))) {
+                addSystemMessage("Memory updated (" + target + "):\n" + payload.optString("preview", ""));
+            } else {
+                Toast.makeText(this, "Memory updated (" + target + ")", Toast.LENGTH_SHORT).show();
+            }
+        } else if ("memory/contextUsage".equals(method)) {
+            // Tracked for the Memory page readiness card; rendered on show.
         } else if (method.contains("requestApproval")) {
             showApproval(payload);
         } else if ("mcp/status".equals(method)) {

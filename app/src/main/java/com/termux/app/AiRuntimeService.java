@@ -27,6 +27,7 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -34,7 +35,7 @@ import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
-/** Persistent native katheer-style runtime. Talks to model APIs directly and exposes Termux as tools. */
+/** Persistent native khabeer-style runtime. Talks to model APIs directly and exposes Termux as tools. */
 public final class AiRuntimeService extends Service {
 
     public interface Listener {
@@ -71,10 +72,12 @@ public final class AiRuntimeService extends Service {
     private final Handler mHandler = new Handler(Looper.getMainLooper());
     private final List<Listener> mListeners = new ArrayList<>();
     private final Map<Long, PendingApproval> mPendingApprovals = new HashMap<>();
-    private final Map<String, KatheerSessionState> mSessions = new HashMap<>();
+    private final Map<String, KhabeerSessionState> mSessions = new HashMap<>();
+    /** Sessions already warned at the 90% threshold (reset on compact/new session). */
+    private final HashSet<String> mContextWarnedSessions = new HashSet<>();
 
     private AiDatabase mDatabase;
-    private MobileKatheerToolExecutor mToolExecutor;
+    private MobileKhabeerToolExecutor mToolExecutor;
     private AiProviderConfig mProviderConfig;
     private AiMcpRegistry mMcpRegistry;
     /** Live sessions: each runs its own turns on its own worker thread, with
@@ -89,16 +92,16 @@ public final class AiRuntimeService extends Service {
     private BusyInputMode mBusyMode = BusyInputMode.INTERRUPT;
     private final Object mQueueLock = new Object();
 
-    private KatheerSessionState sessionState(String key) {
-        KatheerSessionState s = mSessions.get(key);
-        if (s == null) { s = new KatheerSessionState(); mSessions.put(key, s); }
+    private KhabeerSessionState sessionState(String key) {
+        KhabeerSessionState s = mSessions.get(key);
+        if (s == null) { s = new KhabeerSessionState(); mSessions.put(key, s); }
         return s;
     }
 
 
     /** Live sessions: each runs its own turns on its own worker thread, with
      * its own state machine, transcript and interrupt flags — parallel
-     * sessions at once (katheer: every session is self-contained). */
+     * sessions at once (khabeer: every session is self-contained). */
     private static final class RunContext {
         final AiDatabase.RunRecord record;
         AiRunStateMachine stateMachine = new AiRunStateMachine();
@@ -114,7 +117,7 @@ public final class AiRuntimeService extends Service {
         String model;
         String effort;
         String approvalPolicy;
-        /** skill_view repeat-view dedup: "name|file" -> "mtime:size" (katheer
+        /** skill_view repeat-view dedup: "name|file" -> "mtime:size" (khabeer
          * repeat-view dedup — unchanged re-reads return a stub, not content). */
         final HashMap<String, String> skillViewCache = new HashMap<>();
 
@@ -169,7 +172,7 @@ public final class AiRuntimeService extends Service {
     private void clearActiveTurn(RunContext ctx) {
         if (ctx == null) return;
         try {
-            KatheerSessionState ss = sessionState(ctx.record.sessionKey == null ? ctx.record.id : ctx.record.sessionKey);
+            KhabeerSessionState ss = sessionState(ctx.record.sessionKey == null ? ctx.record.id : ctx.record.sessionKey);
             mDatabase.clearTurnLease(ctx.record.sessionKey, ss.persistent.runGeneration);
             ctx.record.activeTurnToken = null;
             persistRun(ctx);
@@ -183,7 +186,7 @@ public final class AiRuntimeService extends Service {
             ctx.record.activeTurnToken = token;
             ctx.record.activeTurnStartedAt = System.currentTimeMillis();
             ctx.record.resumePending = false;
-            KatheerSessionState ss = sessionState(ctx.record.sessionKey == null ? ctx.record.id : ctx.record.sessionKey);
+            KhabeerSessionState ss = sessionState(ctx.record.sessionKey == null ? ctx.record.id : ctx.record.sessionKey);
             mDatabase.markTurnLease(ctx.record.sessionKey, token, ss.persistent.runGeneration);
             persistRun(ctx);
         } catch (Exception ignored) {}
@@ -215,20 +218,21 @@ public final class AiRuntimeService extends Service {
         super.onCreate();
         mDatabase = new AiDatabase(this);
         mProviderConfig = new AiProviderConfig(this);
-        mToolExecutor = new MobileKatheerToolExecutor(this);
+        mToolExecutor = new MobileKhabeerToolExecutor(this);
         mMcpRegistry = new AiMcpRegistry(mProviderConfig);
         AiMemoryStore.ensureDefaults();
-        // One-time katheer home migration; must precede MCP discovery so
+        // One-time khabeer home migration; must precede MCP discovery so
         // stored stdio paths are rewritten before any server is spawned.
-        AiSkillRegistry.migrateKatheerHome();
-        mDatabase.rewriteMcpServerDataRoot(".termuxAI", ".katheer");
+        AiSkillRegistry.migrateKhabeerHome();
+        mDatabase.rewriteMcpServerDataRoot(".termuxAI", ".khabeer");
+        mDatabase.rewriteMcpServerDataRoot(".katheer", ".khabeer");
         createNotificationChannel();
         startForeground(NOTIFICATION_ID, buildNotification());
-        // Seed bundled skills into $HOME/.katheer/skills (existing files win).
+        // Seed bundled skills into $HOME/.khabeer/skills (existing files win).
         Thread seeder = new Thread(() -> AiSkillRegistry.seedFromAssets(this), "skill-seeder");
         seeder.setDaemon(true);
         seeder.start();
-        // Late-binding MCP discovery (katheer mcp_startup): never blocks a
+        // Late-binding MCP discovery (khabeer mcp_startup): never blocks a
         // turn; discovered tools appear in the model's array on the next one.
         mMcpRegistry.probeStaleAsync(mDatabase);
         try { mDatabase.recoverInterruptedTurns(); } catch (Exception ignored) {}
@@ -314,7 +318,7 @@ public AiDatabase.RunRecord getActiveRun() {
         return mDatabase.getTranscript(runId, 500);
     }
 
-    /** Archive a session (soft hide, katheer-style). Archiving the active run
+    /** Archive a session (soft hide, khabeer-style). Archiving the active run
      * stops its turn first and drops it as the current session. */
 public void archiveRun(String runId, boolean archived) {
         AiDatabase.RunRecord target = mDatabase.getRun(runId);
@@ -333,7 +337,7 @@ public void archiveRun(String runId, boolean archived) {
 
     /** Resume a persisted session: restore its transcript into the runtime so
      * the next prompt continues that conversation. Busy turns must be stopped
-     * first — switching mid-turn would scramble history (katheer claims the
+     * first — switching mid-turn would scramble history (khabeer claims the
      * active session before any switch). */
 public void resumeRun(String runId) {
         AiDatabase.RunRecord r = mDatabase.getRun(runId);
@@ -355,11 +359,11 @@ public void resumeRun(String runId) {
     }
 
     /** Starts a true session boundary: stops any turn and drops the current
-     * run entirely so the next prompt creates a fresh session (katheer
+     * run entirely so the next prompt creates a fresh session (khabeer
      * session_reset). stopActiveRun alone keeps the run as current. */
 public void newSession() {
         // Parallel sessions: leave every live run untouched — this only moves
-        // the UI focus off the current session (katheer session boundary).
+        // the UI focus off the current session (khabeer session boundary).
         mViewed = null;
         mHandler.post(() -> {
             for (Listener listener : new ArrayList<>(mListeners)) listener.onRunChanged(null);
@@ -373,7 +377,7 @@ public boolean steerActiveTurn(String text) {
         RunContext c = mViewed;
         if (c == null || c.worker == null || !c.worker.isAlive()) return false;
         if (c.stateMachine.getState() == AiRunStateMachine.State.WAITING_APPROVAL) return false;
-        KatheerSessionState s = sessionState(c.record.sessionKey == null ? c.record.id : c.record.sessionKey);
+        KhabeerSessionState s = sessionState(c.record.sessionKey == null ? c.record.id : c.record.sessionKey);
         s.conversation.sidecarNotes.add(text);
         c.steerText = text;
         emit("turn/steered", json("text", text));
@@ -382,7 +386,15 @@ public boolean steerActiveTurn(String text) {
 
 public void startAgent(String providerId, String baseUrl, String apiKey, String workspace, String prompt,
                            String model, @Nullable String effort, @Nullable String approvalPolicy) {
-        String normalizedWorkspace = MobileKatheerToolExecutor.normalizeWorkspace(workspace);
+        startAgent(providerId, baseUrl, apiKey, workspace, prompt, model, effort, approvalPolicy, null);
+    }
+
+    /** Route-aware start (F1 fix): OpenCode sessions pin their route on the
+     * row at creation so the FIRST turn already uses the route endpoint +
+     * key, not the profile-level leftovers. */
+public void startAgent(String providerId, String baseUrl, String apiKey, String workspace, String prompt,
+                           String model, @Nullable String effort, @Nullable String approvalPolicy, @Nullable String route) {
+        String normalizedWorkspace = MobileKhabeerToolExecutor.normalizeWorkspace(workspace);
         if (normalizedWorkspace == null) {
             notifyError(null, "Choose a valid project folder first.");
             return;
@@ -396,6 +408,12 @@ public void startAgent(String providerId, String baseUrl, String apiKey, String 
             notifyError(null, "Provider endpoint and model are required.");
             return;
         }
+        if ("opencode".equals(providerId) && !TextUtils.isEmpty(route)) {
+            baseUrl = AiProviderConfig.ocRouteUrl(route);
+            String routeKey = mProviderConfig.getOpenCodeRouteKey(route);
+            if (!TextUtils.isEmpty(routeKey)) apiKey = routeKey;
+            if (TextUtils.isEmpty(model)) model = mProviderConfig.getOpenCodeRouteModel(route);
+        }
 
         // Parallel sessions: a new session starts immediately without touching
         // any other live session — they keep streaming in the background.
@@ -403,9 +421,11 @@ public void startAgent(String providerId, String baseUrl, String apiKey, String 
         AiDatabase.RunRecord record = mDatabase.createRun(providerId == null ? "native-agent" : providerId, normalizedWorkspace, sessionKey);
         record.modelOverride = model;
         record.lastResolvedModel = model;
+        if ("opencode".equals(providerId) && !TextUtils.isEmpty(route)) record.route = route;
+        mProviderConfig.setLastUsed(record.harnessId, model, record.route);
         RunContext ctx = adoptRun(record);
         mViewed = ctx;
-        KatheerSessionState ss = sessionState(sessionKey);
+        KhabeerSessionState ss = sessionState(sessionKey);
         ss.persistent.bumpGeneration();
         transition(ctx, AiRunStateMachine.State.STARTING);
         transition(ctx, AiRunStateMachine.State.CONNECTING);
@@ -417,7 +437,7 @@ private boolean handleBusyInput(String prompt, String providerId, String baseUrl
         RunContext c = mViewed;
         if (c == null) return false;
         if (mBusyMode == BusyInputMode.QUEUE) {
-            KatheerSessionState ss = sessionState(c.record.sessionKey == null ? c.record.id : c.record.sessionKey);
+            KhabeerSessionState ss = sessionState(c.record.sessionKey == null ? c.record.id : c.record.sessionKey);
             synchronized (mQueueLock) {
                 if (ss.conversation.queuedEvents.size() >= BUSY_QUEUE_MAX_PENDING) {
                     notifyError(c.record.id, "Queue full (" + BUSY_QUEUE_MAX_PENDING + "). Wait for current turn to finish.");
@@ -435,7 +455,7 @@ private boolean handleBusyInput(String prompt, String providerId, String baseUrl
 
 private void drainQueueIfNeeded(RunContext ctx) {
         if (ctx == null) return;
-        KatheerSessionState ss = sessionState(ctx.record.sessionKey == null ? ctx.record.id : ctx.record.sessionKey);
+        KhabeerSessionState ss = sessionState(ctx.record.sessionKey == null ? ctx.record.id : ctx.record.sessionKey);
         String next = null;
         synchronized (mQueueLock) {
             if (!ss.conversation.queuedEvents.isEmpty()) next = ss.conversation.queuedEvents.remove(0);
@@ -456,7 +476,7 @@ private void drainQueueIfNeeded(RunContext ctx) {
             ctx().record.activeTurnToken = token;
             ctx().record.activeTurnStartedAt = System.currentTimeMillis();
             ctx().record.resumePending = false;
-            KatheerSessionState ss = sessionState(ctx().record.sessionKey == null ? ctx().record.id : ctx().record.sessionKey);
+            KhabeerSessionState ss = sessionState(ctx().record.sessionKey == null ? ctx().record.id : ctx().record.sessionKey);
             mDatabase.markTurnLease(ctx().record.sessionKey, token, ss.persistent.runGeneration);
             persistRun();
         } catch (Exception ignored) {}
@@ -465,7 +485,7 @@ private void drainQueueIfNeeded(RunContext ctx) {
     private void clearActiveTurn() {
         if (ctx() == null) return;
         try {
-            KatheerSessionState ss = sessionState(ctx().record.sessionKey == null ? ctx().record.id : ctx().record.sessionKey);
+            KhabeerSessionState ss = sessionState(ctx().record.sessionKey == null ? ctx().record.id : ctx().record.sessionKey);
             mDatabase.clearTurnLease(ctx().record.sessionKey, ss.persistent.runGeneration);
             ctx().record.activeTurnToken = null;
             persistRun();
@@ -478,7 +498,7 @@ public void sendPrompt(String prompt, @Nullable String effort, @Nullable String 
             notifyError(null, "No active native agent session.");
             return;
         }
-        // Session-authoritative resolution (katheer _restore_session_model):
+        // Session-authoritative resolution (khabeer _restore_session_model):
         // provider, model and credentials come from the session row and the
         // provider registry, never from ambient UI state — sessions carry
         // their own provider identity.
@@ -515,10 +535,10 @@ public void sendPrompt(String prompt, @Nullable String effort, @Nullable String 
                 c.record.state = AiRunStateMachine.State.INTERRUPTING;
                 persistRun(c);
             } catch (Exception ignored) {}
-            KatheerInterruptManager.setInterrupt(true, c.worker.getId(), "steer");
+            KhabeerInterruptManager.setInterrupt(true, c.worker.getId(), "steer");
         }
         // Let the interrupted worker unwind so it can persist its partial reply
-        // before we build the next turn (mirrors katheer' orderly interrupt drain).
+        // before we build the next turn (mirrors khabeer' orderly interrupt drain).
         if (c.worker != null && c.worker.isAlive()) {
             try { c.worker.join(3000); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
         }
@@ -529,7 +549,7 @@ public void sendPrompt(String prompt, @Nullable String effort, @Nullable String 
         runTurn(c, providerId, baseUrl, apiKey, c.record.workspace, prompt, model, effort, approvalPolicy);
     }
 
-    /** Session-scoped /model switch (katheer _persist_model_switch_to_session):
+    /** Session-scoped /model switch (khabeer _persist_model_switch_to_session):
      * the model lives on the session row so resume restores it. */
 public void setSessionModel(String model) {
         RunContext c = mViewed;
@@ -537,6 +557,7 @@ public void setSessionModel(String model) {
         c.record.modelOverride = model;
         c.record.lastResolvedModel = model;
         persistRun(c);
+        mProviderConfig.setLastUsed(c.record.harnessId, model, c.record.route);
         emit("session/model", json("sessionId", c.record.id, "model", model));
     }
 
@@ -548,10 +569,11 @@ public void setSessionModel(String model) {
         c.record.modelOverride = mProviderConfig.getOpenCodeRouteModel(route);
         c.record.lastResolvedModel = c.record.modelOverride;
         persistRun(c);
+        mProviderConfig.setLastUsed(c.record.harnessId, c.record.modelOverride, route);
         emit("session/route", json("sessionId", c.record.id, "route", route));
     }
 
-    /** Session-scoped provider switch (katheer model_config.gateway_runtime):
+    /** Session-scoped provider switch (khabeer model_config.gateway_runtime):
      * the session keeps its transcript but subsequent turns run on the new
      * provider; the model resets to that provider's default. */
 public void setSessionProvider(String providerId) {
@@ -560,10 +582,22 @@ public void setSessionProvider(String providerId) {
         AiProviderProfile profile = AiProviderProfile.find(providerId);
         if (profile == null || profile.terminalOnly || !profile.implemented) return;
         c.record.harnessId = profile.id;
-        c.record.modelOverride = mProviderConfig.getModel(profile);
+        if ("opencode".equals(profile.id)) {
+            // F3 fix: an OpenCode session runs its route's model, not the
+            // profile-level leftover. Prefer the session's pinned route.
+            String route = TextUtils.isEmpty(c.record.route)
+                ? mProviderConfig.getOpenCodeSelectedRoute() : c.record.route;
+            c.record.route = route;
+            c.record.modelOverride = mProviderConfig.getOpenCodeRouteModel(route);
+        } else {
+            // F5 fix: a stale OpenCode route must not resurrect later.
+            c.record.route = null;
+            c.record.modelOverride = mProviderConfig.getModel(profile);
+        }
         if (TextUtils.isEmpty(c.record.modelOverride)) c.record.modelOverride = profile.defaultModel;
         c.record.lastResolvedModel = c.record.modelOverride;
         persistRun(c);
+        mProviderConfig.setLastUsed(c.record.harnessId, c.record.modelOverride, c.record.route);
         emit("session/provider", json("sessionId", c.record.id, "provider", profile.id));
     }
 
@@ -618,14 +652,10 @@ public void compactCurrentSessionManually() {
         mDatabase.appendEvent(runId, "memory/compactionStarted", new JSONObject().toString());
         new Thread(() -> {
             try {
-                String summary = callBackgroundCompactionSummary(fProviderId, fBaseUrl, fApiKey, fModel, runId, transcript);
-                if (TextUtils.isEmpty(summary)) throw new IllegalStateException("The provider returned an empty compaction summary.");
-                if (!summary.startsWith("[CONTEXT COMPACTION")) summary = compactionPrefix() + "\n\n" + summary.trim();
-                JSONObject result = mDatabase.compactSession(runId, summary, 20);
-                if (!result.optBoolean("success")) throw new IllegalStateException(result.optString("error", "Compaction failed."));
-                rebuildReplayFromDatabase(target);
+                JSONObject result = performCompactionBlocking(target, fProviderId, fBaseUrl, fApiKey, fModel);
                 try { mDatabase.appendEvent(runId, "memory/compactionComplete", result.toString()); } catch (Exception ignored) {}
                 persistRun(target);
+                mContextWarnedSessions.remove(runId);
                 mHandler.post(() -> {
                     for (Listener listener : new ArrayList<>(mListeners)) listener.onRunChanged(copyRun(target.record));
                 });
@@ -633,7 +663,95 @@ public void compactCurrentSessionManually() {
                 try { mDatabase.appendEvent(runId, "memory/compactionFailed", new JSONObject().put("error", e.getMessage()).toString()); } catch (Exception ignored) {}
                 notifyError(runId, e.getMessage() == null ? "Manual compaction failed." : e.getMessage());
             }
-        }, "katheer-manual-compaction").start();
+        }, "khabeer-manual-compaction").start();
+    }
+
+    /** Shared compaction core for manual (§5) and 95% automatic (§5.1)
+     * passes: structured summary → archive → replay rebuild. Runs on the
+     * caller's thread; manual callers must wrap it in a worker thread. */
+    private JSONObject performCompactionBlocking(RunContext target, String providerId, String baseUrl,
+                                                 String apiKey, String model) throws Exception {
+        String runId = target.record.id;
+        JSONArray transcript = mDatabase.getHistoricalTranscript(runId, 1000);
+        if (transcript.length() < 30) throw new IllegalStateException("This session is still small; compaction needs a longer transcript to be useful.");
+        String summary = callBackgroundCompactionSummary(providerId, baseUrl, apiKey, model, runId, transcript);
+        if (TextUtils.isEmpty(summary)) throw new IllegalStateException("The provider returned an empty compaction summary.");
+        if (!summary.startsWith("[CONTEXT COMPACTION")) summary = compactionPrefix() + "\n\n" + summary.trim();
+        JSONObject result = mDatabase.compactSession(runId, summary, 20);
+        if (!result.optBoolean("success")) throw new IllegalStateException(result.optString("error", "Compaction failed."));
+        rebuildReplayFromDatabase(target);
+        mContextWarnedSessions.remove(runId);
+        return result;
+    }
+
+    /** Model context-window estimate in tokens (mobile multi-provider
+     * heuristic; Hermes reads the model's own context_length). */
+    private static int estimateContextWindowTokens(String model) {
+        String m = model == null ? "" : model.toLowerCase(Locale.US);
+        if (m.contains("gemini") || m.contains("gpt-4.1")) return 1_000_000;
+        if (m.contains("gpt-5")) return 400_000;
+        if (m.contains("claude") || m.contains("o1") || m.contains("o3") || m.contains("o4")) return 200_000;
+        if (m.contains("gpt-4o") || m.contains("gpt-4") || m.contains("glm") || m.contains("grok")) return 128_000;
+        if (m.contains("deepseek")) return 64_000;
+        if (m.contains("qwen") || m.contains("llama") || m.contains("mistral") || m.contains("mixtral")) return 32_768;
+        return 128_000;
+    }
+
+    /** Replay usage % = replay chars/4 vs the model window. Emitted every
+     * turn so the Memory page readiness card stays live. */
+    private int contextUsagePercent(RunContext ctx, String model) {
+        int window = Math.max(4096, estimateContextWindowTokens(model));
+        long chars = 0;
+        try {
+            if (ctx != null && ctx.chatMessages != null) {
+                for (int i = 0; i < ctx.chatMessages.length(); i++) {
+                    JSONObject msg = ctx.chatMessages.optJSONObject(i);
+                    if (msg != null) chars += msg.optString("content", "").length();
+                }
+            }
+        } catch (Exception ignored) {}
+        return (int) Math.min(100, (chars / 4 * 100L) / window);
+    }
+
+    /** §5.1 gate, called after the user turn is appended and before the
+     * model call is built: warn at 90%, single auto-compact at 95%.
+     * Returns false when the turn must not proceed. */
+    private boolean enforceContextGate(RunContext ctx, String providerId, String baseUrl, String apiKey, String model) {
+        if (ctx == null || ctx.record == null || mProviderConfig == null) return true;
+        String runId = ctx.record.id;
+        int pct = contextUsagePercent(ctx, model);
+        int warnAt = mProviderConfig.getMemoryWarnPct();
+        int autoAt = Math.max(warnAt, mProviderConfig.getMemoryAutoPct());
+        emit("memory/contextUsage", json("usage_percent", String.valueOf(pct)));
+        try {
+            mDatabase.appendEvent(runId, "memory/contextUsage",
+                new JSONObject().put("usage_percent", pct).put("model", model == null ? "" : model).toString());
+        } catch (Exception ignored) {}
+        if (pct < warnAt) return true;
+        if (pct < autoAt) {
+            if (!mContextWarnedSessions.contains(runId)) {
+                mContextWarnedSessions.add(runId);
+                emit("memory/contextWarning", json("usage_percent", String.valueOf(pct)));
+                notifyError(runId, "Context is " + pct + "% full. Compact this session from Memory soon — turns continue for now.");
+            }
+            return true;
+        }
+        emit("memory/contextAutoCompact", json("usage_percent", String.valueOf(pct)));
+        try {
+            mDatabase.appendEvent(runId, "memory/contextAutoCompact",
+                new JSONObject().put("usage_percent", pct).toString());
+        } catch (Exception ignored) {}
+        try {
+            performCompactionBlocking(ctx, providerId, baseUrl, apiKey, model);
+            emit("memory/contextAutoCompactDone", json("usage_percent",
+                String.valueOf(contextUsagePercent(ctx, model))));
+            return true;
+        } catch (Exception e) {
+            failRun("Context is " + pct + "% full and automatic compaction failed (" +
+                (e.getMessage() == null ? "unknown error" : e.getMessage()) +
+                "). Start a new session to continue.");
+            return false;
+        }
     }
 
     private void rebuildReplayFromDatabase(RunContext ctx) {
@@ -658,7 +776,7 @@ public void compactCurrentSessionManually() {
     }
 
     /**
-     * katheer-style interrupt checkpoint: when the previous turn was cut off
+     * khabeer-style interrupt checkpoint: when the previous turn was cut off
      * mid-response, wrap the user's follow-up in a scaffold that tells the
      * model its own reply was interrupted and shows the visible text it had
      * produced, so "continue" has full context.
@@ -681,7 +799,7 @@ public void stopActiveRun() {
     private void stopRun(RunContext ctx) {
         if (ctx == null) return;
         ctx.stopRequested = true;
-        if (ctx.worker != null) KatheerInterruptManager.setInterrupt(true, ctx.worker.getId(), "stop");
+        if (ctx.worker != null) KhabeerInterruptManager.setInterrupt(true, ctx.worker.getId(), "stop");
         cancelApprovalsFor(ctx.record.id);
         if (ctx.worker != null) ctx.worker.interrupt();
         if (!isTerminal(ctx)) {
@@ -706,7 +824,7 @@ public void interruptActiveRun() {
         RunContext c = mViewed;
         if (c == null || c.worker == null) { stopActiveRun(); return; }
         c.stopRequested = true;
-        KatheerInterruptManager.setInterrupt(true, c.worker.getId(), "interrupt");
+        KhabeerInterruptManager.setInterrupt(true, c.worker.getId(), "interrupt");
         try { c.stateMachine.transition(AiRunStateMachine.State.INTERRUPTING); c.record.state = AiRunStateMachine.State.INTERRUPTING; persistRun(c); } catch (Exception ignored) {}
         emit("turn/interrupted", json("reason", "user"));
     }
@@ -754,7 +872,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         if (ctx.worker != null) ctx.worker.interrupt();
         String tag = ctx.record.id == null ? "runtime" : ctx.record.id.substring(0, Math.min(8, ctx.record.id.length()));
         ctx.worker = new Thread(() -> executeTurn(ctx, providerId, baseUrl, apiKey, workspace,
-            prompt == null ? "" : prompt, model, effort, approvalPolicy), "katheer-" + tag);
+            prompt == null ? "" : prompt, model, effort, approvalPolicy), "khabeer-" + tag);
         ctx.worker.start();
     }
 
@@ -767,10 +885,13 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         ctx.model = model;
         ctx.effort = effort;
         ctx.approvalPolicy = approvalPolicy;
-        KatheerInterruptManager.clearCurrentThread();
-        KatheerInterruptManager.setInterrupt(false, Thread.currentThread().getId(), null);
-        // A continuation after CANCELED needs a fresh machine (FSM has no CANCELED->RUNNING).
+        KhabeerInterruptManager.clearCurrentThread();
+        KhabeerInterruptManager.setInterrupt(false, Thread.currentThread().getId(), null);
+        // A continuation after CANCELED/FAILED needs a fresh machine (the FSM
+        // has no CANCELED->RUNNING or FAILED->RUNNING edge). Retrying in the
+        // same session preserves the transcript instead of orphaning it.
         if (ctx() == null || ctx().stateMachine.getState() == AiRunStateMachine.State.CANCELED
+            || ctx().stateMachine.getState() == AiRunStateMachine.State.FAILED
             || ctx().stateMachine.getState() == AiRunStateMachine.State.CREATED) {
             ctx().stateMachine = new AiRunStateMachine();
             try { ctx().stateMachine.transition(AiRunStateMachine.State.STARTING); ctx().stateMachine.transition(AiRunStateMachine.State.CONNECTING); } catch (Exception ignored) {}
@@ -784,6 +905,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         JSONArray input;
         try {
             appendUserTurnToHistory(ctx, prompt);
+            if (!enforceContextGate(ctx, providerId, baseUrl, apiKey, model)) return;
             input = toResponsesInput(ctx.chatMessages);
         } catch (Exception e) {
             input = new JSONArray();
@@ -804,7 +926,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
                 executeAnthropicTurn(ctx, providerId, baseUrl, apiKey, workspace, prompt, model, approvalPolicy);
                 return;
             }
-            for (int step = 0; step < MAX_MODEL_STEPS && !ctx().stopRequested && !KatheerInterruptManager.isInterrupted(); step++) {
+            for (int step = 0; step < MAX_MODEL_STEPS && !ctx().stopRequested && !KhabeerInterruptManager.isInterrupted(); step++) {
                 JSONObject response = callResponsesApiWithRetry(providerId, baseUrl, apiKey, model, effort, input);
                 JSONArray outputs = response.optJSONArray("output");
                 boolean hasToolCall = false;
@@ -859,16 +981,16 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
                 }
             }
 
-        if (!ctx().stopRequested && !KatheerInterruptManager.isInterrupted()) failRun("The native agent reached its tool-step limit before finishing.");
-            else if (KatheerInterruptManager.isInterrupted()) { emit("turn/interrupted", json("reason", KatheerInterruptManager.getReason())); ctx().lastTurnInterrupted = true; clearActiveTurn(); }
+        if (!ctx().stopRequested && !KhabeerInterruptManager.isInterrupted()) failRun("The native agent reached its tool-step limit before finishing.");
+            else if (KhabeerInterruptManager.isInterrupted()) { emit("turn/interrupted", json("reason", KhabeerInterruptManager.getReason())); ctx().lastTurnInterrupted = true; clearActiveTurn(); }
             else { ctx().lastTurnInterrupted = true; clearActiveTurn(); }
             drainQueueIfNeeded(ctx);
         } catch (Exception e) {
-            if (!ctx().stopRequested && !KatheerInterruptManager.isInterrupted()) {
+            if (!ctx().stopRequested && !KhabeerInterruptManager.isInterrupted()) {
                 if (isNetworkError(e)) { transitionWithFallback(AiRunStateMachine.State.DISCONNECTED); failRun(e.getMessage() == null ? e.toString() : e.getMessage()); }
                 else failRun(e.getMessage() == null ? e.toString() : e.getMessage());
             } else { emit("turn/interrupted", json("reason", "cancel")); ctx().lastTurnInterrupted = true; clearActiveTurn(); }
-        } finally { KatheerInterruptManager.clearCurrentThread(); mTurnContext.remove(); }
+        } finally { KhabeerInterruptManager.clearCurrentThread(); mTurnContext.remove(); }
     }
 
     /** Single owner for user-turn mutation. Provider adapters must only
@@ -913,7 +1035,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         return builder.toString();
     }
 
-    /** Convert the chat-format history into Responses-API input items (full replay, katheer-style). */
+    /** Convert the chat-format history into Responses-API input items (full replay, khabeer-style). */
     private JSONArray toResponsesInput(JSONArray messages) throws Exception {
         JSONArray input = new JSONArray();
         for (int i = 0; i < messages.length(); i++) {
@@ -989,7 +1111,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         }
 
         try {
-            for (int step = 0; step < MAX_MODEL_STEPS && !ctx().stopRequested && !KatheerInterruptManager.isInterrupted(); step++) {
+            for (int step = 0; step < MAX_MODEL_STEPS && !ctx().stopRequested && !KhabeerInterruptManager.isInterrupted(); step++) {
                 JSONObject response = callCodexApiWithRetry(model, effort, input);
                 JSONArray outputs = response.optJSONArray("output");
                 boolean hasToolCall = false;
@@ -1053,11 +1175,11 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
                     return;
                 }
             }
-            if (!ctx().stopRequested && !KatheerInterruptManager.isInterrupted()) failRun("The Codex agent reached its tool-step limit before finishing.");
+            if (!ctx().stopRequested && !KhabeerInterruptManager.isInterrupted()) failRun("The Codex agent reached its tool-step limit before finishing.");
             else { ctx().lastTurnInterrupted = true; clearActiveTurn(); }
             drainQueueIfNeeded(ctx);
         } catch (Exception e) {
-            if (!ctx().stopRequested && !KatheerInterruptManager.isInterrupted()) failRun(e.getMessage() == null ? e.toString() : e.getMessage());
+            if (!ctx().stopRequested && !KhabeerInterruptManager.isInterrupted()) failRun(e.getMessage() == null ? e.toString() : e.getMessage());
             else { emit("turn/interrupted", json("reason", "cancel")); ctx().lastTurnInterrupted = true; clearActiveTurn(); }
         }
     }
@@ -1077,7 +1199,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
                 String msg = e.getMessage() == null ? "" : e.getMessage();
                 boolean retryable = msg.contains("HTTP 429") || msg.contains("HTTP 5");
                 if (attempt < maxRetries && retryable && !ctx().stopRequested) {
-                    long backoff = KatheerRetry.jitteredBackoff(attempt, 1000, 8000);
+                    long backoff = KhabeerRetry.jitteredBackoff(attempt, 1000, 8000);
                     try { Thread.sleep(backoff); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); throw ie; }
                     continue;
                 }
@@ -1119,8 +1241,8 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         connection.setRequestProperty("Content-Type", "application/json");
         connection.setRequestProperty("Accept", "text/event-stream");
         connection.setRequestProperty("Authorization", "Bearer " + token);
-        connection.setRequestProperty("originator", "katheer-agent");
-        connection.setRequestProperty("User-Agent", "KatheerAgent/1.0");
+        connection.setRequestProperty("originator", "khabeer-agent");
+        connection.setRequestProperty("User-Agent", "KhabeerAgent/1.0");
         connection.setRequestProperty("x-client-request-id", java.util.UUID.randomUUID().toString());
         if (!TextUtils.isEmpty(accountId)) connection.setRequestProperty("ChatGPT-Account-Id", accountId);
         try (OutputStream output = connection.getOutputStream()) {
@@ -1372,7 +1494,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         refreshReplayHistory(ctx);
 
         try {
-            for (int step = 0; step < MAX_MODEL_STEPS && !ctx().stopRequested && !KatheerInterruptManager.isInterrupted(); step++) {
+            for (int step = 0; step < MAX_MODEL_STEPS && !ctx().stopRequested && !KhabeerInterruptManager.isInterrupted(); step++) {
                 JSONObject response = callAnthropicApi(providerId, baseUrl, apiKey, model, ctx().chatMessages);
                 JSONArray content = response.optJSONArray("content");
                 StringBuilder textBuilder = new StringBuilder();
@@ -1419,12 +1541,12 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
                     if (ctx() != null) { ctx().record.chatMessagesJson = ctx().chatMessages.toString(); persistRun(); }
                 }
             }
-            if (!ctx().stopRequested && !KatheerInterruptManager.isInterrupted())
+            if (!ctx().stopRequested && !KhabeerInterruptManager.isInterrupted())
                 failRun("The Anthropic-dialect agent reached its tool-step limit before finishing.");
             else { ctx().lastTurnInterrupted = true; clearActiveTurn(); }
             drainQueueIfNeeded(ctx);
         } catch (Exception e) {
-            if (!ctx().stopRequested && !KatheerInterruptManager.isInterrupted()) failRun(e.getMessage() == null ? e.toString() : e.getMessage());
+            if (!ctx().stopRequested && !KhabeerInterruptManager.isInterrupted()) failRun(e.getMessage() == null ? e.toString() : e.getMessage());
             else { emit("turn/interrupted", json("reason", "cancel")); ctx().lastTurnInterrupted = true; clearActiveTurn(); }
         }
     }
@@ -1544,7 +1666,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
                 String msg = e.getMessage() == null ? "" : e.getMessage();
                 boolean retryable = msg.contains("HTTP 429") || msg.contains("HTTP 5");
                 if (attempt < maxRetries && retryable && !ctx().stopRequested) {
-                    long backoff = KatheerRetry.jitteredBackoff(attempt, 1000, 8000);
+                    long backoff = KhabeerRetry.jitteredBackoff(attempt, 1000, 8000);
                     try { Thread.sleep(backoff); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); throw ie; }
                     continue;
                 }
@@ -1560,8 +1682,8 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
             ctx().chatMessages = new JSONArray();
         refreshReplayHistory(ctx);
 
-        for (int step = 0; step < MAX_MODEL_STEPS && !ctx().stopRequested && !KatheerInterruptManager.isInterrupted(); step++) {
-            JSONObject response = callChatCompletionsApi(providerId, baseUrl, apiKey, model, ctx().chatMessages);
+        for (int step = 0; step < MAX_MODEL_STEPS && !ctx().stopRequested && !KhabeerInterruptManager.isInterrupted(); step++) {
+            JSONObject response = callChatCompletionsApiWithRetry(providerId, baseUrl, apiKey, model, ctx().chatMessages);
             JSONArray choices = response.optJSONArray("choices");
             JSONObject choice = choices == null ? null : choices.optJSONObject(0);
             JSONObject message = choice == null ? null : choice.optJSONObject("message");
@@ -1600,13 +1722,13 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
             }
         }
 
-        if (!ctx().stopRequested && !KatheerInterruptManager.isInterrupted()) failRun("The chat-completions agent reached its tool-step limit before finishing.");
+        if (!ctx().stopRequested && !KhabeerInterruptManager.isInterrupted()) failRun("The chat-completions agent reached its tool-step limit before finishing.");
         else { ctx().lastTurnInterrupted = true; clearActiveTurn(); }
         drainQueueIfNeeded(ctx);
     }
 
     /**
-     * katheer-style replay cleanup (agent/replay_cleanup.py): a turn killed
+     * khabeer-style replay cleanup (agent/replay_cleanup.py): a turn killed
      * mid-tool-loop can leave a trailing assistant(tool_calls) with NO tool
      * answers. Replaying that dangling tail makes the model re-issue the call
      * or lose the plot. Synthesize orphan-recovery tool results so the model
@@ -1648,14 +1770,59 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         ctx().chatMessages = cleaned;
     }
 
-    private JSONObject callChatCompletionsApi(String providerId, String baseUrl, String apiKey, String model,
-                                              JSONArray messages) throws Exception {
+    /** Chat-completions request body. Some free-tier models 500 on function
+     * calling, so the tools block must be omittable (last-resort plain
+     * retry) — never send an empty tools array with tool_choice. */
+    static JSONObject chatCompletionsBody(String model, JSONArray messages, @Nullable JSONArray tools) throws Exception {
         JSONObject body = new JSONObject()
             .put("model", model)
             .put("messages", messages)
-            .put("tools", modelTools(true))
-            .put("tool_choice", "auto")
             .put("stream", true);
+        if (tools != null && tools.length() > 0) {
+            body.put("tools", tools).put("tool_choice", "auto");
+        }
+        return body;
+    }
+
+    /** Retried chat-completions call (429 + 5xx, like the other dialects).
+     * If 5xx persists with tools attached, one final attempt goes out as a
+     * plain completion: a reply without tool use beats a dead turn on
+     * models whose function-calling path is broken. */
+    private JSONObject callChatCompletionsApiWithRetry(String providerId, String baseUrl, String apiKey, String model,
+                                                       JSONArray messages) throws Exception {
+        int maxRetries = 3;
+        Exception last = null;
+        for (int attempt = 0; attempt <= maxRetries; attempt++) {
+            try {
+                return callChatCompletionsApi(providerId, baseUrl, apiKey, model, messages, true);
+            } catch (Exception e) {
+                last = e;
+                String msg = e.getMessage() == null ? "" : e.getMessage();
+                boolean retryable = msg.contains("HTTP 429") || msg.contains("HTTP 5");
+                if (attempt < maxRetries && retryable && ctx() != null && !ctx().stopRequested) {
+                    long backoff = KhabeerRetry.jitteredBackoff(attempt, 1000, 8000);
+                    try { Thread.sleep(backoff); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); throw ie; }
+                    continue;
+                }
+                break;
+            }
+        }
+        String lastMsg = last == null || last.getMessage() == null ? "" : last.getMessage();
+        if (lastMsg.contains("HTTP 5") && ctx() != null && !ctx().stopRequested) {
+            emit("turn/toolsDegraded", json("reason", "function-calling rejected; retrying as plain completion"));
+            try {
+                return callChatCompletionsApi(providerId, baseUrl, apiKey, model, messages, false);
+            } catch (Exception plainFailed) {
+                throw last;
+            }
+        }
+        if (last != null) throw last;
+        throw new IllegalStateException("chat completions retry exhausted");
+    }
+
+    private JSONObject callChatCompletionsApi(String providerId, String baseUrl, String apiKey, String model,
+                                              JSONArray messages, boolean withTools) throws Exception {
+        JSONObject body = chatCompletionsBody(model, messages, withTools ? modelTools(true) : null);
 
         HttpURLConnection connection = (HttpURLConnection) new URL(chatCompletionsUrl(baseUrl)).openConnection();
         connection.setRequestMethod("POST");
@@ -1665,7 +1832,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         connection.setRequestProperty("Content-Type", "application/json");
         connection.setRequestProperty("Accept", "text/event-stream");
         if (!TextUtils.isEmpty(apiKey)) connection.setRequestProperty("Authorization", "Bearer " + apiKey);
-        connection.setRequestProperty("X-Title", "Termux katheer");
+        connection.setRequestProperty("X-Title", "Termux khabeer");
         if ("github-copilot".equals(providerId)) {
             for (int i = 0; i < ProviderLogin.COPILOT_REQUEST_HEADERS.length; i += 2)
                 connection.setRequestProperty(ProviderLogin.COPILOT_REQUEST_HEADERS[i], ProviderLogin.COPILOT_REQUEST_HEADERS[i + 1]);
@@ -1681,18 +1848,15 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
             && contentType.toLowerCase(Locale.US).contains("text/event-stream"))
             return readChatCompletionsStream(stream);
         String text = readFully(stream);
-        if (code < 200 || code >= 300) return callChatCompletionsApiBuffered(baseUrl, apiKey, model, messages);
+        if (code < 200 || code >= 300) return callChatCompletionsApiBuffered(baseUrl, apiKey, model, messages, withTools);
         if (text.trim().startsWith("data:")) return readChatCompletionsStream(text);
         return new JSONObject(text);
     }
 
     private JSONObject callChatCompletionsApiBuffered(String baseUrl, String apiKey, String model,
-                                                      JSONArray messages) throws Exception {
-        JSONObject body = new JSONObject()
-            .put("model", model)
-            .put("messages", messages)
-            .put("tools", modelTools(true))
-            .put("tool_choice", "auto");
+                                                      JSONArray messages, boolean withTools) throws Exception {
+        JSONObject body = chatCompletionsBody(model, messages, withTools ? modelTools(true) : null);
+        body.remove("stream");
 
         HttpURLConnection connection = (HttpURLConnection) new URL(chatCompletionsUrl(baseUrl)).openConnection();
         connection.setRequestMethod("POST");
@@ -1701,7 +1865,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         connection.setDoOutput(true);
         connection.setRequestProperty("Content-Type", "application/json");
         if (!TextUtils.isEmpty(apiKey)) connection.setRequestProperty("Authorization", "Bearer " + apiKey);
-        connection.setRequestProperty("X-Title", "Termux katheer");
+        connection.setRequestProperty("X-Title", "Termux khabeer");
         try (OutputStream output = connection.getOutputStream()) {
             output.write(body.toString().getBytes(StandardCharsets.UTF_8));
         }
@@ -1858,7 +2022,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         return CHAT_COMPLETIONS_PROVIDERS.contains(providerId);
     }
 
-    /** Providers that speak OpenAI chat completions (katheer dialect table:
+    /** Providers that speak OpenAI chat completions (khabeer dialect table:
      * most aggregators and OpenAI-compatible clouds; openai/openrouter/xai
      * speak Responses, anthropic-family speak Messages). */
     private static final java.util.Set<String> CHAT_COMPLETIONS_PROVIDERS = new java.util.HashSet<>(java.util.Arrays.asList(
@@ -1895,8 +2059,8 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         connection.setRequestProperty("Content-Type", "application/json");
         connection.setRequestProperty("Authorization", "Bearer " + apiKey);
         if ("openrouter".equals(providerId)) {
-            connection.setRequestProperty("HTTP-Referer", "https://termux.local/katheer");
-            connection.setRequestProperty("X-Title", "Termux katheer");
+            connection.setRequestProperty("HTTP-Referer", "https://termux.local/khabeer");
+            connection.setRequestProperty("X-Title", "Termux khabeer");
         }
         try (OutputStream output = connection.getOutputStream()) {
             output.write(body.toString().getBytes(StandardCharsets.UTF_8));
@@ -1942,7 +2106,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
                 .put("parameters", flat.getJSONObject("parameters")));
     }
 
-    /** Every tool the model can call: terminal + skills + MCP tools (katheer
+    /** Every tool the model can call: terminal + skills + MCP tools (khabeer
      * merges all tools flat into one array — no wrapper tool). */
     private JSONArray modelTools(boolean chatShape) throws Exception {
         JSONArray tools = new JSONArray();
@@ -2078,7 +2242,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
             .put("name", "skill_manage")
             .put("description", "Create, update, or delete skills — your procedural memory for recurring task types. "
                 + "The call is an operations array (a single edit is a list of one); it applies atomically — any failure rolls "
-                + "every touched skill back. Ops: create (full SKILL.md; lands in $HOME/.katheer/skills/; must precede that "
+                + "every touched skill back. Ops: create (full SKILL.md; lands in $HOME/.khabeer/skills/; must precede that "
                 + "skill's other ops), patch (targeted old_string/new_string fix — preferred; content alone REPLACES the whole "
                 + "file, read it via skill_view() first), write_file/remove_file (supporting files), delete (sole op only). "
                 + "Every write asks the user for approval first. Keep the description's first 57 chars a self-contained "
@@ -2318,7 +2482,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
 
     /** skills_list/skill_view run locally (no approval, no shell): read-only
      * filesystem access. skill_manage MUTATES the skills root, so it gates
-     * through the approval dialog before any write (katheer write-gate). */
+     * through the approval dialog before any write (khabeer write-gate). */
     private String runSkillsTool(String name, JSONObject args, @Nullable String approvalPolicy) {
         String displayName;
         if ("skill_view".equals(name)) displayName = args.optString("name", "skill_view");
@@ -2373,9 +2537,9 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
     }
 
     /**
-     * MCP tool dispatch (katheer mcp tool handlers). Untrusted servers gate
+     * MCP tool dispatch (khabeer mcp tool handlers). Untrusted servers gate
      * through the approval dialog BEFORE any network call — fail-closed, the
-     * same trust model katheer applies to write-capable tools.
+     * same trust model khabeer applies to write-capable tools.
      */
     private String runMcpToolCall(String registryName, JSONObject args, @Nullable String approvalPolicy) {
         AiMcpRegistry.ToolDef def = mMcpRegistry.findTool(registryName);
@@ -2506,11 +2670,11 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
 
     private boolean requestApproval(String command, String workspace) throws InterruptedException {
         if (ctx() == null) return false;
-        KatheerInterruptManager.clearCurrentThread();
+        KhabeerInterruptManager.clearCurrentThread();
         long id = mNextRequestId++;
         PendingApproval approval = new PendingApproval(ctx().record.id);
         mPendingApprovals.put(id, approval);
-        KatheerSessionState ss = sessionState(ctx().record.sessionKey == null ? ctx().record.id : ctx().record.sessionKey);
+        KhabeerSessionState ss = sessionState(ctx().record.sessionKey == null ? ctx().record.id : ctx().record.sessionKey);
         ss.persistent.pendingApproval = command;
         transition(AiRunStateMachine.State.WAITING_APPROVAL);
         JSONObject payload = new JSONObject();
@@ -2657,7 +2821,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
     /**
      * Rebuilds the system message at the start of every turn: new skills,
      * toggles and provider changes must reach EXISTING sessions too — the
-     * persisted transcript carries a frozen copy otherwise (katheer rebuilds
+     * persisted transcript carries a frozen copy otherwise (khabeer rebuilds
      * its prompt per turn behind a cache for the same reason).
      */
     private void refreshSystemMessage() {
@@ -2716,7 +2880,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
     private void maybeRunMemoryReview(RunContext source) {
         if (source == null || source.record == null || mProviderConfig == null) return;
         if (!mProviderConfig.isMemoryNudgeEnabled() || !mProviderConfig.isAnyBuiltInMemoryEnabled()) return;
-        int userTurns = mDatabase.countUserMessages(source.record.id);
+        int userTurns = mDatabase.countAllUserMessages(source.record.id);
         int interval = mProviderConfig.getMemoryNudgeInterval();
         if (userTurns <= 0 || userTurns % interval != 0) return;
 
@@ -2753,7 +2917,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
             } catch (Exception e) {
                 try { mDatabase.appendEvent(runId, "memory/reviewSkipped", new JSONObject().put("error", e.getMessage()).toString()); } catch (Exception ignored) {}
             }
-        }, "katheer-memory-review").start();
+        }, "khabeer-memory-review").start();
     }
 
     private void applyReviewOps(String runId, JSONObject args, boolean approval, boolean memoryEnabled, boolean userEnabled) throws Exception {
@@ -2763,11 +2927,33 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
             ? AiMemoryStore.stageWrite(args, "background_review").toString()
             : AiMemoryStore.tool(args, memoryEnabled, userEnabled);
         mDatabase.appendEvent(runId, "memory/reviewResult", new JSONObject(result).toString());
+        if (mProviderConfig == null || !new JSONObject(result).optBoolean("success")) return;
+        String mode = mProviderConfig.getMemoryNotifyMode();
+        if ("off".equals(mode)) return;
+        JSONObject notice = new JSONObject()
+            .put("mode", mode)
+            .put("target", args.optString("target", "memory"))
+            .put("staged", approval)
+            .put("usage", new JSONObject(result).optString("usage", ""));
+        if ("verbose".equals(mode)) {
+            StringBuilder previews = new StringBuilder();
+            for (int i = 0; i < Math.min(3, ops.length()); i++) {
+                JSONObject op = ops.optJSONObject(i);
+                if (op == null) continue;
+                String action = op.optString("action", "add");
+                String text = "remove".equals(action) ? op.optString("old_text", "") : op.optString("content", op.optString("new_text", ""));
+                if (text.length() > ("remove".equals(action) ? 60 : 120)) text = text.substring(0, "remove".equals(action) ? 60 : 120) + "…";
+                if (previews.length() > 0) previews.append("\n");
+                previews.append(("add".equals(action) ? "➕ " : "remove".equals(action) ? "➖ " : "✏️ ")).append(text);
+            }
+            notice.put("preview", previews.toString());
+        }
+        emit("memory/reviewApplied", notice);
     }
 
     private String callBackgroundMemoryReview(String providerId, String baseUrl, String apiKey, String model, JSONArray transcript,
                                               boolean memoryEnabled, boolean userEnabled) throws Exception {
-        String prompt = "You are the katheer background memory reviewer. Inspect the recent transcript and return ONLY JSON. " +
+        String prompt = "You are the khabeer background memory reviewer. Inspect the recent transcript and return ONLY JSON. " +
             "If nothing durable should be saved, return {\"operations\":[]}. " +
             "Otherwise return {\"operations\":[{\"target\":\"memory|user\",\"action\":\"add|replace|remove\",\"content\":\"...\",\"old_text\":\"...\"}]}. " +
             "Save user preferences/corrections/profile to user. Save stable environment/project/tool lessons to memory. " +
@@ -2780,7 +2966,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
 
     private String callBackgroundCompactionSummary(String providerId, String baseUrl, String apiKey, String model,
                                                    String sessionId, JSONArray transcript) throws Exception {
-        String prompt = "You are generating a manual Hermes-style context compaction checkpoint for katheer mobile. " +
+        String prompt = "You are generating a manual Hermes-style context compaction checkpoint for khabeer mobile. " +
             "Return the final summary text only. Do not include JSON, markdown fences, commentary, or apologies.\n\n" +
             "The summary MUST begin exactly with this prefix:\n" + compactionPrefix() + "\n\n" +
             "Then include these sections exactly, in this order:\n" +
@@ -2893,7 +3079,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         c.setDoOutput(true);
         c.setRequestProperty("Content-Type", "application/json");
         if (!TextUtils.isEmpty(apiKey)) c.setRequestProperty("Authorization", "Bearer " + apiKey);
-        c.setRequestProperty("X-Title", "Termux katheer");
+        c.setRequestProperty("X-Title", "Termux khabeer");
         if ("github-copilot".equals(providerId)) {
             for (int i = 0; i < ProviderLogin.COPILOT_REQUEST_HEADERS.length; i += 2)
                 c.setRequestProperty(ProviderLogin.COPILOT_REQUEST_HEADERS[i], ProviderLogin.COPILOT_REQUEST_HEADERS[i + 1]);
@@ -3039,7 +3225,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
 
     private final java.util.concurrent.atomic.AtomicBoolean mTitleBusy = new java.util.concurrent.atomic.AtomicBoolean(false);
 
-    /** AI session titles (katheer title_generator): a one-shot model call that
+    /** AI session titles (khabeer title_generator): a one-shot model call that
      * names the session after its opening exchange. Message-derived titles
      * are regenerated; AI titles are never touched. */
     /** Synchronous single-session titler for the backfill queue. Returns

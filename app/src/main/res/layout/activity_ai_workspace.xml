@@ -26,7 +26,7 @@
                 android:layout_width="36dp"
                 android:layout_height="36dp"
                 android:background="@drawable/bg_ai_harness_badge"
-                android:src="@drawable/ic_katheer_logo"
+                android:src="@drawable/ic_khabeer_logo"
                 android:padding="6dp" />
 
             <LinearLayout
@@ -37,7 +37,7 @@
                 android:orientation="vertical">
 
                 <TextView
-                    android:text="katheer"
+                    android:text="khabeer"
                     android:textColor="@color/ai_text"
                     android:textSize="14sp"
                     android:textStyle="bold"

@@ -29,11 +29,11 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Skills registry (katheer skills_tool/skill_utils port).
+ * Skills registry (khabeer skills_tool/skill_utils port).
  *
  * A skill is a directory containing SKILL.md (YAML frontmatter + markdown
  * body) plus optional support dirs (references/templates/assets/scripts).
- * Skills live at $HOME/.katheer/skills — one folder per skill, optionally
+ * Skills live at $HOME/.khabeer/skills — one folder per skill, optionally
  * grouped by a category folder, so they can be synced with git.
  *
  * Progressive disclosure: only a name+description index reaches the system
@@ -91,19 +91,24 @@ public final class AiSkillRegistry {
     // ------------------------------------------------------------------
 
     public static File skillsRoot() {
-        return new File(TermuxConstants.TERMUX_HOME_DIR_PATH, ".katheer/skills");
+        return new File(TermuxConstants.TERMUX_HOME_DIR_PATH, ".khabeer/skills");
     }
 
     private static File dataRoot() {
-        return new File(TermuxConstants.TERMUX_HOME_DIR_PATH, ".katheer");
+        return new File(TermuxConstants.TERMUX_HOME_DIR_PATH, ".khabeer");
     }
 
-    /** Pre-branding data root (skills, MCP helpers); migrated once to .katheer. */
+    /** Pre-branding data root (skills, MCP helpers); migrated once to .khabeer. */
     private static File legacyDataRoot() {
         return new File(TermuxConstants.TERMUX_HOME_DIR_PATH, ".termuxAI");
     }
 
-    /** Pre-.termuxAI location; migrated once to the katheer root. */
+    /** Previous brand data root; migrated once to .khabeer. */
+    private static File legacyKhabeerRoot() {
+        return new File(TermuxConstants.TERMUX_HOME_DIR_PATH, ".katheer");
+    }
+
+    /** Pre-.termuxAI location; migrated once to the khabeer root. */
     private static File legacySkillsRoot() {
         return new File(TermuxConstants.TERMUX_HOME_DIR_PATH, ".hermes/skills");
     }
@@ -216,7 +221,7 @@ public final class AiSkillRegistry {
 
     /**
      * Minimal frontmatter parser: top-level `key: value` lines with optional
-     * quotes and inline lists ([a, b] or a, b). The same naive fallback katheer
+     * quotes and inline lists ([a, b] or a, b). The same naive fallback khabeer
      * uses when a full YAML loader is unavailable.
      */
     private static void parseFrontmatter(String yaml, Skill skill) {
@@ -259,7 +264,7 @@ public final class AiSkillRegistry {
         return v;
     }
 
-    /** katheer platform gate: empty platforms = all; "linux" matches Android. */
+    /** khabeer platform gate: empty platforms = all; "linux" matches Android. */
     private static boolean platformSupported(List<String> platforms) {
         if (platforms == null || platforms.isEmpty()) return true;
         for (String p : platforms) {
@@ -406,7 +411,7 @@ public final class AiSkillRegistry {
     /**
      * @param dedup per-session map of "name|file" -> "mtime:size"; when the
      *        same unchanged file is requested again the stub teaches the model
-     *        to reuse the copy already in context (katheer repeat-view dedup).
+     *        to reuse the copy already in context (khabeer repeat-view dedup).
      */
     public static String viewTool(String name, @Nullable String filePath, @Nullable Map<String, String> dedup) {
         String clean = name == null ? "" : name.trim();
@@ -573,7 +578,7 @@ public final class AiSkillRegistry {
     // ------------------------------------------------------------------
 
     public static boolean seedFromAssets(Context context) {
-        boolean renamed = migrateKatheerHome();
+        boolean renamed = migrateKhabeerHome();
         try {
             File root = skillsRoot();
             root.mkdirs();
@@ -586,42 +591,53 @@ public final class AiSkillRegistry {
     }
 
     /**
-     * One-time home migration to the katheer data root:
-     *  1. $HOME/.termuxAI  ->  $HOME/.katheer (whole tree: skills, MCP helpers)
-     *  2. $HOME/.hermes/skills -> $HOME/.katheer/skills (oldest layout)
-     *  3. stale ".termuxAI" path mentions inside migrated skill files are
+     * One-time home migration to the khabeer data root:
+     *  1. $HOME/.termuxAI  ->  $HOME/.khabeer (whole tree: skills, MCP helpers)
+     *  2. $HOME/.katheer -> $HOME/.khabeer (previous brand)
+     *  3. $HOME/.hermes/skills -> $HOME/.khabeer/skills (oldest layout)
+     *  4. stale ".termuxAI"/".katheer" path mentions inside migrated skill files are
      *     rewritten so the agent's guidance keeps pointing at real paths.
      * Returns true when the data root was renamed — callers may need to
      * rewrite stored paths (e.g. stdio MCP server commands).
      */
-    public static boolean migrateKatheerHome() {
+    public static boolean migrateKhabeerHome() {
         boolean renamed = false;
         try {
-            File katheer = dataRoot();
+            File khabeer = dataRoot();
             File legacy = legacyDataRoot();
-            if (legacy.isDirectory() && !katheer.exists()) {
-                renamed = legacy.renameTo(katheer);
+            if (legacy.isDirectory() && !khabeer.exists()) {
+                renamed = legacy.renameTo(khabeer);
                 if (!renamed) {
                     // Rename across mount points fails; fall back to a copy.
-                    copyDir(legacy, katheer);
-                    renamed = katheer.isDirectory();
+                    copyDir(legacy, khabeer);
+                    renamed = khabeer.isDirectory();
                     if (renamed) deleteRecursive(legacy);
                 }
             }
-            katheer.mkdirs();
+            File prevBrand = legacyKhabeerRoot();
+            if (prevBrand.isDirectory() && !khabeer.exists()) {
+                boolean moved = prevBrand.renameTo(khabeer);
+                if (!moved) {
+                    copyDir(prevBrand, khabeer);
+                    moved = khabeer.isDirectory();
+                    if (moved) deleteRecursive(prevBrand);
+                }
+                renamed = renamed || moved;
+            }
+            khabeer.mkdirs();
             File root = skillsRoot();
             File oldest = legacySkillsRoot();
             if (oldest.isDirectory() && !root.exists()) {
                 root.getParentFile().mkdirs();
                 if (!oldest.renameTo(root)) copyDir(oldest, root);
             }
-            rewriteLegacyPaths(katheer);
+            rewriteLegacyPaths(khabeer);
         } catch (Exception ignored) {}
         return renamed;
     }
 
-    /** Idempotent: rewrites ".termuxAI" path mentions inside markdown skill
-     *  files under the katheer root (agent-authored content may embed paths). */
+    /** Idempotent: rewrites ".termuxAI"/".katheer" path mentions inside markdown skill
+     *  files under the khabeer root (agent-authored content may embed paths). */
     private static void rewriteLegacyPaths(File dir) {
         if (dir == null || !dir.isDirectory()) return;
         File[] children = dir.listFiles();
@@ -631,8 +647,8 @@ public final class AiSkillRegistry {
                 rewriteLegacyPaths(child);
             } else if (child.isFile() && child.getName().endsWith(".md") && child.length() <= MAX_SKILL_FILE_BYTES) {
                 String content = readFile(child, MAX_SKILL_FILE_BYTES);
-                if (content != null && content.contains(".termuxAI")) {
-                    writeTextFile(child, content.replace(".termuxAI", ".katheer"));
+                if (content != null && (content.contains(".termuxAI") || content.contains(".katheer"))) {
+                    writeTextFile(child, content.replace(".termuxAI", ".khabeer").replace(".katheer", ".khabeer"));
                 }
             }
         }
@@ -748,7 +764,7 @@ public final class AiSkillRegistry {
     }
 
     // ==================================================================
-    // skill_manage tool (katheer skill_manager_tool port, essential core)
+    // skill_manage tool (khabeer skill_manager_tool port, essential core)
     // ==================================================================
 
     private static final int MAX_SKILL_CONTENT_CHARS = 100_000;
@@ -791,7 +807,7 @@ public final class AiSkillRegistry {
     /**
      * skill_manage dispatch. Accepts the operations-array shape (one op per
      * skill; a single edit is a list of one) and the legacy flat shape.
-     * Batch semantics follow katheer: delete must be the sole op; all touched
+     * Batch semantics follow khabeer: delete must be the sole op; all touched
      * skills are snapshotted and rolled back on any failure.
      */
     public static String manageTool(JSONObject args) {
@@ -917,7 +933,7 @@ public final class AiSkillRegistry {
         }
     }
 
-    // --- validators (katheer _validate_*) ---
+    // --- validators (khabeer _validate_*) ---
 
     private static String validateName(String name) {
         if (TextUtils.isEmpty(name)) return "Skill name is required.";
@@ -940,7 +956,7 @@ public final class AiSkillRegistry {
     }
 
     /**
-     * Frontmatter validation per katheer _validate_frontmatter. When
+     * Frontmatter validation per khabeer _validate_frontmatter. When
      * {@code newSkill} the description must also fit the 60-char prompt index
      * budget so new skills never lose routing signal to truncation.
      */
@@ -990,7 +1006,7 @@ public final class AiSkillRegistry {
     }
 
     /**
-     * file_path validation per katheer: no traversal; 'SKILL.md' (or
+     * file_path validation per khabeer: no traversal; 'SKILL.md' (or
      * 'name/SKILL.md') targets the main file; anything else must live under
      * references/templates/scripts/assets and name an actual file.
      */
@@ -1009,7 +1025,7 @@ public final class AiSkillRegistry {
         return null;
     }
 
-    // --- actions (katheer _create_skill / _edit_skill / _patch_skill / ...) ---
+    // --- actions (khabeer _create_skill / _edit_skill / _patch_skill / ...) ---
 
     private static String createSkill(String name, String content, String category) {
         String err = validateName(name);
@@ -1267,7 +1283,7 @@ public final class AiSkillRegistry {
     }
 
     // ==================================================================
-    // Guard scan (katheer skills_guard port — curated pattern subset)
+    // Guard scan (khabeer skills_guard port — curated pattern subset)
     // ==================================================================
 
     public static final class Finding {
@@ -1301,7 +1317,7 @@ public final class AiSkillRegistry {
         }
     }
 
-    /** (patternId, severity, category, regex, description) — ported from katheer skills_guard THREAT_PATTERNS. */
+    /** (patternId, severity, category, regex, description) — ported from khabeer skills_guard THREAT_PATTERNS. */
     private static final Object[][] GUARD_PATTERNS = {
         // exfiltration
         {"env_exfil_curl", "critical", "exfiltration", "curl\\s+(?![^\\n]*https?://(?:localhost|127\\.0\\.0\\.1|\\[::1\\]))[^\\n]*\\$\\{?\\w*(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|API)", "curl command interpolating secret environment variable"},
@@ -1393,7 +1409,7 @@ public final class AiSkillRegistry {
         ".git", "node_modules", "build", "dist", "__pycache__", ".venv"));
 
     /**
-     * Scan a skill directory for threat patterns (katheer skills_guard port,
+     * Scan a skill directory for threat patterns (khabeer skills_guard port,
      * curated subset). Line-scans every text file under the dir; binary
      * files and files > 256KB are skipped.
      */
@@ -1470,13 +1486,13 @@ public final class AiSkillRegistry {
     }
 
     // ==================================================================
-    // /skill-name composer invocations (katheer skill_commands port)
+    // /skill-name composer invocations (khabeer skill_commands port)
     // ==================================================================
     private static final int MAX_STACKED_SKILLS = 5;
 
     /**
      * Resolve a composer prompt of the form "/skill-a /skill-b user text"
-     * into a message that loads each named skill's full SKILL.md (katheer
+     * into a message that loads each named skill's full SKILL.md (khabeer
      * stacked slash-skill invocation). Returns {builtMessage, loadedNamesCsv}
      * or null when the prompt does not invoke any known skill (in which case
      * the text should be sent to the model unchanged).
@@ -1530,7 +1546,7 @@ public final class AiSkillRegistry {
     }
 
     // ==================================================================
-    // Skill installation (katheer skills install port: download → quarantine
+    // Skill installation (khabeer skills install port: download → quarantine
     // → guard scan → confirm happens in the UI; the move happens here)
     // ==================================================================
 

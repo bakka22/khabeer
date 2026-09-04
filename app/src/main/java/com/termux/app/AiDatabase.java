@@ -19,8 +19,9 @@ import java.util.List;
 /** Small durable store for AI runs and protocol events. */
 public final class AiDatabase extends SQLiteOpenHelper {
 
+    private static final String TAG = "AiDatabase";
     private static final String DATABASE_NAME = "termux_ai_runtime.db";
-    private static final int DATABASE_VERSION = 12;
+    private static final int DATABASE_VERSION = 15;
 
     public static final class RunRecord {
         public String id;
@@ -60,6 +61,7 @@ public final class AiDatabase extends SQLiteOpenHelper {
         createV10Schema(db);
         createV11Schema(db);
         createV12Schema(db);
+        createV13Schema(db);
     }
 
     private void createV8Schema(SQLiteDatabase db) {
@@ -88,22 +90,55 @@ public final class AiDatabase extends SQLiteOpenHelper {
         try { db.execSQL("ALTER TABLE mcp_servers ADD COLUMN oauth_json TEXT"); } catch (Exception ignored) {}
     }
 
-    private void createV11Schema(SQLiteDatabase db) {
+    /** True only when this SQLite build can actually USE an FTS5 table.
+     * Full create/insert/match/drop cycle: some builds parse the CREATE
+     * but fail only on first use (which is exactly when triggers would
+     * start aborting every message insert), so existence checks alone
+     * are not enough. */
+    private static boolean fts5Available(SQLiteDatabase db) {
         try {
-            db.execSQL("CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(" +
-                "content, role UNINDEXED, session_id UNINDEXED, message_id UNINDEXED)");
-            db.execSQL("CREATE TRIGGER IF NOT EXISTS messages_ai_fts AFTER INSERT ON messages BEGIN " +
-                "INSERT INTO messages_fts(rowid, content, role, session_id, message_id) VALUES (new.id, new.content, new.role, new.session_id, new.id); END");
-            db.execSQL("CREATE TRIGGER IF NOT EXISTS messages_ad_fts AFTER DELETE ON messages BEGIN " +
-                "DELETE FROM messages_fts WHERE rowid = old.id; END");
-            db.execSQL("CREATE TRIGGER IF NOT EXISTS messages_au_fts AFTER UPDATE ON messages BEGIN " +
-                "DELETE FROM messages_fts WHERE rowid = old.id; " +
-                "INSERT INTO messages_fts(rowid, content, role, session_id, message_id) VALUES (new.id, new.content, new.role, new.session_id, new.id); END");
-            db.execSQL("INSERT OR IGNORE INTO messages_fts(rowid, content, role, session_id, message_id) " +
-                "SELECT id, content, role, session_id, id FROM messages WHERE active=1");
-        } catch (Exception ignored) {
-            // Android vendor SQLite builds can omit FTS5. session_search falls
-            // back to LIKE without changing the model-facing tool contract.
+            db.execSQL("DROP TABLE IF EXISTS fts_probe");
+            db.execSQL("CREATE VIRTUAL TABLE fts_probe USING fts5(x)");
+            db.execSQL("INSERT INTO fts_probe(x) VALUES ('probe')");
+            android.database.Cursor c = db.rawQuery("SELECT COUNT(*) FROM fts_probe WHERE fts_probe MATCH 'probe'", null);
+            boolean ok = false;
+            try { ok = c.moveToFirst() && c.getInt(0) == 1; } finally { c.close(); }
+            db.execSQL("DROP TABLE IF EXISTS fts_probe");
+            return ok;
+        } catch (Exception e) {
+            try { db.execSQL("DROP TABLE IF EXISTS fts_probe"); } catch (Exception ignored) {}
+            return false;
+        }
+    }
+
+    private void createV11Schema(SQLiteDatabase db) {
+        // Per-statement guards: one vendor-specific failure must not nuke the
+        // rest of the FTS setup, and the cause must reach logcat. Android
+        // vendor SQLite builds can omit FTS5 — session_search then falls back
+        // to LIKE without changing the model-facing tool contract.
+        if (!fts5Available(db)) {
+            try { android.util.Log.w(TAG, "schema fts5 skipped: no fts5 module in this SQLite build"); } catch (Exception ignored) {}
+            return;
+        }
+        execSchema(db, "fts5-table", "CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(" +
+            "content, role UNINDEXED, session_id UNINDEXED, message_id UNINDEXED)");
+        if (!ftsTableExists(db, "messages_fts")) return;
+        execSchema(db, "fts5-insert-trigger", "CREATE TRIGGER IF NOT EXISTS messages_ai_fts AFTER INSERT ON messages BEGIN " +
+            "INSERT INTO messages_fts(rowid, content, role, session_id, message_id) VALUES (new.id, new.content, new.role, new.session_id, new.id); END");
+        execSchema(db, "fts5-delete-trigger", "CREATE TRIGGER IF NOT EXISTS messages_ad_fts AFTER DELETE ON messages BEGIN " +
+            "DELETE FROM messages_fts WHERE rowid = old.id; END");
+        execSchema(db, "fts5-update-trigger", "CREATE TRIGGER IF NOT EXISTS messages_au_fts AFTER UPDATE ON messages BEGIN " +
+            "DELETE FROM messages_fts WHERE rowid = old.id; " +
+            "INSERT INTO messages_fts(rowid, content, role, session_id, message_id) VALUES (new.id, new.content, new.role, new.session_id, new.id); END");
+        execSchema(db, "fts5-backfill", "INSERT OR IGNORE INTO messages_fts(rowid, content, role, session_id, message_id) " +
+            "SELECT id, content, role, session_id, id FROM messages WHERE active=1");
+    }
+
+    private static void execSchema(SQLiteDatabase db, String label, String sql) {
+        try {
+            db.execSQL(sql);
+        } catch (Exception e) {
+            try { android.util.Log.w(TAG, "schema step " + label + " skipped: " + e.getMessage()); } catch (Exception ignored) {}
         }
     }
 
@@ -112,6 +147,39 @@ public final class AiDatabase extends SQLiteOpenHelper {
         try { db.execSQL("ALTER TABLE messages ADD COLUMN _compressed_summary INTEGER DEFAULT 0"); } catch (Exception ignored) {}
         try { db.execSQL("ALTER TABLE messages ADD COLUMN api_content TEXT"); } catch (Exception ignored) {}
         try { db.execSQL("CREATE INDEX IF NOT EXISTS messages_compaction_flags ON messages(session_id, active, compacted, _compressed_summary, id)"); } catch (Exception ignored) {}
+    }
+
+    /** Trigram FTS for substring/CJK-tolerant search (Hermes
+     * messages_fts_trigram). Best-effort: vendor SQLite builds without the
+     * trigram tokenizer throw here and search falls back to FTS5, then LIKE.
+     * Nothing in the model-facing contract changes. */
+    private static boolean ftsTableExists(SQLiteDatabase db, String table) {
+        android.database.Cursor c = null;
+        try {
+            c = db.rawQuery("SELECT COUNT(*) FROM sqlite_master WHERE type IN ('table','virtual') AND name=?",
+                new String[]{table});
+            return c.moveToFirst() && c.getInt(0) > 0;
+        } catch (Exception e) {
+            return false;
+        } finally {
+            if (c != null) c.close();
+        }
+    }
+
+    private void createV13Schema(SQLiteDatabase db) {
+        if (!fts5Available(db)) return;
+        execSchema(db, "trigram-table", "CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts_trigram USING fts5(" +
+            "content, role UNINDEXED, session_id UNINDEXED, message_id UNINDEXED, tokenize='trigram')");
+        if (!ftsTableExists(db, "messages_fts_trigram")) return;
+        execSchema(db, "trigram-insert-trigger", "CREATE TRIGGER IF NOT EXISTS messages_ai_trigram AFTER INSERT ON messages BEGIN " +
+            "INSERT INTO messages_fts_trigram(rowid, content, role, session_id, message_id) VALUES (new.id, new.content, new.role, new.session_id, new.id); END");
+        execSchema(db, "trigram-delete-trigger", "CREATE TRIGGER IF NOT EXISTS messages_ad_trigram AFTER DELETE ON messages BEGIN " +
+            "DELETE FROM messages_fts_trigram WHERE rowid = old.id; END");
+        execSchema(db, "trigram-update-trigger", "CREATE TRIGGER IF NOT EXISTS messages_au_trigram AFTER UPDATE ON messages BEGIN " +
+            "DELETE FROM messages_fts_trigram WHERE rowid = old.id; " +
+            "INSERT INTO messages_fts_trigram(rowid, content, role, session_id, message_id) VALUES (new.id, new.content, new.role, new.session_id, new.id); END");
+        execSchema(db, "trigram-backfill", "INSERT OR IGNORE INTO messages_fts_trigram(rowid, content, role, session_id, message_id) " +
+            "SELECT id, content, role, session_id, id FROM messages");
     }
 
     /** One MCP server configuration: transport 'http' (Streamable HTTP, url)
@@ -282,9 +350,33 @@ public final class AiDatabase extends SQLiteOpenHelper {
         db.setForeignKeyConstraintsEnabled(true);
     }
 
+    private static boolean sFtsProbed;
+
     @Override
     public void onOpen(SQLiteDatabase db) {
         try { db.execSQL("PRAGMA synchronous=NORMAL"); } catch (Exception ignored) {}
+        if (!sFtsProbed) {
+            sFtsProbed = true;
+            try {
+                boolean fts5 = false;
+                boolean trigram = false;
+                android.database.Cursor c = db.rawQuery("PRAGMA compile_options", null);
+                try {
+                    while (c.moveToNext()) {
+                        String opt = c.getString(0);
+                        if (opt != null && opt.contains("FTS5")) fts5 = true;
+                    }
+                } finally { c.close(); }
+                try {
+                    db.execSQL("CREATE VIRTUAL TABLE IF NOT EXISTS fts_probe USING fts5(x, tokenize='trigram')");
+                    trigram = true;
+                    db.execSQL("DROP TABLE IF EXISTS fts_probe");
+                } catch (Exception ignored) {}
+                try { android.util.Log.i(TAG, "sqlite fts5=" + fts5 + " trigram=" + trigram); } catch (Exception ignored) {}
+            } catch (Exception e) {
+                try { android.util.Log.w(TAG, "fts probe failed: " + e.getMessage()); } catch (Exception ignored) {}
+            }
+        }
     }
 
     @Override
@@ -352,8 +444,35 @@ public final class AiDatabase extends SQLiteOpenHelper {
         if (oldVersion < 12) {
             createV12Schema(db);
         }
+        if (oldVersion < 13) {
+            createV13Schema(db);
+        }
+        if (oldVersion < 15) {
+            // Heal installs whose FTS setup was skipped by the old
+            // all-or-nothing v11/v13 blocks. All statements are idempotent.
+            createV11Schema(db);
+            createV13Schema(db);
+            // Remove orphan FTS triggers that point at tables the vendor
+            // SQLite never created: they would abort every message insert.
+            if (!ftsTableExists(db, "messages_fts")) {
+                execSchema(db, "drop-orphan-fts-triggers",
+                    "DROP TRIGGER IF EXISTS messages_ai_fts");
+                execSchema(db, "drop-orphan-fts-triggers-del",
+                    "DROP TRIGGER IF EXISTS messages_ad_fts");
+                execSchema(db, "drop-orphan-fts-triggers-upd",
+                    "DROP TRIGGER IF EXISTS messages_au_fts");
+            }
+            if (!ftsTableExists(db, "messages_fts_trigram")) {
+                execSchema(db, "drop-orphan-trigram-triggers",
+                    "DROP TRIGGER IF EXISTS messages_ai_trigram");
+                execSchema(db, "drop-orphan-trigram-triggers-del",
+                    "DROP TRIGGER IF EXISTS messages_ad_trigram");
+                execSchema(db, "drop-orphan-trigram-triggers-upd",
+                    "DROP TRIGGER IF EXISTS messages_au_trigram");
+            }
+        }
         if (oldVersion < 6) {
-            // Title provenance (katheer title_source): 'message' = derived from
+            // Title provenance (khabeer title_source): 'message' = derived from
             // the first user message, 'ai' = model-generated summary. Existing
             // titles are message-derived and may be regenerated by the AI
             // titler; AI titles are never overwritten.
@@ -464,7 +583,7 @@ public final class AiDatabase extends SQLiteOpenHelper {
         v.put("active", 1);
         v.put("created_at", System.currentTimeMillis());
         getWritableDatabase().insertOrThrow("messages", null, v);
-        // Session listing mirrors katheer: last_active ordering (fresh message
+        // Session listing mirrors khabeer: last_active ordering (fresh message
         // bumps recency) and preview = first user message, bounded to 60 chars.
         ContentValues runUpdate = new ContentValues();
         runUpdate.put("updated_at", System.currentTimeMillis());
@@ -587,6 +706,16 @@ public final class AiDatabase extends SQLiteOpenHelper {
     public synchronized int countUserMessages(String sessionId) {
         Cursor c = getReadableDatabase().rawQuery(
             "SELECT COUNT(*) FROM messages WHERE session_id=? AND active=1 AND role='user'",
+            new String[]{sessionId});
+        try { return c.moveToFirst() ? c.getInt(0) : 0; } finally { c.close(); }
+    }
+
+    /** Nudge counter: counts every user turn including compacted history so
+     * archiving the replay never resets the review cadence (Hermes
+     * prior_user_turns hydration). */
+    public synchronized int countAllUserMessages(String sessionId) {
+        Cursor c = getReadableDatabase().rawQuery(
+            "SELECT COUNT(*) FROM messages WHERE session_id=? AND role='user'",
             new String[]{sessionId});
         try { return c.moveToFirst() ? c.getInt(0) : 0; } finally { c.close(); }
     }
@@ -714,7 +843,7 @@ public final class AiDatabase extends SQLiteOpenHelper {
         return records;
     }
 
-    /** Archive = soft hide (katheer set_session_archived): rows keep every
+    /** Archive = soft hide (khabeer set_session_archived): rows keep every
      * message and can be un-archived later. Never deletes anything. */
     public synchronized void setRunArchived(String runId, boolean archived) {
         ContentValues v = new ContentValues();
@@ -791,8 +920,34 @@ public final class AiDatabase extends SQLiteOpenHelper {
         out.put("success", true);
         out.put("mode", "read");
         out.put("session", sessionSummary(r, null));
-        out.put("messages", getHistoricalTranscript(sessionId, limit));
+        int total = countSessionMessages(sessionId);
+        if (total <= limit) {
+            out.put("messages", getHistoricalTranscript(sessionId, limit));
+            return out;
+        }
+        int head = 20;
+        int tail = 10;
+        JSONArray messages = new JSONArray();
+        Cursor hc = getReadableDatabase().query("messages",
+            new String[]{"id", "role", "content", "created_at"}, "session_id=?",
+            new String[]{sessionId}, null, null, "id ASC", String.valueOf(head));
+        try { while (hc.moveToNext()) messages.put(messageRow(hc)); } finally { hc.close(); }
+        ArrayList<JSONObject> tailRows = new ArrayList<>();
+        Cursor tc = getReadableDatabase().query("messages",
+            new String[]{"id", "role", "content", "created_at"}, "session_id=?",
+            new String[]{sessionId}, null, null, "id DESC", String.valueOf(tail));
+        try { while (tc.moveToNext()) tailRows.add(messageRow(tc)); } finally { tc.close(); }
+        for (int i = tailRows.size() - 1; i >= 0; i--) messages.put(tailRows.get(i));
+        out.put("messages", messages);
+        out.put("truncated_middle", total - head - tail);
+        out.put("hint", "Middle " + (total - head - tail) + " messages hidden. Scroll with around_message_id set to a visible message id.");
         return out;
+    }
+
+    private int countSessionMessages(String sessionId) {
+        Cursor c = getReadableDatabase().rawQuery(
+            "SELECT COUNT(*) FROM messages WHERE session_id=?", new String[]{sessionId});
+        try { return c.moveToFirst() ? c.getInt(0) : 0; } finally { c.close(); }
     }
 
     private JSONObject messagesAround(String sessionId, long aroundMessageId, int window) throws Exception {
@@ -819,77 +974,169 @@ public final class AiDatabase extends SQLiteOpenHelper {
         for (int i = 0; i < before.length(); i++) messages.put(before.opt(i));
         messages.put(anchor);
         for (int i = 0; i < after.length(); i++) messages.put(after.opt(i));
+        SQLiteDatabase countDb = getReadableDatabase();
+        Cursor bc = countDb.rawQuery("SELECT COUNT(*) FROM messages WHERE session_id=? AND id<?",
+            new String[]{sessionId, String.valueOf(aroundMessageId)});
+        int messagesBefore = 0;
+        try { if (bc.moveToFirst()) messagesBefore = bc.getInt(0); } finally { bc.close(); }
+        Cursor ac = countDb.rawQuery("SELECT COUNT(*) FROM messages WHERE session_id=? AND id>?",
+            new String[]{sessionId, String.valueOf(aroundMessageId)});
+        int messagesAfter = 0;
+        try { if (ac.moveToFirst()) messagesAfter = ac.getInt(0); } finally { ac.close(); }
         out.put("success", true);
         out.put("mode", "scroll");
         out.put("session_id", sessionId);
         out.put("around_message_id", aroundMessageId);
         out.put("messages", messages);
+        out.put("messages_before", messagesBefore);
+        out.put("messages_after", messagesAfter);
+        if (messagesBefore > before.length() || messagesAfter > after.length()) {
+            long firstId = messages.optJSONObject(0) != null ? messages.optJSONObject(0).optLong("id") : aroundMessageId;
+            long lastId = messages.optJSONObject(messages.length() - 1) != null ? messages.optJSONObject(messages.length() - 1).optLong("id") : aroundMessageId;
+            out.put("hint", "Re-anchor with around_message_id=" + firstId + " to scroll back or around_message_id=" + lastId + " to scroll forward.");
+        }
         return out;
     }
 
+    /** Discovery with Hermes recall semantics: lineage dedupe (one hit per
+     * session root), current-lineage skip unless the hit is compacted
+     * history, tool-role demotion below user/assistant, snippets, and
+     * adaptive hydration (top hit full window, rest anchor-only). */
     private JSONObject discoverSessions(String query, String currentSessionId, int limit, int window) throws Exception {
         JSONObject out = new JSONObject();
-        JSONArray results = new JSONArray();
-        ArrayList<String> seen = new ArrayList<>();
-        Cursor c = openSearchCursor(query, limit * 12);
-        boolean usedFts = c != null;
-        if (c == null) {
-            c = getReadableDatabase().query("messages",
-                new String[]{"id", "session_id", "role", "content", "created_at"},
-                "content LIKE ? ESCAPE '\\'",
-                new String[]{"%" + escapeLike(query) + "%"},
-                null, null, "created_at DESC", String.valueOf(limit * 12));
-        }
+        ArrayList<JSONObject> primary = new ArrayList<>();
+        ArrayList<JSONObject> demoted = new ArrayList<>();
+        ArrayList<String> seenRoots = new ArrayList<>();
+        String currentRoot = TextUtils.isEmpty(currentSessionId) ? null : resolveSessionRoot(currentSessionId);
+        SearchCursor sc = openSearchCursor(query, limit * 12);
+        Cursor c = sc.cursor;
         try {
-            while (c.moveToNext() && results.length() < limit) {
+            while (c.moveToNext() && primary.size() + demoted.size() < limit * 4) {
                 String sid = c.getString(1);
-                if (!TextUtils.isEmpty(currentSessionId) && currentSessionId.equals(sid)) continue;
-                if (seen.contains(sid)) continue;
-                seen.add(sid);
+                String root = resolveSessionRoot(sid);
+                if (seenRoots.contains(root)) continue;
+                boolean compactedHit = c.getInt(7) == 1 || c.getInt(8) == 1;
+                if (currentRoot != null && currentRoot.equals(root) && !compactedHit) continue;
                 RunRecord run = getRun(sid);
                 if (run == null || run.archived) continue;
+                seenRoots.add(root);
+                String snippet = c.getString(3);
+                String content = c.getString(4);
+                if (TextUtils.isEmpty(snippet)) snippet = truncateText(content, 400);
+                else snippet = truncateText(snippet, 400);
                 JSONObject anchor = new JSONObject();
                 anchor.put("id", c.getLong(0));
                 anchor.put("role", c.getString(2));
-                anchor.put("content", c.getString(3));
-                anchor.put("created_at", c.getLong(4));
+                anchor.put("snippet", snippet);
+                anchor.put("created_at", c.getLong(5));
                 JSONObject hit = sessionSummary(run, anchor);
-                hit.put("window", messagesAround(sid, c.getLong(0), window).optJSONArray("messages"));
-                results.put(hit);
+                if ("tool".equals(c.getString(2))) demoted.add(hit);
+                else primary.add(hit);
             }
         } finally { c.close(); }
+        JSONArray results = new JSONArray();
+        boolean first = true;
+        for (int pass = 0; pass < 2 && results.length() < limit; pass++) {
+            ArrayList<JSONObject> bucket = pass == 0 ? primary : demoted;
+            for (JSONObject hit : bucket) {
+                if (results.length() >= limit) break;
+                if (first) {
+                    first = false;
+                    JSONObject anchor = hit.optJSONObject("anchor");
+                    if (anchor != null) {
+                        hit.put("window", messagesAround(
+                            hit.optString("session_id"), anchor.optLong("id"), window).optJSONArray("messages"));
+                    }
+                }
+                results.put(hit);
+            }
+        }
         out.put("success", true);
         out.put("mode", "discovery");
         out.put("query", query);
         out.put("results", results);
-        out.put("backend", usedFts ? "fts5" : "like_fallback");
+        out.put("backend", sc.backend);
         return out;
     }
 
-    @Nullable
-    private Cursor openSearchCursor(String query, int limit) {
-        try {
-            String phrase = "\"" + (query == null ? "" : query.replace("\"", "\"\"")) + "\"";
-            return getReadableDatabase().rawQuery(
-                "SELECT m.id, m.session_id, m.role, m.content, m.created_at " +
-                    "FROM messages_fts f JOIN messages m ON m.id = f.message_id " +
-                    "WHERE messages_fts MATCH ? " +
-                    "ORDER BY rank LIMIT ?",
-                new String[]{phrase, String.valueOf(limit)});
-        } catch (Exception e) {
-            return null;
+    private static String truncateText(String text, int max) {
+        if (text == null) return "";
+        if (text.length() <= max) return text;
+        return text.substring(0, max) + "…";
+    }
+
+    /** Walks runs.parent_session_id to the lineage root (cycle-guarded).
+     * Discovery dedupes and current-lineage-skips by root. */
+    private String resolveSessionRoot(String sessionId) {
+        String root = sessionId;
+        java.util.HashSet<String> visited = new java.util.HashSet<>();
+        for (int i = 0; i < 32 && root != null && !visited.contains(root); i++) {
+            visited.add(root);
+            RunRecord r = getRun(root);
+            if (r == null || TextUtils.isEmpty(r.parentSessionId)) break;
+            root = r.parentSessionId;
         }
+        return root == null ? sessionId : root;
+    }
+
+    private static final class SearchCursor {
+        Cursor cursor;
+        String backend;
+    }
+
+    /** Backend chain: FTS5 phrase → FTS5 trigram (substring-tolerant) →
+     * LIKE fallback. Uniform columns:
+     * 0 id, 1 session_id, 2 role, 3 snippet, 4 content, 5 created_at,
+     * 6 active, 7 compacted, 8 summary flag. */
+    private SearchCursor openSearchCursor(String query, int limit) {
+        SearchCursor sc = new SearchCursor();
+        String safe = query == null ? "" : query.replace("\"", "\"\"");
+        String phrase = "\"" + safe + "\"";
+        String cols = "m.id, m.session_id, m.role, " +
+            "snippet(messages_fts, 0, '>>>', '<<<', '…', 20), m.content, m.created_at, " +
+            "m.active, COALESCE(m.compacted, 0), COALESCE(m._compressed_summary, 0) " +
+            "FROM messages_fts f JOIN messages m ON m.id = f.message_id " +
+            "WHERE messages_fts MATCH ? ORDER BY rank LIMIT ?";
+        try {
+            sc.cursor = getReadableDatabase().rawQuery(
+                "SELECT " + cols, new String[]{phrase, String.valueOf(limit)});
+            sc.backend = "fts5";
+            return sc;
+        } catch (Exception ignored) {}
+        try {
+            sc.cursor = getReadableDatabase().rawQuery(
+                "SELECT " + cols.replace("messages_fts", "messages_fts_trigram"),
+                new String[]{safe, String.valueOf(limit)});
+            sc.backend = "fts5-trigram";
+            return sc;
+        } catch (Exception ignored) {}
+        sc.cursor = getReadableDatabase().query("messages",
+            new String[]{"id", "session_id", "role", "''", "content", "created_at",
+                "active", "compacted", "_compressed_summary"},
+            "content LIKE ? ESCAPE '\\'",
+            new String[]{"%" + escapeLike(query) + "%"},
+            null, null, "created_at DESC", String.valueOf(limit));
+        sc.backend = "like_fallback";
+        return sc;
     }
 
     private JSONObject sessionSummary(RunRecord r, @Nullable JSONObject anchor) throws Exception {
         JSONObject o = new JSONObject();
         o.put("session_id", r.id);
         o.put("title", r.title);
+        o.put("title_source", r.titleSource);
         o.put("provider", r.harnessId);
         o.put("model", TextUtils.isEmpty(r.modelOverride) ? r.lastResolvedModel : r.modelOverride);
         o.put("workspace", r.workspace);
         o.put("created_at", r.createdAt);
         o.put("updated_at", r.updatedAt);
+        o.put("message_count", countSessionMessages(r.id));
+        Cursor pc = getReadableDatabase().query("messages", new String[]{"content"},
+            "session_id=? AND role='user' AND active=1", new String[]{r.id}, null, null, "id ASC", "1");
+        try {
+            if (pc.moveToFirst()) o.put("preview", boundTitle(pc.getString(0)));
+        } finally { pc.close(); }
+        if (!TextUtils.isEmpty(r.parentSessionId)) o.put("parent_session_id", r.parentSessionId);
         if (anchor != null) o.put("anchor", anchor);
         return o;
     }

@@ -1,4 +1,7 @@
-# Hermes Memory System Implementation Plan for katheer Mobile
+# Hermes Memory System Implementation Plan for khabeer Mobile
+
+> SUPERSEDED by `docs/MEMORY_SOURCE_OF_TRUTH.md` — read that first.
+> This file is kept for history only.
 
 This file is the persistent checkpoint for the Hermes-style memory work.
 
@@ -6,7 +9,7 @@ Important continuation rule: after any context compaction, interruption, or long
 
 ## Scope
 
-Replicate Hermes Agent's core memory system in the Android/Termux-native katheer app.
+Replicate Hermes Agent's core memory system in the Android/Termux-native khabeer app.
 
 Explicitly excluded:
 
@@ -18,19 +21,19 @@ Explicitly excluded:
 The system has five core layers:
 
 1. `MEMORY.md` — agent curated notes.
-   - Path: `$HOME/.katheer/memories/MEMORY.md`
+   - Path: `$HOME/.khabeer/memories/MEMORY.md`
    - Format: strict UTF-8, plain text entries joined by `\n§\n`
    - Cap: 2,200 chars
    - Writer: agent via `memory` tool, user via Memory page
 
 2. `USER.md` — user profile.
-   - Path: `$HOME/.katheer/memories/USER.md`
+   - Path: `$HOME/.khabeer/memories/USER.md`
    - Format: strict UTF-8, plain text entries joined by `\n§\n`
    - Cap: 1,375 chars
    - Writer: agent via `memory` tool, user via Memory page
 
 3. `SOUL.md` — agent identity/persona.
-   - Path: `$HOME/.katheer/SOUL.md`
+   - Path: `$HOME/.khabeer/SOUL.md`
    - Cap: 4,000 chars
    - Writer: user only
    - Prompt behavior: injected first, at session start. It is not a normal `memory` tool target.
@@ -158,7 +161,7 @@ Status: implemented, compile verified.
 Implemented:
 
 - `AiMemoryStore`
-- `SOUL.md`, `MEMORY.md`, `USER.md` seeding under `$HOME/.katheer`
+- `SOUL.md`, `MEMORY.md`, `USER.md` seeding under `$HOME/.khabeer`
 - Character caps
 - Frozen snapshot injection
 - Correct `SOUL.md` treatment as user-owned identity, not tool target
@@ -191,7 +194,7 @@ Implemented:
 - Memory tool hidden if both disabled
 - Target schema narrows based on enabled stores
 - `memory.write_approval` equivalent toggle
-- Staged memory write files under `$HOME/.katheer/pending/memory`
+- Staged memory write files under `$HOME/.khabeer/pending/memory`
 - Memory page pending approval list
 - Approve/reject staged memory writes
 
@@ -306,8 +309,8 @@ Verified:
 Verified:
 
 - Install on connected phone (`pfww8llbfe6tr88x`) with `adb install -r`.
-- Launch `com.termux/.app.AiActivity`; process stayed alive and filtered logcat showed no Termux/katheer fatal crash.
-- First-run memory file seeding on device under `/data/data/com.termux/files/home/.katheer`:
+- Launch `com.termux/.app.AiActivity`; process stayed alive and filtered logcat showed no Termux/khabeer fatal crash.
+- First-run memory file seeding on device under `/data/data/com.termux/files/home/.khabeer`:
   - `SOUL.md`
   - `memories/MEMORY.md`
   - `memories/USER.md`
@@ -327,6 +330,9 @@ Verified:
 - Core prompt/file/database behavior is covered by passing unit tests:
   - `AiMemoryStoreTest`
   - `AiDatabaseMemoryTest`
+- Memory approval staging is covered by unit tests:
+  - stage -> pending list -> approve writes `USER.md`
+  - stage -> pending list -> reject does not write `MEMORY.md`
 
 Still need live provider validation:
 
@@ -349,3 +355,4 @@ Still need live provider validation:
 - 2026-09-02: Fixed the real on-device Memory page reachability bug. The More/Memory dynamic page is now wrapped in `ai_more_scroll` (`NestedScrollView`) and all page switches hide/show the scroll container consistently. Installed on connected phone, launched without fatal crash, verified memory files seeded, verified Memory page scrolls to manual compaction/pending writes/SOUL/USER/MEMORY editors, and verified Journey opens with USER.md/MEMORY.md/skill nodes.
 - 2026-09-02: Hardened Windows/Robolectric test execution. Gradle/Robolectric was failing before assertions because it tried to create `.robolectric-download-lock` in the Windows home root. Unit test JVMs now set `user.home` to `build/test-user-home` and create that directory before tests. Full `:app:testDebugUnitTest` passes again with the repo-local Gradle cache.
 - 2026-09-02: Attempted live OpenCode memory-tool validation from the installed app using the active `opencode · glm-5.3-flash` session. The request reached the provider and failed cleanly with HTTP 429 `GoUsageLimitError` ("Weekly usage limit reached. Resets in 4 days"). Verified on-device `MEMORY.md` remained 0 bytes afterward, so no phantom/stale memory write occurred. Live model memory/session_search/nudge/compaction validation remains blocked on provider capacity or another configured provider key.
+- 2026-09-02: Added focused unit coverage for staged memory writes: stage -> pending list -> approve writes `USER.md`, and stage -> pending list -> reject does not write `MEMORY.md`. Focused `AiMemoryStoreTest` and full `:app:testDebugUnitTest` both passed.

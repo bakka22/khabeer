@@ -31,7 +31,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 /**
- * MCP client registry (katheer mcp_tool.py port).
+ * MCP client registry (khabeer mcp_tool.py port).
  *
  * Two transports, one protocol:
  * - Streamable HTTP: JSON-RPC over HttpURLConnection; the session is kept
@@ -40,12 +40,12 @@ import java.util.concurrent.TimeUnit;
  * - stdio: a local command spawned inside the Termux environment (the same
  *   env the terminal tool uses), speaking newline-delimited JSON-RPC over
  *   stdin/stdout. This is what makes npx/uvx/python MCP servers work
- *   on-device (katheer runs the same servers on the desktop).
+ *   on-device (khabeer runs the same servers on the desktop).
  *
  * Tools are exposed to the model under flattened `mcp__<server>__<tool>`
- * names (katheer merges MCP tools directly into the main tool registry).
+ * names (khabeer merges MCP tools directly into the main tool registry).
  *
- * Safety model carried over from katheer: untrusted servers get user approval
+ * Safety model carried over from khabeer: untrusted servers get user approval
  * per call (enforced by the service via the approval dialog); results and
  * errors are size-capped and secret-redacted before reaching the model; a
  * small circuit breaker stops hammering dead servers; name normalization
@@ -99,7 +99,7 @@ public final class AiMcpRegistry {
 
     /** Tools for the model's tools array: enabled servers, sanitized flat
      * names, collision fail-closed. Uses the cached discovery state; probes
-     * refresh it in the background (late binding, katheer-style). */
+     * refresh it in the background (late binding, khabeer-style). */
     public List<ToolDef> toolsForModel(AiDatabase db) {
         List<ToolDef> out = new ArrayList<>();
         Map<String, String> owners = new HashMap<>();
@@ -189,7 +189,7 @@ public final class AiMcpRegistry {
 
     /** Background probe of every enabled server that lacks fresh tools.
      * Never blocks the caller — tools appear in the model's array on the
-     * next turn (katheer late binding). */
+     * next turn (khabeer late binding). */
     public void probeStaleAsync(AiDatabase db) {
         List<AiDatabase.McpServerRecord> pending = new ArrayList<>();
         for (AiDatabase.McpServerRecord server : db.getMcpServers()) {
@@ -244,7 +244,7 @@ public final class AiMcpRegistry {
             return result;
         } catch (McpSessionExpiredException e) {
             // Session died (HTTP 404) or the stdio process exited: rebuild
-            // the transport and retry once (katheer session-expired recovery).
+            // the transport and retry once (khabeer session-expired recovery).
             dropTransport(server.name);
             try {
                 String result = callToolOnce(server, toolName, args, timeoutSeconds);
@@ -534,7 +534,7 @@ public final class AiMcpRegistry {
             return out;
         }
 
-        /** katheer _resolve_stdio_command, trimmed: absolute paths pass
+        /** khabeer _resolve_stdio_command, trimmed: absolute paths pass
          * through; bare names resolve against $PREFIX/bin and ~/.local/bin. */
         private String resolveCommand(String command) {
             if (command.contains("/")) return command;
@@ -708,7 +708,7 @@ public final class AiMcpRegistry {
     }
 
     // ------------------------------------------------------------------
-    // Result normalization (katheer block handling, trimmed)
+    // Result normalization (khabeer block handling, trimmed)
     // ------------------------------------------------------------------
 
     private String normalizeCallResult(@Nullable JSONObject result) throws Exception {
@@ -759,7 +759,7 @@ public final class AiMcpRegistry {
     }
 
     // ------------------------------------------------------------------
-    // Circuit breaker (per server, katheer-shaped: 3 fails → 60s open)
+    // Circuit breaker (per server, khabeer-shaped: 3 fails → 60s open)
     // ------------------------------------------------------------------
 
     private long[] breaker(String name) {
@@ -802,7 +802,7 @@ public final class AiMcpRegistry {
     // Helpers
     // ------------------------------------------------------------------
 
-    /** Schema normalization for provider compatibility (katheer
+    /** Schema normalization for provider compatibility (khabeer
      * _normalize_mcp_input_schema, trimmed): force object type, ensure
      * properties exists, prune required to existing properties. */
     private JSONObject normalizeSchema(@Nullable JSONObject raw) {
@@ -913,7 +913,7 @@ public final class AiMcpRegistry {
     }
 
     // ------------------------------------------------------------------
-    // OAuth 2.0 Authorization Code + PKCE (katheer mcp_oauth port)
+    // OAuth 2.0 Authorization Code + PKCE (khabeer mcp_oauth port)
     // Static helpers used by the UI sign-in flow; the transport only
     // consumes the stored tokens.
     // ------------------------------------------------------------------
@@ -957,7 +957,7 @@ public final class AiMcpRegistry {
         if (TextUtils.isEmpty(endpoint))
             throw new IllegalStateException("Server offers no dynamic client registration. Configure a static client_id instead.");
         JSONObject body = new JSONObject()
-            .put("client_name", "katheer (" + serverName + ")")
+            .put("client_name", "khabeer (" + serverName + ")")
             .put("redirect_uris", new JSONArray().put(redirectUri))
             .put("grant_types", new JSONArray().put("authorization_code").put("refresh_token"))
             .put("response_types", new JSONArray().put("code"))
