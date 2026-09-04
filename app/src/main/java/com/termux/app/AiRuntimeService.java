@@ -552,6 +552,114 @@ public void sendPrompt(String prompt, @Nullable String effort, @Nullable String 
         runTurn(c, providerId, baseUrl, apiKey, c.record.workspace, prompt, model, effort, approvalPolicy);
     }
 
+    /** Session-authoritative credential resolution shared by sendPrompt,
+     * retry, and compaction: provider, model, and credentials come from the
+     * session row and the registry, never from ambient UI state. Returns
+     * {providerId, baseUrl, apiKey, model} or null (error already shown). */
+    private String[] sessionCredentials(RunContext c) {
+        if (c == null || c.record == null) {
+            notifyError(null, "No active native agent session.");
+            return null;
+        }
+        AiProviderProfile profile = AiProviderProfile.find(c.record.harnessId);
+        if (profile == null) {
+            notifyError(c.record.id, "Session provider is not available.");
+            return null;
+        }
+        String model = TextUtils.isEmpty(c.record.modelOverride)
+            ? mProviderConfig.getModel(profile) : c.record.modelOverride;
+        if (TextUtils.isEmpty(model)) model = profile.defaultModel;
+        String baseUrl = mProviderConfig.getBaseUrl(profile);
+        String apiKey = mProviderConfig.resolveCredential(profile);
+        if ("opencode".equals(profile.id)) {
+            String route = TextUtils.isEmpty(c.record.route)
+                ? mProviderConfig.getOpenCodeSelectedRoute() : c.record.route;
+            baseUrl = AiProviderConfig.ocRouteUrl(route);
+            String routeKey = mProviderConfig.getOpenCodeRouteKey(route);
+            if (!TextUtils.isEmpty(routeKey)) apiKey = routeKey;
+            if (TextUtils.isEmpty(c.record.modelOverride))
+                model = mProviderConfig.getOpenCodeRouteModel(route);
+            c.record.route = route;
+        }
+        c.record.lastResolvedModel = model;
+        return new String[]{profile.id, baseUrl, apiKey, model};
+    }
+
+    /** /retry: re-send the last user turn in place. Fails closed when the
+     * turn carried attachments (no replay protocol for them). The user row
+     * is reused — no duplicate is appended. */
+    public void retryLastTurn() {
+        RunContext c = mViewed;
+        if (c == null || c.record == null) {
+            notifyError(null, "No active native agent session.");
+            return;
+        }
+        if (c.worker != null && c.worker.isAlive()) {
+            notifyError(c.record.id, "Wait for the current model turn to finish before retrying.");
+            return;
+        }
+        String[] creds = sessionCredentials(c);
+        if (creds == null) return;
+        JSONObject last;
+        try {
+            last = mDatabase.lastActiveUserMessage(c.record.id);
+        } catch (Exception e) {
+            notifyError(c.record.id, "Could not read the transcript: " + e.getMessage());
+            return;
+        }
+        if (!last.optBoolean("found")) {
+            notifyError(c.record.id, "No user message to retry in this session.");
+            return;
+        }
+        String text = last.optString("content", "");
+        if (TextUtils.isEmpty(text.trim())) {
+            notifyError(c.record.id, "No user message to retry in this session.");
+            return;
+        }
+        if (text.contains("\n\nAttached files:")) {
+            notifyError(c.record.id, "That turn had attached files, which cannot be replayed. Send it again manually.");
+            return;
+        }
+        int cleared = mDatabase.clearAfterMessage(c.record.id, last.optLong("id"));
+        if (cleared < 0) {
+            notifyError(c.record.id, "Could not reset the failed turn. Send your message again.");
+            return;
+        }
+        rebuildReplayFromDatabase(c);
+        persistRun(c);
+        try {
+            mDatabase.appendEvent(c.record.id, "memory/turnRetried",
+                new JSONObject().put("cleared_messages", cleared).toString());
+        } catch (Exception ignored) {}
+        emit("memory/turnRetried", json("cleared_messages", String.valueOf(cleared)));
+        runTurn(c, creds[0], creds[1], creds[2], c.record.workspace, text, creds[3],
+            c.effort, c.approvalPolicy, false);
+    }
+
+    /** /undo [N]: back up N user turns. Returns the DB result; the activity
+     * echoes the removed text so it can be copied, edited, and resent. */
+    public JSONObject undoTurns(int n) {
+        JSONObject out = new JSONObject();
+        RunContext c = mViewed;
+        if (c == null || c.record == null) {
+            try { out.put("success", false).put("error", "No active native agent session."); } catch (Exception ignored) {}
+            return out;
+        }
+        if (c.worker != null && c.worker.isAlive()) {
+            try { out.put("success", false).put("error", "Wait for the current model turn to finish before undoing."); } catch (Exception ignored) {}
+            return out;
+        }
+        JSONObject result = mDatabase.rewindSession(c.record.id, n);
+        if (!result.optBoolean("success")) return result;
+        rebuildReplayFromDatabase(c);
+        persistRun(c);
+        try {
+            mDatabase.appendEvent(c.record.id, "memory/turnUndone", result.toString());
+        } catch (Exception ignored) {}
+        emit("memory/turnUndone", json("turns_undone", String.valueOf(result.optInt("turns_undone"))));
+        return result;
+    }
+
     /** Session-scoped /model switch (khabeer _persist_model_switch_to_session):
      * the model lives on the session row so resume restores it. */
 public void setSessionModel(String model) {
@@ -872,15 +980,27 @@ public void onDestroy() {
 
 private void runTurn(RunContext ctx, String providerId, String baseUrl, String apiKey, String workspace, String prompt,
                          String model, @Nullable String effort, @Nullable String approvalPolicy) {
+        runTurn(ctx, providerId, baseUrl, apiKey, workspace, prompt, model, effort, approvalPolicy, true);
+    }
+
+    /** @param appendHistory false replays an existing user row (/retry)
+     * instead of persisting a duplicate. */
+private void runTurn(RunContext ctx, String providerId, String baseUrl, String apiKey, String workspace, String prompt,
+                         String model, @Nullable String effort, @Nullable String approvalPolicy, boolean appendHistory) {
         if (ctx.worker != null) ctx.worker.interrupt();
         String tag = ctx.record.id == null ? "runtime" : ctx.record.id.substring(0, Math.min(8, ctx.record.id.length()));
         ctx.worker = new Thread(() -> executeTurn(ctx, providerId, baseUrl, apiKey, workspace,
-            prompt == null ? "" : prompt, model, effort, approvalPolicy), "khabeer-" + tag);
+            prompt == null ? "" : prompt, model, effort, approvalPolicy, appendHistory), "khabeer-" + tag);
         ctx.worker.start();
     }
 
     private void executeTurn(RunContext ctx, String providerId, String baseUrl, String apiKey, String workspace, String prompt,
                          String model, @Nullable String effort, @Nullable String approvalPolicy) {
+        executeTurn(ctx, providerId, baseUrl, apiKey, workspace, prompt, model, effort, approvalPolicy, true);
+    }
+
+    private void executeTurn(RunContext ctx, String providerId, String baseUrl, String apiKey, String workspace, String prompt,
+                         String model, @Nullable String effort, @Nullable String approvalPolicy, boolean appendHistory) {
         mTurnContext.set(ctx);
         ctx.providerId = providerId;
         ctx.baseUrl = baseUrl;
@@ -907,7 +1027,13 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
 
         JSONArray input;
         try {
-            appendUserTurnToHistory(ctx, prompt);
+            if (appendHistory) appendUserTurnToHistory(ctx, prompt);
+            else {
+                AiMemoryStore.resetTurnFailureBudget();
+                refreshSystemMessage();
+                sanitizeReplayHistory();
+                saveChatHistory(ctx);
+            }
             if (!enforceContextGate(ctx, providerId, baseUrl, apiKey, model)) return;
             input = toResponsesInput(ctx.chatMessages);
         } catch (Exception e) {

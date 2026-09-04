@@ -3635,6 +3635,16 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             mPromptInput.setError(getString(R.string.ai_prompt_required));
             return;
         }
+        if ("/retry".equals(prompt)) {
+            mPromptInput.setText("");
+            if (mRuntimeService != null) mRuntimeService.retryLastTurn();
+            return;
+        }
+        if ("/undo".equals(prompt) || prompt.startsWith("/undo ")) {
+            mPromptInput.setText("");
+            handleUndoCommand(prompt);
+            return;
+        }
         if (!mAttachedPaths.isEmpty()) prompt += "\n\nAttached files:\n- " + TextUtils.join("\n- ", mAttachedPaths);
         AiProviderProfile profile = mSelectedProfile;
         String workspace = validateWorkspace();
@@ -3676,6 +3686,35 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             mRuntimeService.startAgent(profile.id, creds[0], creds[1], workspace, prompt, model,
                 clean(mSelectedEffort), mSelectedApproval, route);
         }
+    }
+
+    /** /undo [N]: back up N turns, then echo the removed text as a plain
+     * system bubble (never persisted) so it can be copied and resent. */
+    private void handleUndoCommand(String prompt) {
+        int n = 1;
+        String arg = prompt.length() > 5 ? prompt.substring(5).trim().split("\\s+")[0] : "";
+        if (!TextUtils.isEmpty(arg)) {
+            try {
+                n = Math.max(1, Integer.parseInt(arg));
+            } catch (Exception e) {
+                showError("Usage: /undo [turns]. Example: /undo 2");
+                return;
+            }
+        }
+        if (mRuntimeService == null || !mRuntimeBound) {
+            showError("Native runtime is still starting.");
+            return;
+        }
+        JSONObject result = mRuntimeService.undoTurns(n);
+        if (!result.optBoolean("success")) {
+            showError(result.optString("error", "Undo failed."));
+            return;
+        }
+        String removed = result.optString("target_text", "");
+        if (removed.length() > 400) removed = removed.substring(0, 400) + "…";
+        addSystemMessage("Undid " + result.optInt("turns_undone") + " turn(s) (" +
+            result.optInt("rewound_count") + " messages hidden, kept for audit).\nRemoved: " + removed);
+        setStatus("Undid " + result.optInt("turns_undone") + " turn(s).", false);
     }
 
     private void showApiKeyDialog() {

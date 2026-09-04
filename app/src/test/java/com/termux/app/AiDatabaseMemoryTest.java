@@ -87,6 +87,56 @@ public class AiDatabaseMemoryTest {
     }
 
     @Test
+    public void rewindHidesTurnsButKeepsAuditAndClamps() throws Exception {
+        AiDatabase.RunRecord run = db.createRun("opencode", "/rewind-project");
+        db.appendMessage(run.id, "user", "first question");
+        db.appendMessage(run.id, "assistant", "first answer");
+        db.appendMessage(run.id, "user", "second question");
+        db.appendMessage(run.id, "assistant", "second answer");
+
+        JSONObject undone = db.rewindSession(run.id, 1);
+        assertTrue(undone.toString(), undone.optBoolean("success"));
+        assertEquals(1, undone.optInt("turns_undone"));
+        assertEquals(2, undone.optInt("rewound_count"));
+        assertEquals("second question", undone.optString("target_text"));
+
+        JSONArray replay = db.getTranscript(run.id, 20);
+        assertEquals(2, replay.length());
+        assertEquals("first question", replay.optJSONObject(0).optString("content"));
+
+        JSONArray audit = db.getHistoricalTranscript(run.id, 20);
+        assertEquals(4, audit.length());
+
+        JSONObject found = db.sessionSearch(new JSONObject().put("query", "second question").put("limit", 5), null);
+        assertTrue(found.toString(), found.optBoolean("success"));
+        assertEquals(0, found.optJSONArray("results").length());
+
+        JSONObject clamp = db.rewindSession(run.id, 99);
+        assertTrue(clamp.toString(), clamp.optBoolean("success"));
+        assertEquals(1, clamp.optInt("turns_undone"));
+        assertEquals(0, db.getTranscript(run.id, 20).length());
+
+        JSONObject empty = db.rewindSession(run.id, 1);
+        assertFalse(empty.optBoolean("success"));
+    }
+
+    @Test
+    public void retryKeepsUserRowAndDropsFollowers() throws Exception {
+        AiDatabase.RunRecord run = db.createRun("opencode", "/retry-project");
+        db.appendMessage(run.id, "user", "retry me");
+        db.appendMessage(run.id, "assistant", "failed reply");
+
+        JSONObject last = db.lastActiveUserMessage(run.id);
+        assertTrue(last.optBoolean("found"));
+        assertEquals("retry me", last.optString("content"));
+
+        assertEquals(1, db.clearAfterMessage(run.id, last.optLong("id")));
+        JSONArray replay = db.getTranscript(run.id, 20);
+        assertEquals(1, replay.length());
+        assertEquals("retry me", replay.optJSONObject(0).optString("content"));
+    }
+
+    @Test
     public void scrollReportsCountsAndReadTruncatesMiddle() throws Exception {
         AiDatabase.RunRecord run = db.createRun("opencode", "/scroll-project");
         for (int i = 0; i < 40; i++) db.appendMessage(run.id, i % 2 == 0 ? "user" : "assistant", "scroll message " + i);

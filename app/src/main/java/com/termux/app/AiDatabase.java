@@ -21,7 +21,7 @@ public final class AiDatabase extends SQLiteOpenHelper {
 
     private static final String TAG = "AiDatabase";
     private static final String DATABASE_NAME = "termux_ai_runtime.db";
-    private static final int DATABASE_VERSION = 15;
+    private static final int DATABASE_VERSION = 16;
 
     public static final class RunRecord {
         public String id;
@@ -62,6 +62,14 @@ public final class AiDatabase extends SQLiteOpenHelper {
         createV11Schema(db);
         createV12Schema(db);
         createV13Schema(db);
+        createV16Schema(db);
+    }
+
+    /** Rewind audit flag: /undo and /retry-orphaned rows stay in the table
+     * for audit but are hidden from discovery. Tool transcript rows
+     * (active=0, compacted=0, rewound=0) remain discoverable. */
+    private void createV16Schema(SQLiteDatabase db) {
+        try { db.execSQL("ALTER TABLE messages ADD COLUMN rewound INTEGER DEFAULT 0"); } catch (Exception ignored) {}
     }
 
     private void createV8Schema(SQLiteDatabase db) {
@@ -471,6 +479,9 @@ public final class AiDatabase extends SQLiteOpenHelper {
                     "DROP TRIGGER IF EXISTS messages_au_trigram");
             }
         }
+        if (oldVersion < 16) {
+            createV16Schema(db);
+        }
         if (oldVersion < 6) {
             // Title provenance (khabeer title_source): 'message' = derived from
             // the first user message, 'ai' = model-generated summary. Existing
@@ -718,6 +729,103 @@ public final class AiDatabase extends SQLiteOpenHelper {
             "SELECT COUNT(*) FROM messages WHERE session_id=? AND role='user'",
             new String[]{sessionId});
         try { return c.moveToFirst() ? c.getInt(0) : 0; } finally { c.close(); }
+    }
+
+    /** Last active user turn that is not a compaction summary. */
+    public synchronized JSONObject lastActiveUserMessage(String sessionId) {
+        JSONObject out = new JSONObject();
+        try {
+            Cursor c = getReadableDatabase().query("messages", new String[]{"id", "content"},
+                "session_id=? AND active=1 AND role='user' AND COALESCE(_compressed_summary, 0)=0",
+                new String[]{sessionId}, null, null, "id DESC", "1");
+            try {
+                if (c.moveToFirst()) {
+                    out.put("found", true);
+                    out.put("id", c.getLong(0));
+                    out.put("content", c.getString(1));
+                } else {
+                    out.put("found", false);
+                }
+            } finally { c.close(); }
+        } catch (Exception e) {
+            try { out.put("found", false).put("error", e.getMessage()); } catch (Exception ignored) {}
+        }
+        return out;
+    }
+
+    /** /undo [N]: soft-delete the last N user turns (the user message plus
+     * everything after it). Rows flip to active=0, compacted=0: kept for
+     * audit, hidden from replay AND search. n clamps to the oldest turn.
+     * Compaction summaries are never rewound. */
+    public synchronized JSONObject rewindSession(String sessionId, int n) {
+        JSONObject out = new JSONObject();
+        SQLiteDatabase db = getWritableDatabase();
+        int turns = Math.max(1, n);
+        db.beginTransaction();
+        try {
+            ArrayList<Long> userIds = new ArrayList<>();
+            ArrayList<String> userTexts = new ArrayList<>();
+            Cursor c = db.query("messages", new String[]{"id", "content"},
+                "session_id=? AND active=1 AND role='user' AND COALESCE(_compressed_summary, 0)=0",
+                new String[]{sessionId}, null, null, "id DESC");
+            try {
+                while (c.moveToNext()) {
+                    userIds.add(c.getLong(0));
+                    userTexts.add(c.getString(1));
+                }
+            } finally { c.close(); }
+            if (userIds.isEmpty()) {
+                return out.put("success", false).put("error", "Nothing to undo in this session.");
+            }
+            int undone = Math.min(turns, userIds.size());
+            long cutoff = userIds.get(undone - 1);
+            ContentValues v = new ContentValues();
+            v.put("active", 0);
+            v.put("compacted", 0);
+            v.put("rewound", 1);
+            int rewound = db.update("messages", v,
+                "session_id=? AND active=1 AND id>=? AND COALESCE(_compressed_summary, 0)=0",
+                new String[]{sessionId, String.valueOf(cutoff)});
+            ContentValues runUpdate = new ContentValues();
+            runUpdate.put("updated_at", System.currentTimeMillis());
+            db.update("runs", runUpdate, "id=?", new String[]{sessionId});
+            db.setTransactionSuccessful();
+            out.put("success", true);
+            out.put("turns_undone", undone);
+            out.put("rewound_count", rewound);
+            out.put("target_text", userTexts.get(undone - 1));
+            return out;
+        } catch (Exception e) {
+            try { out.put("success", false).put("error", "Undo failed: " + e.getMessage()); } catch (Exception ignored) {}
+            return out;
+        } finally {
+            db.endTransaction();
+        }
+    }
+
+    /** /retry: drop everything AFTER the given user message (failed assistant
+     * reply, tool rows) while keeping the user row active for replay. */
+    public synchronized int clearAfterMessage(String sessionId, long userMessageId) {
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        try {
+            ContentValues v = new ContentValues();
+            v.put("active", 0);
+            v.put("compacted", 0);
+            v.put("rewound", 1);
+            int cleared = db.update("messages", v,
+                "session_id=? AND active=1 AND id>? AND COALESCE(_compressed_summary, 0)=0",
+                new String[]{sessionId, String.valueOf(userMessageId)});
+            ContentValues runUpdate = new ContentValues();
+            runUpdate.put("updated_at", System.currentTimeMillis());
+            db.update("runs", runUpdate, "id=?", new String[]{sessionId});
+            db.setTransactionSuccessful();
+            return cleared;
+        } catch (Exception ignored) {
+            return -1;
+        } finally {
+            db.endTransaction();
+        }
     }
 
     /** One-time hygiene: older builds persisted the final chat reply twice
@@ -1092,11 +1200,13 @@ public final class AiDatabase extends SQLiteOpenHelper {
         SearchCursor sc = new SearchCursor();
         String safe = query == null ? "" : query.replace("\"", "\"\"");
         String phrase = "\"" + safe + "\"";
+        // Rewound rows stay out of discovery: kept for audit, hidden from
+        // recall. Tool transcript and compacted history stay searchable.
         String cols = "m.id, m.session_id, m.role, " +
             "snippet(messages_fts, 0, '>>>', '<<<', '…', 20), m.content, m.created_at, " +
             "m.active, COALESCE(m.compacted, 0), COALESCE(m._compressed_summary, 0) " +
             "FROM messages_fts f JOIN messages m ON m.id = f.message_id " +
-            "WHERE messages_fts MATCH ? ORDER BY rank LIMIT ?";
+            "WHERE messages_fts MATCH ? AND COALESCE(m.rewound, 0)=0 ORDER BY rank LIMIT ?";
         try {
             sc.cursor = getReadableDatabase().rawQuery(
                 "SELECT " + cols, new String[]{phrase, String.valueOf(limit)});
@@ -1113,7 +1223,7 @@ public final class AiDatabase extends SQLiteOpenHelper {
         sc.cursor = getReadableDatabase().query("messages",
             new String[]{"id", "session_id", "role", "''", "content", "created_at",
                 "active", "compacted", "_compressed_summary"},
-            "content LIKE ? ESCAPE '\\'",
+            "content LIKE ? ESCAPE '\\' AND COALESCE(rewound, 0)=0",
             new String[]{"%" + escapeLike(query) + "%"},
             null, null, "created_at DESC", String.valueOf(limit));
         sc.backend = "like_fallback";
