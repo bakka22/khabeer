@@ -87,6 +87,24 @@ public class AiDatabaseMemoryTest {
     }
 
     @Test
+    public void exportCoversTranscriptUsageAndMarkers() throws Exception {
+        AiDatabase.RunRecord run = db.createRun("opencode", "/export-project");
+        db.appendMessage(run.id, "user", "export me");
+        db.appendMessage(run.id, "assistant", "exported reply");
+        db.appendTurnUsage(run.id, "model-x", 10, 5, false);
+        db.rewindSession(run.id, 5);
+
+        String md = db.buildSessionMarkdown(run.id);
+        assertTrue(md.contains("exporter: khabeer sessions export (md) v1"));
+        assertTrue(md.contains("### User"));
+        assertTrue(md.contains("### Assistant"));
+        assertTrue(md.contains("export me"));
+        assertTrue(md.contains("[rewound"));
+        assertTrue(md.contains("total_tokens: 15"));
+        assertEquals("", db.buildSessionMarkdown("missing"));
+    }
+
+    @Test
     public void rewindHidesTurnsButKeepsAuditAndClamps() throws Exception {
         AiDatabase.RunRecord run = db.createRun("opencode", "/rewind-project");
         db.appendMessage(run.id, "user", "first question");

@@ -266,6 +266,11 @@ public final class AiRuntimeService extends Service {
         return mDatabase.getSessionUsage(sessionId);
     }
 
+    public String exportSessionMarkdown(String sessionId) {
+        if (mDatabase == null || TextUtils.isEmpty(sessionId)) return "";
+        return mDatabase.buildSessionMarkdown(sessionId);
+    }
+
     private void completeRun(RunContext ctx) {
         if (ctx == null) return;
         flushTurnUsage(ctx, false);

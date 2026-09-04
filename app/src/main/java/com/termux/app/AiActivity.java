@@ -5103,8 +5103,66 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         row.addView(meta);
 
         row.setOnClickListener(v -> resumeSession(run, archived));
-        if (!archived) row.setOnLongClickListener(v -> { confirmArchive(run); return true; });
+        if (!archived) row.setOnLongClickListener(v -> { showSessionActions(run); return true; });
         return row;
+    }
+
+    private void showSessionActions(AiDatabase.RunRecord run) {
+        new MaterialAlertDialogBuilder(this)
+            .setTitle(run.title == null ? "Session" : run.title)
+            .setItems(new String[]{"Share as markdown", "Save .md file", "Archive session"}, (dialog, which) -> {
+                if (which == 0) shareSessionMarkdown(run);
+                else if (which == 1) saveSessionMarkdown(run);
+                else confirmArchive(run);
+            })
+            .show();
+    }
+
+    private String sessionMarkdown(AiDatabase.RunRecord run) {
+        if (mRuntimeService == null || run == null) return "";
+        return mRuntimeService.exportSessionMarkdown(run.id);
+    }
+
+    private String exportFileName(AiDatabase.RunRecord run) {
+        String base = run.title == null ? "session" : run.title.replaceAll("[^a-zA-Z0-9._-]+", "_");
+        if (base.length() > 60) base = base.substring(0, 60);
+        return base + "-" + run.id.substring(0, Math.min(8, run.id.length())) + ".md";
+    }
+
+    private void shareSessionMarkdown(AiDatabase.RunRecord run) {
+        String md = sessionMarkdown(run);
+        if (TextUtils.isEmpty(md)) {
+            showError("Nothing to export in this session.");
+            return;
+        }
+        try {
+            android.content.Intent share = new android.content.Intent(android.content.Intent.ACTION_SEND);
+            share.setType("text/plain");
+            share.putExtra(android.content.Intent.EXTRA_SUBJECT, run.title);
+            share.putExtra(android.content.Intent.EXTRA_TEXT, md);
+            startActivity(android.content.Intent.createChooser(share, "Share session"));
+        } catch (Exception e) {
+            saveSessionMarkdown(run);
+        }
+    }
+
+    private void saveSessionMarkdown(AiDatabase.RunRecord run) {
+        String md = sessionMarkdown(run);
+        if (TextUtils.isEmpty(md)) {
+            showError("Nothing to export in this session.");
+            return;
+        }
+        try {
+            java.io.File dir = new java.io.File(AiMemoryStore.dataRoot(), "exports");
+            dir.mkdirs();
+            java.io.File out = new java.io.File(dir, exportFileName(run));
+            try (java.io.FileOutputStream fos = new java.io.FileOutputStream(out, false)) {
+                fos.write(md.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            }
+            Toast.makeText(this, "Saved " + out.getAbsolutePath(), Toast.LENGTH_LONG).show();
+        } catch (Exception e) {
+            showError("Export failed: " + (e.getMessage() == null ? e.toString() : e.getMessage()));
+        }
     }
 
     private String sessionMeta(AiDatabase.RunRecord run, boolean archived) {

@@ -99,6 +99,65 @@ public final class AiDatabase extends SQLiteOpenHelper {
         } catch (Exception ignored) {}
     }
 
+    /** Markdown export (Hermes session_export_md shape): frontmatter plus
+     * one ### section per transcript row. Filesystem-only: never mutates
+     * state. Includes rewound/compacted rows with markers (audit-complete),
+     * plus the token ledger in frontmatter. */
+    public synchronized String buildSessionMarkdown(String sessionId) {
+        RunRecord r = getRun(sessionId);
+        if (r == null) return "";
+        JSONObject usage = getSessionUsage(sessionId);
+        StringBuilder md = new StringBuilder();
+        md.append("---\n");
+        md.append("exporter: khabeer sessions export (md) v1\n");
+        md.append("session_id: ").append(r.id).append("\n");
+        md.append("title: ").append(jsonScalar(r.title)).append("\n");
+        md.append("provider: ").append(jsonScalar(r.harnessId)).append("\n");
+        md.append("model: ").append(jsonScalar(
+            TextUtils.isEmpty(r.modelOverride) ? r.lastResolvedModel : r.modelOverride)).append("\n");
+        md.append("workspace: ").append(jsonScalar(r.workspace)).append("\n");
+        md.append("created: ").append(isoTime(r.createdAt)).append("\n");
+        md.append("updated: ").append(isoTime(r.updatedAt)).append("\n");
+        md.append("prompt_tokens: ").append(usage.optLong("prompt_tokens", 0)).append("\n");
+        md.append("completion_tokens: ").append(usage.optLong("completion_tokens", 0)).append("\n");
+        md.append("total_tokens: ").append(usage.optLong("total_tokens", 0)).append("\n");
+        md.append("---\n\n");
+        Cursor c = getReadableDatabase().query("messages",
+            new String[]{"role", "content", "created_at", "active", "compacted", "_compressed_summary", "rewound"},
+            "session_id=?", new String[]{sessionId}, null, null, "id ASC");
+        try {
+            while (c.moveToNext()) {
+                String role = c.getString(0);
+                String label = "user".equals(role) ? "User" : "assistant".equals(role) ? "Assistant"
+                    : "tool".equals(role) ? "Tool" : role;
+                md.append("### ").append(label).append(" — ").append(isoTime(c.getLong(2))).append("\n\n");
+                boolean rewound = c.getInt(6) == 1;
+                boolean compacted = c.getInt(4) == 1;
+                boolean summary = c.getInt(5) == 1;
+                if (rewound) md.append("> [rewound — hidden from replay, kept for audit]\n\n");
+                else if (summary) md.append("> [context compaction checkpoint]\n\n");
+                else if (compacted) md.append("> [compacted history]\n\n");
+                String content = c.getString(1);
+                if ("tool".equals(role)) md.append("```\n").append(content == null ? "" : content.trim()).append("\n```\n");
+                else md.append(content == null ? "" : content.trim()).append("\n");
+                md.append("\n");
+            }
+        } finally { c.close(); }
+        return md.toString();
+    }
+
+    private static String jsonScalar(String value) {
+        if (value == null) return "null";
+        return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", " ") + "\"";
+    }
+
+    private static String isoTime(long ms) {
+        if (ms <= 0) return "";
+        java.text.SimpleDateFormat f = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.US);
+        f.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
+        return f.format(new java.util.Date(ms));
+    }
+
     public synchronized JSONObject getSessionUsage(String sessionId) {
         JSONObject out = new JSONObject();
         try {
