@@ -21,7 +21,7 @@ public final class AiDatabase extends SQLiteOpenHelper {
 
     private static final String TAG = "AiDatabase";
     private static final String DATABASE_NAME = "termux_ai_runtime.db";
-    private static final int DATABASE_VERSION = 17;
+    private static final int DATABASE_VERSION = 18;
 
     public static final class RunRecord {
         public String id;
@@ -48,6 +48,7 @@ public final class AiDatabase extends SQLiteOpenHelper {
         public String title;
         public String titleSource;
         public String route;
+        public String source;
     }
 
     public AiDatabase(Context context) {
@@ -64,6 +65,15 @@ public final class AiDatabase extends SQLiteOpenHelper {
         createV13Schema(db);
         createV16Schema(db);
         createV17Schema(db);
+        createV18Schema(db);
+    }
+
+    /** Subagent session source (Hermes source taxonomy, trimmed): child
+     * turns run under source='subagent' with parent_session_id set. They
+     * are hidden from session lists and discovery, like Hermes. */
+    private void createV18Schema(SQLiteDatabase db) {
+        try { db.execSQL("ALTER TABLE runs ADD COLUMN source TEXT DEFAULT 'agent'"); } catch (Exception ignored) {}
+        try { db.execSQL("UPDATE runs SET source='agent' WHERE source IS NULL"); } catch (Exception ignored) {}
     }
 
     /** Per-turn token ledger (Hermes session usage counters, durable):
@@ -598,6 +608,9 @@ public final class AiDatabase extends SQLiteOpenHelper {
         if (oldVersion < 17) {
             createV17Schema(db);
         }
+        if (oldVersion < 18) {
+            createV18Schema(db);
+        }
         if (oldVersion < 6) {
             // Title provenance (khabeer title_source): 'message' = derived from
             // the first user message, 'ai' = model-generated summary. Existing
@@ -680,6 +693,7 @@ public final class AiDatabase extends SQLiteOpenHelper {
         values.put("title", record.title);
         values.put("title_source", record.titleSource);
         values.put("route", record.route);
+        values.put("source", TextUtils.isEmpty(record.source) ? "agent" : record.source);
 
         SQLiteDatabase db = getWritableDatabase();
         if (db.update("runs", values, "id = ?", new String[]{record.id}) == 0) {
@@ -1002,7 +1016,7 @@ public final class AiDatabase extends SQLiteOpenHelper {
     @Nullable
     public synchronized RunRecord getLatestActiveRun() {
         Cursor cursor = getReadableDatabase().query("runs", null,
-            "state NOT IN (?, ?, ?) AND COALESCE(archived, 0) = 0",
+            "state NOT IN (?, ?, ?) AND COALESCE(archived, 0) = 0 AND COALESCE(source, 'agent') != 'subagent'",
             new String[]{AiRunStateMachine.State.COMPLETED.name(), AiRunStateMachine.State.FAILED.name(), AiRunStateMachine.State.CANCELED.name()},
             null, null, "updated_at DESC", "1");
         try {
@@ -1040,11 +1054,12 @@ public final class AiDatabase extends SQLiteOpenHelper {
     }
 
     /** Every non-archived session — nothing is hidden automatically;
-     *  archiving is a user action from the Sessions page. */
+     *  archiving is a user action from the Sessions page. Subagent child
+     *  sessions are hidden here (and from discovery), like Hermes. */
     public synchronized List<RunRecord> getSessions(int limit) {
         List<RunRecord> records = new ArrayList<>();
         Cursor cursor = getReadableDatabase().query("runs", null,
-            "COALESCE(archived, 0) = 0", null, null, null,
+            "COALESCE(archived, 0) = 0 AND COALESCE(source, 'agent') != 'subagent'", null, null, null,
             "updated_at DESC", String.valueOf(limit));
         try {
             while (cursor.moveToNext()) records.add(readRun(cursor));
@@ -1242,7 +1257,7 @@ public final class AiDatabase extends SQLiteOpenHelper {
                 boolean compactedHit = c.getInt(7) == 1 || c.getInt(8) == 1;
                 if (currentRoot != null && currentRoot.equals(root) && !compactedHit) continue;
                 RunRecord run = getRun(sid);
-                if (run == null || run.archived) continue;
+                if (run == null || run.archived || "subagent".equals(run.source)) continue;
                 seenRoots.add(root);
                 String snippet = c.getString(3);
                 String content = c.getString(4);
@@ -1407,6 +1422,7 @@ public final class AiDatabase extends SQLiteOpenHelper {
         try { record.title = cursor.getString(cursor.getColumnIndexOrThrow("title")); } catch (Exception ignored) {}
         try { record.titleSource = cursor.getString(cursor.getColumnIndexOrThrow("title_source")); } catch (Exception ignored) {}
         try { record.route = cursor.getString(cursor.getColumnIndexOrThrow("route")); } catch (Exception ignored) {}
+        try { record.source = cursor.getString(cursor.getColumnIndexOrThrow("source")); } catch (Exception ignored) {}
         return record;
     }
 

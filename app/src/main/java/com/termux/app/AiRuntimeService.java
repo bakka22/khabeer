@@ -61,6 +61,16 @@ public final class AiRuntimeService extends Service {
     private static final int NOTIFICATION_ID = 2401;
     private static final String CHANNEL_ID = "termux_ai_runtime";
     private static final int MAX_MODEL_STEPS = 80;
+    /** Bounded child turns (Hermes leaf discipline): fewer steps than a
+     * full session turn, plus a wall-clock timeout in runDelegateTask. */
+    private static final int SUBAGENT_MAX_STEPS = 20;
+    private static final int SUBAGENT_DEFAULT_TIMEOUT_SECONDS = 300;
+    private static final int SUBAGENT_MAX_TIMEOUT_SECONDS = 1800;
+
+    private static int turnMaxSteps(RunContext c) {
+        if (c != null && c.maxSteps > 0) return c.maxSteps;
+        return MAX_MODEL_STEPS;
+    }
     private static final int MODEL_CONNECT_TIMEOUT_MS = 30000;
     private static final int MODEL_READ_TIMEOUT_MS = 10 * 60 * 1000;
     private static final int DEFAULT_TOOL_TIMEOUT_SECONDS = 300;
@@ -75,6 +85,10 @@ public final class AiRuntimeService extends Service {
     private final Map<String, KhabeerSessionState> mSessions = new HashMap<>();
     /** Sessions already warned at the 90% threshold (reset on compact/new session). */
     private final HashSet<String> mContextWarnedSessions = new HashSet<>();
+    /** True on threads running a delegated child turn: model callbacks stay
+     * local (no UI broadcast, no parent-transcript writes, approvals
+     * auto-deny, no review/title side effects). Nesting is forbidden. */
+    private final ThreadLocal<Boolean> mQuietTurn = new ThreadLocal<>();
 
     private AiDatabase mDatabase;
     private MobileKhabeerToolExecutor mToolExecutor;
@@ -123,6 +137,10 @@ public final class AiRuntimeService extends Service {
         long turnCompletionTokens;
         boolean turnUsageReal;
         boolean turnUsageFlushed;
+        /** Ledger attribution override: child turns flush to the parent. */
+        String usageSessionId;
+        /** Per-turn step budget override (subagents run bounded). 0 = default. */
+        int maxSteps;
         /** skill_view repeat-view dedup: "name|file" -> "mtime:size" (khabeer
          * repeat-view dedup — unchanged re-reads return a stub, not content). */
         final HashMap<String, String> skillViewCache = new HashMap<>();
@@ -255,7 +273,8 @@ public final class AiRuntimeService extends Service {
                 prompt = 0;
                 completion = chars / 4;
             }
-            mDatabase.appendTurnUsage(ctx.record.id,
+            String ledgerSession = ctx.usageSessionId != null ? ctx.usageSessionId : ctx.record.id;
+            mDatabase.appendTurnUsage(ledgerSession,
                 ctx.record.lastResolvedModel == null ? "" : ctx.record.lastResolvedModel,
                 prompt, completion, estimated);
         } catch (Exception ignored) {}
@@ -280,6 +299,7 @@ public final class AiRuntimeService extends Service {
         clearActiveTurn(ctx);
         persistRun(ctx);
         if (ctx.record.sessionKey != null) sessionState(ctx.record.sessionKey).clearTurn();
+        if (isQuiet()) return;
         if (!"ai".equals(ctx.record.titleSource)) generateSessionTitleAsync(ctx.record.id);
         maybeRunMemoryReview(ctx);
     }
@@ -1128,7 +1148,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
                 executeAnthropicTurn(ctx, providerId, baseUrl, apiKey, workspace, prompt, model, approvalPolicy);
                 return;
             }
-            for (int step = 0; step < MAX_MODEL_STEPS && !ctx().stopRequested && !KhabeerInterruptManager.isInterrupted(); step++) {
+            for (int step = 0; step < turnMaxSteps(ctx()) && !ctx().stopRequested && !KhabeerInterruptManager.isInterrupted(); step++) {
                 JSONObject response = callResponsesApiWithRetry(providerId, baseUrl, apiKey, model, effort, input);
                 JSONArray outputs = response.optJSONArray("output");
                 boolean hasToolCall = false;
@@ -1314,7 +1334,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         }
 
         try {
-            for (int step = 0; step < MAX_MODEL_STEPS && !ctx().stopRequested && !KhabeerInterruptManager.isInterrupted(); step++) {
+            for (int step = 0; step < turnMaxSteps(ctx()) && !ctx().stopRequested && !KhabeerInterruptManager.isInterrupted(); step++) {
                 JSONObject response = callCodexApiWithRetry(model, effort, input);
                 JSONArray outputs = response.optJSONArray("output");
                 boolean hasToolCall = false;
@@ -1698,7 +1718,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         refreshReplayHistory(ctx);
 
         try {
-            for (int step = 0; step < MAX_MODEL_STEPS && !ctx().stopRequested && !KhabeerInterruptManager.isInterrupted(); step++) {
+            for (int step = 0; step < turnMaxSteps(ctx()) && !ctx().stopRequested && !KhabeerInterruptManager.isInterrupted(); step++) {
                 JSONObject response = callAnthropicApi(providerId, baseUrl, apiKey, model, ctx().chatMessages);
                 JSONArray content = response.optJSONArray("content");
                 StringBuilder textBuilder = new StringBuilder();
@@ -1888,7 +1908,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
             ctx().chatMessages = new JSONArray();
         refreshReplayHistory(ctx);
 
-        for (int step = 0; step < MAX_MODEL_STEPS && !ctx().stopRequested && !KhabeerInterruptManager.isInterrupted(); step++) {
+        for (int step = 0; step < turnMaxSteps(ctx()) && !ctx().stopRequested && !KhabeerInterruptManager.isInterrupted(); step++) {
             JSONObject response = callChatCompletionsApiWithRetry(providerId, baseUrl, apiKey, model, ctx().chatMessages);
             JSONArray choices = response.optJSONArray("choices");
             JSONObject choice = choices == null ? null : choices.optJSONObject(0);
@@ -2325,6 +2345,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         if (mProviderConfig == null || mProviderConfig.isAnyBuiltInMemoryEnabled())
             tools.put(chatShape ? chatShape(memoryTool()) : memoryTool());
         tools.put(chatShape ? chatShape(sessionSearchTool()) : sessionSearchTool());
+        tools.put(chatShape ? chatShape(delegateTool()) : delegateTool());
         if (AiSkillRegistry.promptSection() != null) {
             tools.put(chatShape ? chatShape(skillsListTool()) : skillsListTool());
             tools.put(chatShape ? chatShape(skillViewTool()) : skillViewTool());
@@ -2340,7 +2361,56 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
                 tools.put(chatShape ? chatShape(flat) : flat);
             }
         }
+        if (isQuiet()) return filterBlockedTools(tools);
         return tools;
+    }
+
+    /** Tools a delegated child may use (Hermes DELEGATE_BLOCKED_TOOLS,
+     * trimmed for mobile): everything except memory writes, skill
+     * management, and further delegation. Terminal stays but its approvals
+     * auto-deny inside child turns. modelTools applies this automatically
+     * on quiet (child) threads. */
+    static final java.util.Set<String> SUBAGENT_BLOCKED_TOOLS =
+        new java.util.HashSet<>(java.util.Arrays.asList("delegate_task", "memory", "skill_manage"));
+
+    static JSONArray filterBlockedTools(JSONArray tools) throws Exception {
+        JSONArray out = new JSONArray();
+        if (tools == null) return out;
+        for (int i = 0; i < tools.length(); i++) {
+            JSONObject tool = tools.optJSONObject(i);
+            if (tool == null) continue;
+            String name = tool.optString("name");
+            if (TextUtils.isEmpty(name)) {
+                JSONObject fn = tool.optJSONObject("function");
+                if (fn != null) name = fn.optString("name");
+            }
+            if (!SUBAGENT_BLOCKED_TOOLS.contains(name)) out.put(tool);
+        }
+        return out;
+    }
+
+    private JSONObject delegateTool() throws Exception {
+        return new JSONObject()
+            .put("type", "function")
+            .put("name", "delegate_task")
+            .put("description", "Hand a self-contained chunk of work to a subagent that runs with the same provider and model. "
+                + "Use for parallelizable research, exploration, or bounded multi-step jobs while you continue with other work items. "
+                + "The subagent sees the frozen memory snapshot and session history search but CANNOT write memory, manage skills, delegate further, "
+                + "or ask the user anything (terminal commands auto-deny). Give a precise goal plus all needed context — it cannot ask follow-ups. "
+                + "Returns the subagent's final result text. Prefer one delegate call per independent workstream.")
+            .put("parameters", new JSONObject()
+                .put("type", "object")
+                .put("properties", new JSONObject()
+                    .put("task", new JSONObject()
+                        .put("type", "string")
+                        .put("description", "The precise goal for the subagent, stated as a complete assignment."))
+                    .put("context", new JSONObject()
+                        .put("type", "string")
+                        .put("description", "Background the subagent needs: file paths, decisions so far, constraints. Optional."))
+                    .put("timeout_seconds", new JSONObject()
+                        .put("type", "integer")
+                        .put("description", "Hard timeout for the child turn. Optional, default 300, max 1800.")))
+                .put("required", new JSONArray().put("task")));
     }
 
     private JSONObject memoryTool() throws Exception {
@@ -2513,6 +2583,10 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
             output = runMemoryTool(args);
         } else if (isSessionSearchTool(name)) {
             output = runSessionSearchTool(args);
+        } else if (isDelegateTool(name)) {
+            emit("tool/callStarted", json("name", name, "command", "delegate_task"));
+            output = runDelegateTask(args, workspace);
+            emit("item/commandExecution/outputDelta", json("text", output + "\n", "command", "delegate_task"));
         } else if (isSkillsTool(name)) {
             output = runSkillsTool(name, args, approvalPolicy);
         } else if (name != null && name.startsWith(AiMcpRegistry.TOOL_PREFIX)) {
@@ -2549,6 +2623,10 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
             output = runMemoryTool(args);
         } else if (isSessionSearchTool(name)) {
             output = runSessionSearchTool(args);
+        } else if (isDelegateTool(name)) {
+            emit("tool/callStarted", json("name", name, "command", "delegate_task"));
+            output = runDelegateTask(args, workspace);
+            emit("item/commandExecution/outputDelta", json("text", output + "\n", "command", "delegate_task"));
         } else if (isSkillsTool(name)) {
             output = runSkillsTool(name, args, approvalPolicy);
         } else if (name != null && name.startsWith(AiMcpRegistry.TOOL_PREFIX)) {
@@ -2607,6 +2685,196 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
 
     private boolean isMemoryTool(String name) {
         return "memory".equals(name);
+    }
+
+    private boolean isDelegateTool(String name) {
+        return "delegate_task".equals(name);
+    }
+
+    /** Child-turn system prompt: same frozen memory snapshot for context,
+     * but an explicit subagent contract overriding the parent guidance
+     * (no user contact, no memory/skill writes, no further delegation,
+     * terminal approvals auto-deny — put everything in the final text). */
+    private String childInstructions() {
+        boolean memoryEnabled = mProviderConfig == null || mProviderConfig.isMemoryEnabled();
+        boolean userEnabled = mProviderConfig == null || mProviderConfig.isUserMemoryEnabled();
+        return AiMemoryStore.systemPromptSnapshot(memoryEnabled, userEnabled)
+            + "\n\nYou are a khabeer subagent running inside a parent agent's tool call. Rules: "
+            + "you cannot contact the user and no one will see anything except your final reply text, so be complete and self-contained; "
+            + "quote file paths, commands, and outputs verbatim. "
+            + "You have no memory tool and no skill management — durable findings belong in your final text, not in any store. "
+            + "You cannot delegate further. Terminal commands run without approval prompts: read-only inspection is safe, "
+            + "but any write-capable command is auto-denied, so verify by reading instead. "
+            + "Use session_search for past conversation context when needed. End with a concise result section.";
+    }
+
+    /** Runs one bounded child turn on a dedicated thread and returns its
+     * result as the tool output string. Same provider/model/credentials as
+     * the parent turn; transcript persists under a hidden subagent session
+     * row; token usage attributes to the parent ledger. */
+    private String runDelegateTask(JSONObject args, String workspace) throws Exception {
+        if (isQuiet()) {
+            return new JSONObject().put("error", "Subagents cannot delegate further. Do the work directly.").toString();
+        }
+        RunContext parent = ctx();
+        if (parent == null || parent.record == null) {
+            return new JSONObject().put("error", "No active session to delegate from.").toString();
+        }
+        String goal = args == null ? "" : args.optString("task", args.optString("goal", "")).trim();
+        if (TextUtils.isEmpty(goal)) {
+            return new JSONObject().put("error", "delegate_task needs a task: a complete assignment with goal and context.").toString();
+        }
+        String context = args == null ? "" : args.optString("context", "");
+        int timeoutSec = args == null ? SUBAGENT_DEFAULT_TIMEOUT_SECONDS
+            : args.optInt("timeout_seconds", SUBAGENT_DEFAULT_TIMEOUT_SECONDS);
+        timeoutSec = Math.max(60, Math.min(SUBAGENT_MAX_TIMEOUT_SECONDS, timeoutSec));
+        String providerId = parent.providerId != null ? parent.providerId : parent.record.harnessId;
+        String baseUrl = parent.baseUrl;
+        String apiKey = parent.apiKey;
+        String model = parent.model != null ? parent.model : parent.record.lastResolvedModel;
+        if (TextUtils.isEmpty(baseUrl) || TextUtils.isEmpty(model)) {
+            String[] creds = sessionCredentials(parent);
+            if (creds == null) return new JSONObject().put("error", "Session provider is not available.").toString();
+            providerId = creds[0];
+            baseUrl = creds[1];
+            apiKey = creds[2];
+            model = creds[3];
+        }
+        final String fProviderId = providerId;
+        final String fBaseUrl = baseUrl;
+        final String fApiKey = apiKey;
+        final String fModel = model;
+        final String assignment = TextUtils.isEmpty(context.trim()) ? goal : goal + "\n\nContext:\n" + context.trim();
+
+        AiDatabase.RunRecord child = mDatabase.createRun(
+            parent.record.harnessId == null ? "native-agent" : parent.record.harnessId,
+            workspace, "subagent:" + parent.record.id);
+        child.parentSessionId = parent.record.id;
+        child.source = "subagent";
+        child.modelOverride = model;
+        child.lastResolvedModel = model;
+        child.sessionKey = "subagent:" + child.id;
+        mDatabase.saveRun(child);
+        final RunContext childCtx = new RunContext(child);
+        childCtx.providerId = fProviderId;
+        childCtx.baseUrl = fBaseUrl;
+        childCtx.apiKey = fApiKey;
+        childCtx.model = fModel;
+        childCtx.usageSessionId = parent.record.id;
+        childCtx.maxSteps = SUBAGENT_MAX_STEPS;
+        try {
+            childCtx.chatMessages = new JSONArray()
+                .put(json("role", "system", "content", childInstructions()))
+                .put(json("role", "user", "content", assignment));
+            childCtx.record.chatMessagesJson = childCtx.chatMessages.toString();
+        } catch (Exception e) {
+            return new JSONObject().put("error", "Could not start the subagent: " + e.getMessage()).toString();
+        }
+        mRuns.put(child.id, childCtx);
+
+        final long deadline = System.currentTimeMillis() + timeoutSec * 1000L;
+        Thread worker = new Thread(() -> {
+            RunContext prev = mTurnContext.get();
+            mTurnContext.set(childCtx);
+            mQuietTurn.set(true);
+            KhabeerInterruptManager.clearCurrentThread();
+            try {
+                executeTurn(childCtx, fProviderId, fBaseUrl, fApiKey, workspace,
+                    assignment, fModel, null, null, false);
+            } catch (Exception e) {
+                try { failRun(childCtx, e.getMessage() == null ? e.toString() : e.getMessage()); } catch (Exception ignored) {}
+            } finally {
+                mQuietTurn.remove();
+                mTurnContext.set(prev);
+                KhabeerInterruptManager.clearCurrentThread();
+            }
+        }, "khabeer-subagent");
+        worker.start();
+        boolean timedOut = false;
+        boolean parentStopped = false;
+        while (worker.isAlive()) {
+            if (parent.stopRequested || KhabeerInterruptManager.isInterrupted()) {
+                parentStopped = true;
+                KhabeerInterruptManager.setInterrupt(true, worker.getId(), "parent-stopped");
+                try { worker.join(10000); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                break;
+            }
+            if (System.currentTimeMillis() > deadline) {
+                timedOut = true;
+                KhabeerInterruptManager.setInterrupt(true, worker.getId(), "subagent-timeout");
+                try { worker.join(15000); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                break;
+            }
+            try { worker.join(1000); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
+        }
+        if (worker.isAlive()) {
+            try { failRun(childCtx, "Subagent turn did not stop after interrupt; result unavailable."); } catch (Exception ignored) {}
+        } else if (timedOut && !isTerminalState(childCtx)) {
+            try { failRun(childCtx, "Subagent timed out after " + timeoutSec + "s."); } catch (Exception ignored) {}
+        }
+        persistChildTranscript(childCtx);
+        persistRun(childCtx);
+        mRuns.remove(child.id);
+        KhabeerInterruptManager.clearCurrentThread();
+
+        String result = lastAssistantText(childCtx.chatMessages);
+        long used = childCtx.turnPromptTokens + childCtx.turnCompletionTokens;
+        StringBuilder out = new StringBuilder();
+        if (TextUtils.isEmpty(result.trim())) {
+            out.append(parentStopped ? "Subagent stopped with the parent turn."
+                : timedOut ? "Subagent timed out with no text result."
+                : "Subagent finished with no text result.");
+        } else {
+            out.append(result.trim());
+        }
+        if (used > 0) out.append("\n\n[subagent used ").append(used).append(" tokens]");
+        if (timedOut) out.append(" [timed out]");
+        String finalResult = out.toString();
+        if (finalResult.length() > 16000) {
+            finalResult = finalResult.substring(0, 16000)
+                + "\n\n[subagent result truncated to 16000 chars; full transcript is in the hidden subagent session]";
+        }
+        return finalResult;
+    }
+
+    private boolean isTerminalState(RunContext c) {
+        if (c == null) return true;
+        AiRunStateMachine.State s = c.stateMachine.getState();
+        return s == AiRunStateMachine.State.COMPLETED || s == AiRunStateMachine.State.FAILED
+            || s == AiRunStateMachine.State.CANCELED;
+    }
+
+    private void persistChildTranscript(RunContext childCtx) {
+        if (childCtx == null || childCtx.record == null || childCtx.chatMessages == null) return;
+        try {
+            for (int i = 0; i < childCtx.chatMessages.length(); i++) {
+                JSONObject msg = childCtx.chatMessages.optJSONObject(i);
+                if (msg == null) continue;
+                String role = msg.optString("role", "");
+                if ("system".equals(role)) continue;
+                if ("tool".equals(role)) {
+                    mDatabase.appendToolTranscript(childCtx.record.id,
+                        msg.optString("content", ""), msg.optString("content", ""));
+                } else if ("user".equals(role) || "assistant".equals(role)) {
+                    String content = msg.optString("content", "");
+                    JSONArray calls = msg.optJSONArray("tool_calls");
+                    if (TextUtils.isEmpty(content) && calls != null) content = "[tool calls: " + calls.length() + "]";
+                    mDatabase.appendMessage(childCtx.record.id, role, content);
+                }
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private String lastAssistantText(JSONArray chatMessages) {
+        if (chatMessages == null) return "";
+        for (int i = chatMessages.length() - 1; i >= 0; i--) {
+            JSONObject msg = chatMessages.optJSONObject(i);
+            if (msg != null && "assistant".equals(msg.optString("role"))) {
+                String text = msg.optString("content", "");
+                if (!TextUtils.isEmpty(text.trim())) return text;
+            }
+        }
+        return "";
     }
 
     private JSONArray enabledMemoryTargets() {
@@ -2881,6 +3149,8 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
 
     private boolean requestApproval(String command, String workspace) throws InterruptedException {
         if (ctx() == null) return false;
+        // Subagents cannot prompt the user (Hermes default: auto-deny).
+        if (isQuiet()) return false;
         KhabeerInterruptManager.clearCurrentThread();
         long id = mNextRequestId++;
         PendingApproval approval = new PendingApproval(ctx().record.id);
@@ -3354,9 +3624,14 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         notifyError(ctx().record.id, ctx().record.lastError);
     }
 
+    private boolean isQuiet() {
+        return Boolean.TRUE.equals(mQuietTurn.get());
+    }
+
     private void emit(String method, JSONObject payload) {
         if (ctx() == null) return;
         mDatabase.appendEvent(ctx().record.id, method, payload.toString());
+        if (isQuiet()) return;
         String runId = ctx().record.id;
         mHandler.post(() -> {
             for (Listener listener : new ArrayList<>(mListeners)) listener.onProtocolEvent(runId, method, payload);
@@ -3367,6 +3642,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
     }
 
     private void notifyError(@Nullable String runId, String message) {
+        if (isQuiet()) return;
         mHandler.post(() -> {
             for (Listener listener : new ArrayList<>(mListeners))
                 listener.onRuntimeError(runId, message == null ? "Unknown runtime error." : message);
