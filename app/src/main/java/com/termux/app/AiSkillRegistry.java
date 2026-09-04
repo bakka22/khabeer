@@ -604,36 +604,149 @@ public final class AiSkillRegistry {
         boolean renamed = false;
         try {
             File khabeer = dataRoot();
-            File legacy = legacyDataRoot();
-            if (legacy.isDirectory() && !khabeer.exists()) {
-                renamed = legacy.renameTo(khabeer);
-                if (!renamed) {
-                    // Rename across mount points fails; fall back to a copy.
-                    copyDir(legacy, khabeer);
-                    renamed = khabeer.isDirectory();
-                    if (renamed) deleteRecursive(legacy);
-                }
-            }
-            File prevBrand = legacyKhabeerRoot();
-            if (prevBrand.isDirectory() && !khabeer.exists()) {
-                boolean moved = prevBrand.renameTo(khabeer);
-                if (!moved) {
-                    copyDir(prevBrand, khabeer);
-                    moved = khabeer.isDirectory();
-                    if (moved) deleteRecursive(prevBrand);
-                }
-                renamed = renamed || moved;
-            }
+            renamed |= migrateOneRoot(legacyDataRoot(), khabeer);
+            renamed |= migrateOneRoot(legacyKhabeerRoot(), khabeer);
             khabeer.mkdirs();
             File root = skillsRoot();
             File oldest = legacySkillsRoot();
-            if (oldest.isDirectory() && !root.exists()) {
-                root.getParentFile().mkdirs();
-                if (!oldest.renameTo(root)) copyDir(oldest, root);
+            if (oldest.isDirectory()) {
+                if (!root.exists()) {
+                    root.getParentFile().mkdirs();
+                    if (!oldest.renameTo(root)) copyDir(oldest, root);
+                } else {
+                    mergeTree(oldest, oldest, root, new File(khabeer, "migrated-from-hermes-skills"));
+                    deleteIfEmpty(oldest);
+                }
             }
             rewriteLegacyPaths(khabeer);
         } catch (Exception ignored) {}
         return renamed;
+    }
+
+    /** Moves a legacy data root into the khabeer root. Fast path: rename
+     * when the target does not exist. Merge path (both exist — e.g. the
+     * target was seeded before migration ran): memories union entry-wise,
+     * SOUL prefers real content over seeded defaults, other files copy
+     * when missing (or target empty); divergent leftovers relocate under
+     * migrated-from-<name>/ so nothing is lost. The legacy dir is removed
+     * once empty. */
+    private static boolean migrateOneRoot(File legacy, File khabeer) {
+        if (legacy == null || !legacy.isDirectory()) return false;
+        try {
+            if (!khabeer.exists()) {
+                boolean moved = legacy.renameTo(khabeer);
+                if (!moved) {
+                    copyDir(legacy, khabeer);
+                    moved = khabeer.isDirectory();
+                    if (moved) deleteRecursive(legacy);
+                }
+                return moved;
+            }
+            String tag = legacy.getName().startsWith(".") ? legacy.getName().substring(1) : legacy.getName();
+            mergeTree(legacy, legacy, khabeer, new File(khabeer, "migrated-from-" + tag));
+            deleteIfEmpty(legacy);
+            return !legacy.exists();
+        } catch (Exception ignored) {}
+        return false;
+    }
+
+    private static void mergeTree(File root, File source, File target, File fallbackDir) {
+        File[] children = source.listFiles();
+        if (children == null) return;
+        for (File child : children) {
+            String rel = child.getAbsolutePath().substring(root.getAbsolutePath().length() + 1);
+            File dest = new File(target, rel);
+            if (child.isDirectory()) {
+                dest.mkdirs();
+                mergeTree(root, child, target, fallbackDir);
+            } else if (child.isFile()) {
+                mergeFile(rel, child, dest, fallbackDir);
+            }
+        }
+    }
+
+    private static void mergeFile(String rel, File source, File dest, File fallbackDir) {
+        try {
+            String name = new File(rel).getName();
+            boolean memories = rel.equals("memories/MEMORY.md") || rel.equals("memories/USER.md");
+            if (!dest.isFile()) {
+                dest.getParentFile().mkdirs();
+                copyFile(source, dest);
+                source.delete();
+                return;
+            }
+            if (memories) {
+                String merged = AiMemoryStore.unionEntries(readText(dest), readText(source));
+                writeTextFile(dest, merged);
+                source.delete();
+                return;
+            }
+            if (rel.equals("SOUL.md")) {
+                String have = readText(dest);
+                String incoming = readText(source);
+                if (incoming.equals(have) || AiMemoryStore.isDefaultSoul(have) && !incoming.trim().isEmpty()) {
+                    if (!incoming.equals(have)) writeTextFile(dest, incoming.trim());
+                    source.delete();
+                    return;
+                }
+                if (have.trim().isEmpty() && !incoming.trim().isEmpty()) {
+                    writeTextFile(dest, incoming.trim());
+                    source.delete();
+                    return;
+                }
+            } else if (dest.length() == 0 && source.length() > 0) {
+                copyFile(source, dest);
+                source.delete();
+                return;
+            }
+            if (sameBytes(source, dest)) {
+                source.delete();
+                return;
+            }
+            File fallback = new File(fallbackDir, rel);
+            fallback.getParentFile().mkdirs();
+            copyFile(source, fallback);
+            source.delete();
+        } catch (Exception ignored) {}
+    }
+
+    private static String readText(File file) {
+        try {
+            String text = readFile(file, 100_000);
+            return text == null ? "" : text;
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private static boolean sameBytes(File a, File b) {
+        try {
+            if (a.length() != b.length()) return false;
+            try (java.io.InputStream inA = new java.io.FileInputStream(a);
+                 java.io.InputStream inB = new java.io.FileInputStream(b)) {
+                byte[] bufA = new byte[8192];
+                byte[] bufB = new byte[8192];
+                int nA;
+                while ((nA = inA.read(bufA)) >= 0) {
+                    int nB = inB.read(bufB);
+                    if (nA != nB) return false;
+                    for (int i = 0; i < nA; i++) if (bufA[i] != bufB[i]) return false;
+                }
+                return inB.read() < 0;
+            }
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private static void deleteIfEmpty(File dir) {
+        File[] children = dir.listFiles();
+        if (children == null) return;
+        for (File child : children) {
+            if (child.isDirectory()) deleteIfEmpty(child);
+        }
+        children = dir.listFiles();
+        if (children != null && children.length == 0) dir.delete();
     }
 
     /** Idempotent: rewrites ".termuxAI"/".katheer" path mentions inside markdown skill

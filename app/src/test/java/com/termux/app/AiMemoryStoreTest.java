@@ -154,6 +154,13 @@ public class AiMemoryStoreTest {
     }
 
     @Test
+    public void unionEntriesMergesTargetFirstWithoutDuplicates() throws Exception {
+        String merged = AiMemoryStore.unionEntries("alpha\n§\nbeta", "beta\n§\ngamma");
+        assertEquals("alpha\n§\nbeta\n§\ngamma", merged);
+        assertTrue(AiMemoryStore.isDefaultSoul(AiMemoryStore.readRaw(AiMemoryStore.TARGET_SOUL)));
+    }
+
+    @Test
     public void stagedWritesCanBeApprovedOrRejected() throws Exception {
         JSONObject addArgs = new JSONObject()
             .put("target", "user")

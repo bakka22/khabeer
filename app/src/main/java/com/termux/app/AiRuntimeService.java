@@ -220,10 +220,13 @@ public final class AiRuntimeService extends Service {
         mProviderConfig = new AiProviderConfig(this);
         mToolExecutor = new MobileKhabeerToolExecutor(this);
         mMcpRegistry = new AiMcpRegistry(mProviderConfig);
-        AiMemoryStore.ensureDefaults();
-        // One-time khabeer home migration; must precede MCP discovery so
-        // stored stdio paths are rewritten before any server is spawned.
+        // One-time khabeer home migration runs BEFORE ensureDefaults: the
+        // legacy rename only fires when the target does not exist yet, and
+        // seeding first would strand .termuxAI/.katheer data forever.
+        // It must also precede MCP discovery so stored stdio paths are
+        // rewritten before any server is spawned.
         AiSkillRegistry.migrateKhabeerHome();
+        AiMemoryStore.ensureDefaults();
         mDatabase.rewriteMcpServerDataRoot(".termuxAI", ".khabeer");
         mDatabase.rewriteMcpServerDataRoot(".katheer", ".khabeer");
         createNotificationChannel();

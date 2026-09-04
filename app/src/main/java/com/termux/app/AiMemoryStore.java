@@ -565,6 +565,21 @@ public final class AiMemoryStore {
         return new ArrayList<>(new LinkedHashSet<>(entries));
     }
 
+    /** Migration merge: union of two §-delimited stores, target order first
+     * then legacy-only entries. Grandfathered even if over cap — caps
+     * enforce on new writes, never by destroying migrated history. */
+    public static String unionEntries(String targetRaw, String legacyRaw) {
+        List<String> merged = new ArrayList<>(parseEntries(targetRaw));
+        for (String entry : parseEntries(legacyRaw)) {
+            if (!merged.contains(entry)) merged.add(entry);
+        }
+        return String.join(ENTRY_DELIMITER, merged);
+    }
+
+    public static boolean isDefaultSoul(String text) {
+        return text != null && text.trim().equals(DEFAULT_SOUL);
+    }
+
     private static int serializedLength(List<String> entries) {
         return entries == null || entries.isEmpty() ? 0 : String.join(ENTRY_DELIMITER, entries).length();
     }
