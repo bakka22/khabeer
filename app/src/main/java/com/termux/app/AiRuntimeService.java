@@ -117,6 +117,12 @@ public final class AiRuntimeService extends Service {
         String model;
         String effort;
         String approvalPolicy;
+        /** Per-turn token accumulation (Hermes _last_turn_usage/session
+         * counters, durable via turn_usage at turn end). */
+        long turnPromptTokens;
+        long turnCompletionTokens;
+        boolean turnUsageReal;
+        boolean turnUsageFlushed;
         /** skill_view repeat-view dedup: "name|file" -> "mtime:size" (khabeer
          * repeat-view dedup — unchanged re-reads return a stub, not content). */
         final HashMap<String, String> skillViewCache = new HashMap<>();
@@ -171,6 +177,9 @@ public final class AiRuntimeService extends Service {
 
     private void clearActiveTurn(RunContext ctx) {
         if (ctx == null) return;
+        // Terminal choke for every turn end (complete, fail, cancel,
+        // interrupt): the ledger row is written exactly once per turn.
+        flushTurnUsage(ctx, false);
         try {
             KhabeerSessionState ss = sessionState(ctx.record.sessionKey == null ? ctx.record.id : ctx.record.sessionKey);
             mDatabase.clearTurnLease(ctx.record.sessionKey, ss.persistent.runGeneration);
@@ -194,6 +203,7 @@ public final class AiRuntimeService extends Service {
 
     private void failRun(RunContext ctx, @Nullable String message) {
         if (ctx == null) return;
+        flushTurnUsage(ctx, true);
         ctx.record.lastError = message == null ? "Unknown native agent runtime failure." : message;
         try { ctx.stateMachine.transition(AiRunStateMachine.State.FAILED); } catch (Exception ignored) {}
         ctx.record.state = AiRunStateMachine.State.FAILED;
@@ -201,8 +211,64 @@ public final class AiRuntimeService extends Service {
         notifyError(ctx.record.id, ctx.record.lastError);
     }
 
+    /** Adds one provider usage object to the turn ledger. Accepts OpenAI
+     * (prompt/completion_tokens) and Anthropic/Responses (input/output)
+     * shapes; missing shapes are ignored (estimate covers the turn). */
+    private void noteUsage(@Nullable JSONObject usage) {
+        RunContext c = ctx();
+        if (c == null || usage == null) return;
+        long prompt = usage.optLong("prompt_tokens", usage.optLong("input_tokens", 0));
+        long completion = usage.optLong("completion_tokens", usage.optLong("output_tokens", 0));
+        if (prompt <= 0 && completion <= 0) return;
+        c.turnPromptTokens += prompt;
+        c.turnCompletionTokens += completion;
+        c.turnUsageReal = true;
+    }
+
+    private void resetTurnUsage(RunContext ctx) {
+        if (ctx == null) return;
+        ctx.turnPromptTokens = 0;
+        ctx.turnCompletionTokens = 0;
+        ctx.turnUsageReal = false;
+        ctx.turnUsageFlushed = false;
+    }
+
+    /** Persists the turn ledger row: exact tokens when the provider reported
+     * usage, otherwise replay chars/4 flagged estimated. Failed turns flush
+     * only when real usage exists (estimates of dead turns are noise). */
+    private void flushTurnUsage(RunContext ctx, boolean failed) {
+        if (ctx == null || ctx.record == null || ctx.turnUsageFlushed) return;
+        ctx.turnUsageFlushed = true;
+        try {
+            if (failed && !ctx.turnUsageReal) return;
+            long prompt = ctx.turnPromptTokens;
+            long completion = ctx.turnCompletionTokens;
+            boolean estimated = !ctx.turnUsageReal;
+            if (estimated) {
+                long chars = 0;
+                if (ctx.chatMessages != null) {
+                    for (int i = 0; i < ctx.chatMessages.length(); i++) {
+                        JSONObject msg = ctx.chatMessages.optJSONObject(i);
+                        if (msg != null) chars += msg.optString("content", "").length();
+                    }
+                }
+                prompt = 0;
+                completion = chars / 4;
+            }
+            mDatabase.appendTurnUsage(ctx.record.id,
+                ctx.record.lastResolvedModel == null ? "" : ctx.record.lastResolvedModel,
+                prompt, completion, estimated);
+        } catch (Exception ignored) {}
+    }
+
+    public JSONObject getSessionUsage(String sessionId) {
+        if (mDatabase == null || TextUtils.isEmpty(sessionId)) return new JSONObject();
+        return mDatabase.getSessionUsage(sessionId);
+    }
+
     private void completeRun(RunContext ctx) {
         if (ctx == null) return;
+        flushTurnUsage(ctx, false);
         try { ctx.stateMachine.transition(AiRunStateMachine.State.COMPLETED); } catch (Exception ignored) {}
         ctx.record.state = AiRunStateMachine.State.COMPLETED;
         ctx.record.hygieneFailureStreak = 0;
@@ -487,6 +553,7 @@ private void drainQueueIfNeeded(RunContext ctx) {
 
     private void clearActiveTurn() {
         if (ctx() == null) return;
+        flushTurnUsage(ctx(), false);
         try {
             KhabeerSessionState ss = sessionState(ctx().record.sessionKey == null ? ctx().record.id : ctx().record.sessionKey);
             mDatabase.clearTurnLease(ctx().record.sessionKey, ss.persistent.runGeneration);
@@ -1030,6 +1097,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
             if (appendHistory) appendUserTurnToHistory(ctx, prompt);
             else {
                 AiMemoryStore.resetTurnFailureBudget();
+                resetTurnUsage(ctx);
                 refreshSystemMessage();
                 sanitizeReplayHistory();
                 saveChatHistory(ctx);
@@ -1128,6 +1196,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
     private void appendUserTurnToHistory(RunContext ctx, String prompt) throws Exception {
         if (ctx == null) throw new IllegalStateException("No active run context.");
         AiMemoryStore.resetTurnFailureBudget();
+        resetTurnUsage(ctx);
         mDatabase.appendMessage(ctx.record.id, "user", prompt);
         refreshSystemMessage();
         sanitizeReplayHistory();
@@ -1417,6 +1486,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
                     JSONObject response = event.optJSONObject("response");
                     JSONArray output = response == null ? null : response.optJSONArray("output");
                     if (output != null && output.length() > 0) completedOutput = output;
+                    if (response != null) noteUsage(response.optJSONObject("usage"));
                     break;
                 }
                 case "response.failed": {
@@ -1742,7 +1812,9 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         String text = readFully(stream);
         if (code < 200 || code >= 300)
             throw new IllegalStateException("Provider request failed with HTTP " + code + ": " + text);
-        return new JSONObject(text);
+        JSONObject parsed = new JSONObject(text);
+        noteUsage(parsed.optJSONObject("usage"));
+        return parsed;
     }
 
     /** Chat-style history → Anthropic messages; tool_calls become tool_use
@@ -2004,7 +2076,9 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         String text = readFully(stream);
         if (code < 200 || code >= 300)
             throw new IllegalStateException("Provider request failed with HTTP " + code + ": " + text);
-        return new JSONObject(text);
+        JSONObject parsed = new JSONObject(text);
+        noteUsage(parsed.optJSONObject("usage"));
+        return parsed;
     }
 
     private JSONObject readChatCompletionsStream(InputStream stream) throws Exception {
@@ -2063,6 +2137,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         if ("[DONE]".equals(data) || TextUtils.isEmpty(data)) return;
 
         JSONObject chunk = new JSONObject(data);
+        noteUsage(chunk.optJSONObject("usage"));
         JSONArray choices = chunk.optJSONArray("choices");
         JSONObject choice = choices == null ? null : choices.optJSONObject(0);
         if (choice == null) return;
@@ -2200,7 +2275,9 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         String text = readFully(stream);
         if (code < 200 || code >= 300)
             throw new IllegalStateException("Provider request failed with HTTP " + code + ": " + text);
-        return new JSONObject(text);
+        JSONObject parsed = new JSONObject(text);
+        noteUsage(parsed.optJSONObject("usage"));
+        return parsed;
     }
 
     private JSONObject terminalTool() throws Exception {

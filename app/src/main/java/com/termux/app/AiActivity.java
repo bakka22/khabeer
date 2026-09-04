@@ -5114,6 +5114,16 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             : (TextUtils.isEmpty(run.harnessId) ? "Agent" : run.harnessId));
         if (!TextUtils.isEmpty(run.lastResolvedModel)) sub.append(" · ").append(run.lastResolvedModel);
         sub.append(" · ").append(relativeTime(run.updatedAt));
+        if (mRuntimeService != null) {
+            try {
+                JSONObject usage = mRuntimeService.getSessionUsage(run.id);
+                if (usage.optInt("turns", 0) > 0) {
+                    sub.append(" · ").append(formatTokens(usage.optLong("total_tokens", 0)));
+                    if (usage.optInt("estimated_turns", 0) > 0
+                        && usage.optInt("estimated_turns", 0) == usage.optInt("turns", 0)) sub.append("~");
+                }
+            } catch (Exception ignored) {}
+        }
         if (archived) sub.append(" · archived");
         else if (run.state == AiRunStateMachine.State.FAILED) sub.append(" · failed");
         else if (run.state == AiRunStateMachine.State.CANCELED) sub.append(" · interrupted");
@@ -5122,6 +5132,12 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             || run.state == AiRunStateMachine.State.CONNECTING
             || run.state == AiRunStateMachine.State.STARTING) sub.append(" · active");
         return sub.toString();
+    }
+
+    private static String formatTokens(long total) {
+        if (total < 1000) return total + " tok";
+        if (total < 1_000_000) return String.format(java.util.Locale.US, "%.1fk tok", total / 1000.0);
+        return String.format(java.util.Locale.US, "%.2fM tok", total / 1_000_000.0);
     }
 
     private String relativeTime(long when) {

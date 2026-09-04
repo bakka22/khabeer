@@ -137,6 +137,20 @@ public class AiDatabaseMemoryTest {
     }
 
     @Test
+    public void turnUsageLedgerSumsPerSession() throws Exception {
+        AiDatabase.RunRecord run = db.createRun("opencode", "/usage-project");
+        db.appendTurnUsage(run.id, "model-a", 100, 50, false);
+        db.appendTurnUsage(run.id, "model-a", 200, 0, true);
+        JSONObject usage = db.getSessionUsage(run.id);
+        assertEquals(2, usage.optInt("turns"));
+        assertEquals(300, usage.optLong("prompt_tokens"));
+        assertEquals(50, usage.optLong("completion_tokens"));
+        assertEquals(350, usage.optLong("total_tokens"));
+        assertEquals(1, usage.optInt("estimated_turns"));
+        assertEquals(0, db.getSessionUsage("nope").optInt("turns"));
+    }
+
+    @Test
     public void scrollReportsCountsAndReadTruncatesMiddle() throws Exception {
         AiDatabase.RunRecord run = db.createRun("opencode", "/scroll-project");
         for (int i = 0; i < 40; i++) db.appendMessage(run.id, i % 2 == 0 ? "user" : "assistant", "scroll message " + i);

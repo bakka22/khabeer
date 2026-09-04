@@ -21,7 +21,7 @@ public final class AiDatabase extends SQLiteOpenHelper {
 
     private static final String TAG = "AiDatabase";
     private static final String DATABASE_NAME = "termux_ai_runtime.db";
-    private static final int DATABASE_VERSION = 16;
+    private static final int DATABASE_VERSION = 17;
 
     public static final class RunRecord {
         public String id;
@@ -63,6 +63,60 @@ public final class AiDatabase extends SQLiteOpenHelper {
         createV12Schema(db);
         createV13Schema(db);
         createV16Schema(db);
+        createV17Schema(db);
+    }
+
+    /** Per-turn token ledger (Hermes session usage counters, durable):
+     * one row per finished turn; estimated=true when the provider sent no
+     * usage object and the total was approximated as replay chars/4. */
+    private void createV17Schema(SQLiteDatabase db) {
+        try {
+            db.execSQL("CREATE TABLE IF NOT EXISTS turn_usage (" +
+                "id INTEGER PRIMARY KEY AUTOINCREMENT," +
+                "session_id TEXT NOT NULL," +
+                "model TEXT," +
+                "prompt_tokens INTEGER DEFAULT 0," +
+                "completion_tokens INTEGER DEFAULT 0," +
+                "total_tokens INTEGER DEFAULT 0," +
+                "estimated INTEGER DEFAULT 0," +
+                "created_at INTEGER NOT NULL)");
+            db.execSQL("CREATE INDEX IF NOT EXISTS turn_usage_session ON turn_usage(session_id, id)");
+        } catch (Exception ignored) {}
+    }
+
+    public synchronized void appendTurnUsage(String sessionId, String model, long promptTokens,
+                                             long completionTokens, boolean estimated) {
+        try {
+            ContentValues v = new ContentValues();
+            v.put("session_id", sessionId);
+            v.put("model", model);
+            v.put("prompt_tokens", promptTokens);
+            v.put("completion_tokens", completionTokens);
+            v.put("total_tokens", promptTokens + completionTokens);
+            v.put("estimated", estimated ? 1 : 0);
+            v.put("created_at", System.currentTimeMillis());
+            getWritableDatabase().insertOrThrow("turn_usage", null, v);
+        } catch (Exception ignored) {}
+    }
+
+    public synchronized JSONObject getSessionUsage(String sessionId) {
+        JSONObject out = new JSONObject();
+        try {
+            Cursor c = getReadableDatabase().rawQuery(
+                "SELECT COUNT(*), COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), " +
+                "COALESCE(SUM(total_tokens),0), COALESCE(SUM(estimated),0) FROM turn_usage WHERE session_id=?",
+                new String[]{sessionId});
+            try {
+                if (c.moveToFirst()) {
+                    out.put("turns", c.getInt(0));
+                    out.put("prompt_tokens", c.getLong(1));
+                    out.put("completion_tokens", c.getLong(2));
+                    out.put("total_tokens", c.getLong(3));
+                    out.put("estimated_turns", c.getInt(4));
+                }
+            } finally { c.close(); }
+        } catch (Exception ignored) {}
+        return out;
     }
 
     /** Rewind audit flag: /undo and /retry-orphaned rows stay in the table
@@ -481,6 +535,9 @@ public final class AiDatabase extends SQLiteOpenHelper {
         }
         if (oldVersion < 16) {
             createV16Schema(db);
+        }
+        if (oldVersion < 17) {
+            createV17Schema(db);
         }
         if (oldVersion < 6) {
             // Title provenance (khabeer title_source): 'message' = derived from
