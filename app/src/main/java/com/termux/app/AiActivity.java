@@ -899,6 +899,144 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             "Edit SOUL.md, MEMORY.md, and USER.md. The agent can write curated memory through the memory tool.",
             "🧠",
             v -> showMemoryPage()));
+        morePage.addView(createMoreEntry(
+            "Subagents",
+            "See delegated child runs, inspect their transcripts, and configure their step and timeout bounds.",
+            "🤖",
+            v -> showSubagentsPage()));
+    }
+
+    private void showSubagentsPage() {
+        View morePage = findViewById(R.id.ai_more_page);
+        if (!(morePage instanceof LinearLayout)) return;
+        LinearLayout page = (LinearLayout) morePage;
+        page.removeAllViews();
+        page.setPadding(dp(16), dp(16), dp(16), dp(100));
+        mChatTitle.setText("Subagents");
+
+        TextView title = new TextView(this);
+        title.setText("Subagents");
+        title.setTextColor(color(R.color.ai_text));
+        title.setTextSize(24);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        page.addView(title);
+
+        TextView subtitle = new TextView(this);
+        subtitle.setText("Child turns the agent delegates via delegate_task. They run hidden with the parent provider and model: no memory writes, no skill management, no further delegation, terminal approvals auto-deny, token spend rolls into the parent ledger.");
+        subtitle.setTextColor(color(R.color.ai_text_muted));
+        subtitle.setTextSize(13);
+        subtitle.setLineSpacing(dp(2), 1.0f);
+        LinearLayout.LayoutParams subLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        subLp.setMargins(0, dp(4), 0, dp(14));
+        page.addView(subtitle, subLp);
+
+        page.addView(nsBackRow("More", () -> showMorePage()));
+        page.addView(createSubagentStatusCard());
+        page.addView(createSubagentSettingsCard());
+
+        TextView runsTitle = new TextView(this);
+        runsTitle.setText("RECENT RUNS");
+        runsTitle.setTextColor(color(R.color.ai_text));
+        runsTitle.setTextSize(12);
+        runsTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        runsTitle.setLetterSpacing(0.08f);
+        runsTitle.setPadding(0, dp(8), 0, dp(10));
+        page.addView(runsTitle);
+
+        java.util.List<AiDatabase.RunRecord> runs =
+            mRuntimeService == null ? new ArrayList<>() : mRuntimeService.getSubagentRuns();
+        if (runs.isEmpty()) {
+            TextView empty = new TextView(this);
+            empty.setText("No delegated runs yet. The agent calls delegate_task when a job splits off.");
+            empty.setTextColor(color(R.color.ai_text_muted));
+            empty.setTextSize(13);
+            empty.setPadding(0, dp(6), 0, dp(16));
+            page.addView(empty);
+        } else {
+            for (AiDatabase.RunRecord run : runs) page.addView(createSubagentRow(run));
+        }
+    }
+
+    private View createSubagentStatusCard() {
+        JSONObject stats = mRuntimeService == null ? new JSONObject() : mRuntimeService.getSubagentStats();
+        return nsRowCard("Child runs: " + stats.optInt("runs", 0)
+            + " · transcript messages: " + stats.optInt("messages", 0),
+            "Token spend attributes to parent sessions (single ledger).", true);
+    }
+
+    private View createSubagentSettingsCard() {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        int steps = mProviderConfig == null ? 20 : mProviderConfig.getSubagentMaxSteps();
+        int timeout = mProviderConfig == null ? 300 : mProviderConfig.getSubagentTimeoutSeconds();
+        MaterialButton stepsBtn = smallMemoryButton("Max steps per child: " + steps);
+        stepsBtn.setOnClickListener(v -> showMemoryNumberDialog("Max steps per subagent turn", steps, 5, 80, value -> {
+            if (mProviderConfig != null) mProviderConfig.setSubagentMaxSteps(value);
+            showSubagentsPage();
+        }));
+        MaterialButton timeoutBtn = smallMemoryButton("Child timeout: " + timeout + "s");
+        timeoutBtn.setOnClickListener(v -> showMemoryNumberDialog("Subagent timeout (seconds)", timeout, 60, 1800, value -> {
+            if (mProviderConfig != null) mProviderConfig.setSubagentTimeoutSeconds(value);
+            showSubagentsPage();
+        }));
+        box.addView(stepsBtn);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.setMargins(0, dp(8), 0, 0);
+        box.addView(timeoutBtn, lp);
+        TextView note = new TextView(this);
+        note.setText("Blocked for children: delegate_task, memory, skill_manage. Terminal runs read-only in practice — writes auto-deny without asking.");
+        note.setTextColor(color(R.color.ai_text_muted));
+        note.setTextSize(11);
+        LinearLayout.LayoutParams np = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        np.setMargins(0, dp(8), 0, dp(12));
+        box.addView(note, np);
+        return box;
+    }
+
+    private View createSubagentRow(AiDatabase.RunRecord run) {
+        String model = TextUtils.isEmpty(run.lastResolvedModel) ? run.modelOverride : run.lastResolvedModel;
+        String state = run.state == null ? "" : run.state.name().toLowerCase();
+        MaterialCardView card = nsRowCard(
+            (model == null ? "subagent" : model) + " · " + state,
+            "child of " + (run.parentSessionId == null ? "?" : run.parentSessionId.substring(0, Math.min(8, run.parentSessionId.length())))
+                + " · " + relativeTime(run.updatedAt),
+            true);
+        card.setOnClickListener(v -> showSubagentTranscript(run));
+        return card;
+    }
+
+    private void showSubagentTranscript(AiDatabase.RunRecord run) {
+        StringBuilder text = new StringBuilder();
+        if (mRuntimeService != null) {
+            JSONArray rows = mRuntimeService.getTranscript(run.id);
+            for (int i = 0; i < rows.length(); i++) {
+                JSONObject row = rows.optJSONObject(i);
+                if (row == null) continue;
+                text.append("[").append(row.optString("role", "?")).append("]\n");
+                String content = row.optString("content", "");
+                if (content.length() > 2000) content = content.substring(0, 2000) + "…";
+                text.append(content).append("\n\n");
+            }
+        }
+        if (text.length() == 0) text.append("No transcript rows for this run.");
+        TextView body = new TextView(this);
+        body.setText(text.toString());
+        body.setTextColor(color(R.color.ai_text));
+        body.setTextSize(12);
+        body.setPadding(dp(4), dp(4), dp(4), dp(4));
+        android.widget.ScrollView scroll = new android.widget.ScrollView(this);
+        scroll.addView(body);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(420));
+        scroll.setLayoutParams(lp);
+        new MaterialAlertDialogBuilder(this)
+            .setTitle("Subagent transcript")
+            .setView(scroll)
+            .setPositiveButton(android.R.string.ok, null)
+            .show();
     }
 
     private View createMoreEntry(String title, String body, String icon, View.OnClickListener listener) {

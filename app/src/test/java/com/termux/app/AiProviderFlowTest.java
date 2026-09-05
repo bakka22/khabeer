@@ -49,6 +49,22 @@ public class AiProviderFlowTest {
     }
 
     @Test
+    public void subagentBoundsClamp() {
+        config.setSubagentMaxSteps(200);
+        assertEquals(80, config.getSubagentMaxSteps());
+        config.setSubagentMaxSteps(2);
+        assertEquals(5, config.getSubagentMaxSteps());
+        config.setSubagentTimeoutSeconds(99999);
+        assertEquals(1800, config.getSubagentTimeoutSeconds());
+        config.setSubagentTimeoutSeconds(10);
+        assertEquals(60, config.getSubagentTimeoutSeconds());
+        config.setSubagentMaxSteps(25);
+        config.setSubagentTimeoutSeconds(400);
+        assertEquals(25, config.getSubagentMaxSteps());
+        assertEquals(400, config.getSubagentTimeoutSeconds());
+    }
+
+    @Test
     public void lastUsedRoundTrips() {
         config.setLastUsed("opencode", "glm-5", AiProviderConfig.OC_ROUTE_GO);
         assertEquals("opencode", config.getLastProviderId());

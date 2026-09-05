@@ -40,6 +40,8 @@ public final class AiProviderConfig {
     private static final String KEY_LAST_PROVIDER = "last_provider_id";
     private static final String KEY_LAST_MODEL = "last_model";
     private static final String KEY_LAST_ROUTE = "last_route";
+    private static final String KEY_SUBAGENT_MAX_STEPS = "subagent_max_steps";
+    private static final String KEY_SUBAGENT_TIMEOUT = "subagent_timeout_seconds";
 
     private final SharedPreferences mPrefs;
 
@@ -285,6 +287,23 @@ public final class AiProviderConfig {
 
     public String getLastRoute() {
         return mPrefs.getString(KEY_LAST_ROUTE, "");
+    }
+
+    /** Subagent turn bounds (More → Subagents). Clamped sane ranges. */
+    public int getSubagentMaxSteps() {
+        return Math.max(5, Math.min(80, mPrefs.getInt(KEY_SUBAGENT_MAX_STEPS, 20)));
+    }
+
+    public void setSubagentMaxSteps(int steps) {
+        mPrefs.edit().putInt(KEY_SUBAGENT_MAX_STEPS, Math.max(5, Math.min(80, steps))).apply();
+    }
+
+    public int getSubagentTimeoutSeconds() {
+        return Math.max(60, Math.min(1800, mPrefs.getInt(KEY_SUBAGENT_TIMEOUT, 300)));
+    }
+
+    public void setSubagentTimeoutSeconds(int seconds) {
+        mPrefs.edit().putInt(KEY_SUBAGENT_TIMEOUT, Math.max(60, Math.min(1800, seconds))).apply();
     }
 
     /** An OpenCode route is usable when it needs no key (Free) or its key is set. */

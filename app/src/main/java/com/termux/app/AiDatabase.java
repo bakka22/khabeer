@@ -168,6 +168,39 @@ public final class AiDatabase extends SQLiteOpenHelper {
         return f.format(new java.util.Date(ms));
     }
 
+    /** Recent subagent child runs for the More → Subagents page. */
+    public synchronized List<RunRecord> getSubagentRuns(int limit) {
+        List<RunRecord> records = new ArrayList<>();
+        Cursor cursor = getReadableDatabase().query("runs", null,
+            "COALESCE(source, 'agent') = 'subagent'", null, null, null,
+            "updated_at DESC", String.valueOf(limit));
+        try {
+            while (cursor.moveToNext()) records.add(readRun(cursor));
+        } finally {
+            cursor.close();
+        }
+        return records;
+    }
+
+    /** Subagent stats: run count plus transcript volume. Token spend
+     * attributes to parent sessions (single ledger), so totals live on
+     * the parent rows, not here. */
+    public synchronized JSONObject getSubagentStats() {
+        JSONObject out = new JSONObject();
+        try {
+            Cursor c = getReadableDatabase().rawQuery(
+                "SELECT COUNT(*), COALESCE(SUM((SELECT COUNT(*) FROM messages m WHERE m.session_id = r.id)), 0) " +
+                "FROM runs r WHERE COALESCE(r.source, 'agent') = 'subagent'", null);
+            try {
+                if (c.moveToFirst()) {
+                    out.put("runs", c.getInt(0));
+                    out.put("messages", c.getInt(1));
+                }
+            } finally { c.close(); }
+        } catch (Exception ignored) {}
+        return out;
+    }
+
     public synchronized JSONObject getSessionUsage(String sessionId) {
         JSONObject out = new JSONObject();
         try {

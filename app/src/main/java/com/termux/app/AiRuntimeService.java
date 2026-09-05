@@ -290,8 +290,23 @@ public final class AiRuntimeService extends Service {
         return mDatabase.buildSessionMarkdown(sessionId);
     }
 
+    public List<AiDatabase.RunRecord> getSubagentRuns() {
+        List<AiDatabase.RunRecord> out = new ArrayList<>();
+        if (mDatabase == null) return out;
+        for (AiDatabase.RunRecord record : mDatabase.getSubagentRuns(30)) out.add(copyRun(record));
+        return out;
+    }
+
+    public JSONObject getSubagentStats() {
+        if (mDatabase == null) return new JSONObject();
+        return mDatabase.getSubagentStats();
+    }
+
     private void completeRun(RunContext ctx) {
         if (ctx == null) return;
+        // A later success clears the sticky failure: sessions must not wear
+        // an old error after they recover.
+        ctx.record.lastError = null;
         flushTurnUsage(ctx, false);
         try { ctx.stateMachine.transition(AiRunStateMachine.State.COMPLETED); } catch (Exception ignored) {}
         ctx.record.state = AiRunStateMachine.State.COMPLETED;
@@ -1481,6 +1496,67 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         if (code < 200 || code >= 300)
             throw new IllegalStateException("Codex request failed with HTTP " + code + ": " + text);
         return parseCodexStream(text);
+    }
+
+    /** Background calls (review, compaction, titles) for the Codex backend:
+     * the generic Responses shape 404s there, so this speaks the Codex
+     * dialect directly — non-streaming, no tools, account headers. */
+    private String callBackgroundCodex(String model, String prompt, String system) throws Exception {
+        JSONObject creds = codexCredentials();
+        String token = creds.getString("token");
+        String accountId = creds.optString("accountId", null);
+        JSONArray input = new JSONArray()
+            .put(new JSONObject().put("role", "user")
+                .put("content", new JSONArray().put(new JSONObject()
+                    .put("type", "input_text").put("text", prompt))));
+        JSONObject body = new JSONObject()
+            .put("model", model)
+            .put("instructions", system)
+            .put("input", input)
+            .put("store", false)
+            .put("stream", true)
+            .put("reasoning", new JSONObject().put("effort", "low").put("summary", "auto"));
+        HttpURLConnection connection = (HttpURLConnection) new URL(ProviderLogin.CODEX_BASE_URL + "/responses").openConnection();
+        connection.setRequestMethod("POST");
+        connection.setConnectTimeout(MODEL_CONNECT_TIMEOUT_MS);
+        connection.setReadTimeout(MODEL_READ_TIMEOUT_MS);
+        connection.setDoOutput(true);
+        connection.setRequestProperty("Content-Type", "application/json");
+        connection.setRequestProperty("Accept", "text/event-stream");
+        connection.setRequestProperty("Authorization", "Bearer " + token);
+        connection.setRequestProperty("originator", "khabeer-agent");
+        connection.setRequestProperty("User-Agent", "KhabeerAgent/1.0");
+        connection.setRequestProperty("x-client-request-id", java.util.UUID.randomUUID().toString());
+        if (!TextUtils.isEmpty(accountId)) connection.setRequestProperty("ChatGPT-Account-Id", accountId);
+        try (OutputStream output = connection.getOutputStream()) {
+            output.write(body.toString().getBytes(StandardCharsets.UTF_8));
+        }
+        int code = connection.getResponseCode();
+        InputStream stream = code >= 200 && code < 300 ? connection.getInputStream() : connection.getErrorStream();
+        String text = readFully(stream);
+        if (code < 200 || code >= 300)
+            throw new IllegalStateException("Background Codex request failed with HTTP " + code + ": " + text);
+        JSONObject parsed = parseCodexStream(text);
+        JSONArray outputItems = parsed.optJSONArray("output");
+        StringBuilder out = new StringBuilder();
+        if (outputItems != null) {
+            for (int i = 0; i < outputItems.length(); i++) {
+                JSONObject item = outputItems.optJSONObject(i);
+                if (item == null || !"message".equals(item.optString("type"))) continue;
+                JSONArray content = item.optJSONArray("content");
+                if (content == null) continue;
+                for (int j = 0; j < content.length(); j++) {
+                    JSONObject part = content.optJSONObject(j);
+                    if (part == null) continue;
+                    String t = part.optString("text", "");
+                    if (!TextUtils.isEmpty(t)) {
+                        if (out.length() > 0) out.append("\n");
+                        out.append(t);
+                    }
+                }
+            }
+        }
+        return out.toString();
     }
 
     /** Assembles the final Responses output array from the SSE event stream:
@@ -2746,8 +2822,12 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
             return new JSONObject().put("error", "delegate_task needs a task: a complete assignment with goal and context.").toString();
         }
         String context = args == null ? "" : args.optString("context", "");
-        int timeoutSec = args == null ? SUBAGENT_DEFAULT_TIMEOUT_SECONDS
-            : args.optInt("timeout_seconds", SUBAGENT_DEFAULT_TIMEOUT_SECONDS);
+        int configuredTimeout = mProviderConfig == null ? SUBAGENT_DEFAULT_TIMEOUT_SECONDS
+            : mProviderConfig.getSubagentTimeoutSeconds();
+        int configuredSteps = mProviderConfig == null ? SUBAGENT_MAX_STEPS
+            : mProviderConfig.getSubagentMaxSteps();
+        int timeoutSec = args == null ? configuredTimeout
+            : args.optInt("timeout_seconds", configuredTimeout);
         timeoutSec = Math.max(60, Math.min(SUBAGENT_MAX_TIMEOUT_SECONDS, timeoutSec));
         String providerId = parent.providerId != null ? parent.providerId : parent.record.harnessId;
         String baseUrl = parent.baseUrl;
@@ -2782,7 +2862,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         childCtx.apiKey = fApiKey;
         childCtx.model = fModel;
         childCtx.usageSessionId = parent.record.id;
-        childCtx.maxSteps = SUBAGENT_MAX_STEPS;
+        childCtx.maxSteps = configuredSteps;
         try {
             childCtx.chatMessages = new JSONArray()
                 .put(json("role", "system", "content", childInstructions()))
@@ -3461,6 +3541,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
             "Save user preferences/corrections/profile to user. Save stable environment/project/tool lessons to memory. " +
             "Skip task progress, transient paths, raw dumps, and procedures that belong in skills. Write declarative facts, not imperatives. " +
             "Enabled targets: memory=" + memoryEnabled + ", user=" + userEnabled + ". Transcript JSON:\n" + transcript.toString();
+        if ("openai-codex".equals(providerId)) return callBackgroundCodex(model, prompt, "Return strict JSON only.");
         if (ANTHROPIC_MESSAGES_PROVIDERS.contains(providerId)) return callBackgroundAnthropic(baseUrl, apiKey, model, prompt, 1024, "Return strict JSON only.", sessionId);
         if (usesChatCompletions(providerId)) return callBackgroundChatCompletions(providerId, baseUrl, apiKey, model, prompt, 1024, "Return strict JSON only.", sessionId);
         return callBackgroundResponses(baseUrl, apiKey, model, prompt, 1024, "Return strict JSON only.", sessionId);
@@ -3488,6 +3569,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
             "Context Recovery must include this exact callable hint: session_search(query='<keywords>', session_id='" + sessionId + "'), replacing <keywords> with high-signal terms.\n\n" +
             "Transcript JSON:\n" + transcript.toString();
         String system = "Return the final compaction summary text only.";
+        if ("openai-codex".equals(providerId)) return callBackgroundCodex(model, prompt, system);
         if (ANTHROPIC_MESSAGES_PROVIDERS.contains(providerId)) return callBackgroundAnthropic(baseUrl, apiKey, model, prompt, 4096, system, sessionId);
         if (usesChatCompletions(providerId)) return callBackgroundChatCompletions(providerId, baseUrl, apiKey, model, prompt, 4096, system, sessionId);
         return callBackgroundResponses(baseUrl, apiKey, model, prompt, 4096, system, sessionId);
@@ -3622,18 +3704,11 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         }
     }
 
+    /** All executors end here: single choke point for flush, error
+     * clearing, titles, and the review nudge. The ctx overload holds the
+     * logic; this keeps the call sites unchanged. */
     private void completeRun() {
-        if (ctx() == null) return;
-        try {
-            ctx().stateMachine.transition(AiRunStateMachine.State.COMPLETED);
-        } catch (Exception ignored) {
-        }
-        ctx().record.state = AiRunStateMachine.State.COMPLETED;
-        ctx().record.hygieneFailureStreak = 0;
-        clearActiveTurn();
-        persistRun();
-        if (ctx().record.sessionKey != null) sessionState(ctx().record.sessionKey).clearTurn();
-        maybeRunMemoryReview(ctx());
+        completeRun(ctx());
     }
 
     private void persistRun() {
@@ -3647,15 +3722,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
     }
 
     private void failRun(@Nullable String message) {
-        if (ctx() == null) return;
-        ctx().record.lastError = message == null ? "Unknown native agent runtime failure." : message;
-        try {
-            if (ctx() != null) ctx().stateMachine.transition(AiRunStateMachine.State.FAILED);
-        } catch (Exception ignored) {
-        }
-        ctx().record.state = AiRunStateMachine.State.FAILED;
-        persistRun();
-        notifyError(ctx().record.id, ctx().record.lastError);
+        failRun(ctx(), message);
     }
 
     private boolean isQuiet() {
@@ -3811,13 +3878,20 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
             if (code == 429) return false; // rate limited: caller retries
             if (code < 200 || code >= 300) return false;
 
-            JSONObject response = new JSONObject(readFully(connection.getInputStream()));
-            JSONArray choices = response.optJSONArray("choices");
-            JSONObject choice = choices == null ? null : choices.optJSONObject(0);
-            JSONObject message = choice == null ? null : choice.optJSONObject("message");
-            String title = message == null ? "" : message.optString("content", "");
-            if (TextUtils.isEmpty(title) || "null".equals(title))
-                title = message.optString("reasoning_content", "");
+            String title;
+            if ("openai-codex".equals(profile.id)) {
+                title = callBackgroundCodex(model,
+                    bound(firstUser) + "\n\nTitle:",
+                    "You name chat sessions. Summarize the user's opening message as a title of 50 characters or less. Reply with the title only.");
+            } else {
+                JSONObject response = new JSONObject(readFully(connection.getInputStream()));
+                JSONArray choices = response.optJSONArray("choices");
+                JSONObject choice = choices == null ? null : choices.optJSONObject(0);
+                JSONObject message = choice == null ? null : choice.optJSONObject("message");
+                title = message == null ? "" : message.optString("content", "");
+                if (TextUtils.isEmpty(title) || "null".equals(title))
+                    title = message == null ? "" : message.optString("reasoning_content", "");
+            }
             title = title.replace("\"", "").replace("*", "").replace("#", "").trim();
             int sentenceEnd = title.indexOf(". ");
             if (sentenceEnd > 12) title = title.substring(0, sentenceEnd + 1);

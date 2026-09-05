@@ -87,6 +87,23 @@ public class AiDatabaseMemoryTest {
     }
 
     @Test
+    public void subagentRunsListedSeparately() throws Exception {
+        AiDatabase.RunRecord parent = db.createRun("opencode", "/sub-listing");
+        AiDatabase.RunRecord child = db.createRun("opencode", "/sub-listing");
+        child.parentSessionId = parent.id;
+        child.source = "subagent";
+        db.saveRun(child);
+        db.appendMessage(child.id, "user", "child assignment");
+        db.appendMessage(child.id, "assistant", "child result");
+
+        assertEquals(1, db.getSubagentRuns(10).size());
+        assertEquals(child.id, db.getSubagentRuns(10).get(0).id);
+        assertEquals(1, db.getSubagentStats().optInt("runs"));
+        assertEquals(2, db.getSubagentStats().optInt("messages"));
+        assertEquals(0, db.getSessions(10).stream().filter(r -> r.id.equals(child.id)).count());
+    }
+
+    @Test
     public void exportCoversTranscriptUsageAndMarkers() throws Exception {
         AiDatabase.RunRecord run = db.createRun("opencode", "/export-project");
         db.appendMessage(run.id, "user", "export me");
