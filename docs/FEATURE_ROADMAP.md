@@ -56,12 +56,19 @@ App implementation: same sidecar as #1 (`last_viewed_at`,
 `skillLastActivity()` drives stale/archive derivation. Review-side
 prioritization by usage counts: NOT DONE (future).
 
-## 3. Todo tracking — Status: NOT STARTED
+## 3. Todo tracking — Status: DONE (uncommitted, unit + live verified)
 
-Hermes map: todo toolset contract and turn lifecycle.
-(Deep map to be filled during implementation.)
+Hermes map: `tools/todo_tool.py` `TodoStore` — ordered items
+(id/content/status/parent), merge-by-id writes, active-only injection
+with nesting (completed/cancelled dropped), caps (content/list),
+re-injection after compression.
 
-App plan: TBD.
+App implementation: `AiTodoStore` (same contract/bounds), `todowrite`
+tool + dispatch in `AiRuntimeService`, durable snapshot in
+`runs.todo_json` (v19, mobile processes die), re-injection in
+`rebuildReplayFromDatabase` for resume/compaction/undo. Unit-verified
+(merge, injection, nesting, caps). Live-verified on Codex
+gpt-5.6-sol: model called todowrite, 2 tasks stored and confirmed.
 
 ## 4. Branching — Status: NOT STARTED
 

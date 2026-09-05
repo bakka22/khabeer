@@ -141,6 +141,8 @@ public final class AiRuntimeService extends Service {
         String usageSessionId;
         /** Per-turn step budget override (subagents run bounded). 0 = default. */
         int maxSteps;
+        /** Per-session task list (Hermes TodoStore, durable via runs.todo_json). */
+        final AiTodoStore todos = new AiTodoStore();
         /** skill_view repeat-view dedup: "name|file" -> "mtime:size" (khabeer
          * repeat-view dedup — unchanged re-reads return a stub, not content). */
         final HashMap<String, String> skillViewCache = new HashMap<>();
@@ -159,9 +161,20 @@ public final class AiRuntimeService extends Service {
         if (existing != null) return existing;
         RunContext ctx = new RunContext(record);
         try { if (record.chatMessagesJson != null) ctx.chatMessages = new JSONArray(record.chatMessagesJson); } catch (Exception ignored) {}
+        try {
+            if (!TextUtils.isEmpty(record.todoJson)) ctx.todos.restore(new JSONObject(record.todoJson).optJSONArray("todos"));
+        } catch (Exception ignored) {}
         ctx.previousResponseId = record.previousResponseId;
         mRuns.put(record.id, ctx);
         return ctx;
+    }
+
+    private void persistTodos(RunContext ctx) {
+        if (ctx == null || ctx.record == null) return;
+        try {
+            ctx.record.todoJson = ctx.todos.snapshot().toString();
+            persistRun(ctx);
+        } catch (Exception ignored) {}
     }
 
     private boolean isTerminal(RunContext ctx) {
@@ -1030,7 +1043,10 @@ public void compactCurrentSessionManually() {
     private void rebuildReplayFromDatabase(RunContext ctx) {
         if (ctx == null || ctx.record == null) return;
         try {
-            JSONArray rebuilt = new JSONArray().put(json("role", "system", "content", systemInstructions()));
+            String system = systemInstructions();
+            String todos = ctx.todos.formatForInjection();
+            if (!TextUtils.isEmpty(todos)) system += "\n\n" + todos;
+            JSONArray rebuilt = new JSONArray().put(json("role", "system", "content", system));
             JSONArray rows = mDatabase.getTranscript(ctx.record.id, 1000);
             for (int i = 0; i < rows.length(); i++) {
                 JSONObject row = rows.optJSONObject(i);
@@ -2498,6 +2514,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
             tools.put(chatShape ? chatShape(memoryTool()) : memoryTool());
         tools.put(chatShape ? chatShape(sessionSearchTool()) : sessionSearchTool());
         tools.put(chatShape ? chatShape(delegateTool()) : delegateTool());
+        tools.put(chatShape ? chatShape(todoTool()) : todoTool());
         if (AiSkillRegistry.promptSection() != null) {
             tools.put(chatShape ? chatShape(skillsListTool()) : skillsListTool());
             tools.put(chatShape ? chatShape(skillViewTool()) : skillViewTool());
@@ -2563,6 +2580,62 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
                         .put("type", "integer")
                         .put("description", "Hard timeout for the child turn. Optional, default 300, max 1800.")))
                 .put("required", new JSONArray().put("task")));
+    }
+
+    private JSONObject todoTool() throws Exception {
+        return new JSONObject()
+            .put("type", "function")
+            .put("name", "todowrite")
+            .put("description", "Track multi-step work as a structured task list. "
+                + "Send the full list each time; items merge by id (omit id for new items). "
+                + "Exactly one item should be in_progress at a time; mark completed/cancelled as you go. "
+                + "Use short task descriptions; nesting via parent ids for subtasks. "
+                + "The active list survives compaction and resume — completed work is never re-injected.")
+            .put("parameters", new JSONObject()
+                .put("type", "object")
+                .put("properties", new JSONObject()
+                    .put("todos", new JSONObject()
+                        .put("type", "array")
+                        .put("description", "Full task list: [{id?, content, status: pending|in_progress|completed|cancelled, parent?}].")
+                        .put("items", new JSONObject()
+                            .put("type", "object")
+                            .put("properties", new JSONObject()
+                                .put("id", new JSONObject().put("type", "string"))
+                                .put("content", new JSONObject().put("type", "string"))
+                                .put("status", new JSONObject().put("type", "string"))
+                                .put("parent", new JSONObject().put("type", "string"))))))
+                .put("required", new JSONArray().put("todos")));
+    }
+
+    private boolean isTodoTool(String name) {
+        return "todowrite".equals(name);
+    }
+
+    /** todowrite dispatch: merge into the session store, persist the
+     * snapshot, and echo the list back so the model stays grounded. */
+    private String runTodoTool(JSONObject args) {
+        RunContext c = ctx();
+        if (c == null || c.record == null) return todoError("No active session.");
+        try {
+            JSONArray todos = args == null ? null : args.optJSONArray("todos");
+            if (todos == null) return todoError("todowrite needs a todos array.");
+            JSONObject snapshot = c.todos.write(todos);
+            persistTodos(c);
+            snapshot.put("success", true);
+            snapshot.put("message", "Task list updated.");
+            return snapshot.toString();
+        } catch (Exception e) {
+            return todoError(e.getMessage() == null ? "todo write failed" : e.getMessage());
+        }
+    }
+
+    private static String todoError(String message) {
+        try {
+            return new JSONObject().put("success", false)
+                .put("error", message == null ? "todo error" : message).toString();
+        } catch (Exception e) {
+            return "{\"success\":false,\"error\":\"todo error\"}";
+        }
     }
 
     private JSONObject memoryTool() throws Exception {
@@ -2739,6 +2812,10 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
             emit("tool/callStarted", json("name", name, "command", "delegate_task"));
             output = runDelegateTask(args, workspace);
             emit("item/commandExecution/outputDelta", json("text", output + "\n", "command", "delegate_task"));
+        } else if (isTodoTool(name)) {
+            emit("tool/callStarted", json("name", name, "command", "todowrite"));
+            output = runTodoTool(args);
+            emit("item/commandExecution/outputDelta", json("text", memoryToolSummary(output) + "\n", "command", "todowrite"));
         } else if (isSkillsTool(name)) {
             output = runSkillsTool(name, args, approvalPolicy);
         } else if (name != null && name.startsWith(AiMcpRegistry.TOOL_PREFIX)) {
@@ -2779,6 +2856,10 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
             emit("tool/callStarted", json("name", name, "command", "delegate_task"));
             output = runDelegateTask(args, workspace);
             emit("item/commandExecution/outputDelta", json("text", output + "\n", "command", "delegate_task"));
+        } else if (isTodoTool(name)) {
+            emit("tool/callStarted", json("name", name, "command", "todowrite"));
+            output = runTodoTool(args);
+            emit("item/commandExecution/outputDelta", json("text", memoryToolSummary(output) + "\n", "command", "todowrite"));
         } else if (isSkillsTool(name)) {
             output = runSkillsTool(name, args, approvalPolicy);
         } else if (name != null && name.startsWith(AiMcpRegistry.TOOL_PREFIX)) {

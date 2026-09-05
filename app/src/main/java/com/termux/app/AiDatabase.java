@@ -21,7 +21,7 @@ public final class AiDatabase extends SQLiteOpenHelper {
 
     private static final String TAG = "AiDatabase";
     private static final String DATABASE_NAME = "termux_ai_runtime.db";
-    private static final int DATABASE_VERSION = 18;
+    private static final int DATABASE_VERSION = 19;
 
     public static final class RunRecord {
         public String id;
@@ -49,6 +49,7 @@ public final class AiDatabase extends SQLiteOpenHelper {
         public String titleSource;
         public String route;
         public String source;
+        public String todoJson;
     }
 
     public AiDatabase(Context context) {
@@ -66,6 +67,14 @@ public final class AiDatabase extends SQLiteOpenHelper {
         createV16Schema(db);
         createV17Schema(db);
         createV18Schema(db);
+        createV19Schema(db);
+    }
+
+    /** Durable per-session todo snapshot (mobile necessity: processes die).
+     * Hermes keeps todos in memory per agent; we persist the JSON so resume,
+     * undo, and compaction rebuilds never lose the plan. */
+    private void createV19Schema(SQLiteDatabase db) {
+        try { db.execSQL("ALTER TABLE runs ADD COLUMN todo_json TEXT"); } catch (Exception ignored) {}
     }
 
     /** Subagent session source (Hermes source taxonomy, trimmed): child
@@ -644,6 +653,9 @@ public final class AiDatabase extends SQLiteOpenHelper {
         if (oldVersion < 18) {
             createV18Schema(db);
         }
+        if (oldVersion < 19) {
+            createV19Schema(db);
+        }
         if (oldVersion < 6) {
             // Title provenance (khabeer title_source): 'message' = derived from
             // the first user message, 'ai' = model-generated summary. Existing
@@ -727,6 +739,7 @@ public final class AiDatabase extends SQLiteOpenHelper {
         values.put("title_source", record.titleSource);
         values.put("route", record.route);
         values.put("source", TextUtils.isEmpty(record.source) ? "agent" : record.source);
+        values.put("todo_json", record.todoJson);
 
         SQLiteDatabase db = getWritableDatabase();
         if (db.update("runs", values, "id = ?", new String[]{record.id}) == 0) {
@@ -1463,6 +1476,7 @@ public final class AiDatabase extends SQLiteOpenHelper {
         try { record.titleSource = cursor.getString(cursor.getColumnIndexOrThrow("title_source")); } catch (Exception ignored) {}
         try { record.route = cursor.getString(cursor.getColumnIndexOrThrow("route")); } catch (Exception ignored) {}
         try { record.source = cursor.getString(cursor.getColumnIndexOrThrow("source")); } catch (Exception ignored) {}
+        try { record.todoJson = cursor.getString(cursor.getColumnIndexOrThrow("todo_json")); } catch (Exception ignored) {}
         return record;
     }
 
