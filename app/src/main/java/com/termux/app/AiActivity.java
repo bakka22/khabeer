@@ -116,7 +116,11 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     private MaterialButton mReasoningButton;
     private MaterialButton mApprovalButton;
     private MaterialButton mThinkingButton;
+    private MaterialButton mCompactButton;
     private MaterialButton mAttachButton;
+    private androidx.appcompat.app.AlertDialog mCompactionDialog;
+    private TextView mCompactionStatus;
+    private String mCompactingRunId;
     private MaterialButton mChatSendButton;
     private MaterialButton mNewSessionButton;
     private ImageButton mSettingsButton;
@@ -503,6 +507,8 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mReasoningButton.setOnClickListener(view -> showReasoningDialog());
         mApprovalButton.setOnClickListener(view -> showApprovalDialog());
         mThinkingButton.setOnClickListener(view -> toggleThinkingDetails());
+        mCompactButton = findViewById(R.id.ai_compact_button);
+        if (mCompactButton != null) mCompactButton.setOnClickListener(view -> compactFromChat());
         mAttachButton.setOnClickListener(view -> showAttachDialog());
         mNewSessionButton.setOnClickListener(view -> {
             showNewSessionPage(false);
@@ -4759,6 +4765,14 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             appendToolOutput(payload.optString("text"));
         } else if ("turn/toolsDegraded".equals(method)) {
             setStatus("Model rejected function calling — continuing as plain chat this turn.", true);
+        } else if ("memory/compactionStarted".equals(method)) {
+            onCompactionProgress(payload.optString("runId", runId), "Compaction started…");
+        } else if ("memory/compactionProgress".equals(method)) {
+            onCompactionProgress(payload.optString("runId", runId), payload.optString("detail", "Compacting…"));
+        } else if ("memory/compactionComplete".equals(method)) {
+            onCompactionComplete(payload.optString("runId", runId), payload);
+        } else if ("memory/compactionFailed".equals(method)) {
+            onCompactionFailed(payload.optString("runId", runId), payload);
         } else if ("memory/contextWarning".equals(method)) {
             showError("Context is " + payload.optString("usage_percent", "?") + "% full. Compact this session from Memory soon.");
         } else if ("memory/contextAutoCompact".equals(method)) {
@@ -5172,7 +5186,26 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             .show();
     }
 
+    /** In-chat entry: compacts the viewed session with a blocking
+     * progress dialog — sends are refused until it finishes. */
+    private void compactFromChat() {
+        if (mRuntimeService == null || !mRuntimeBound) {
+            showError("Native runtime is still starting.");
+            return;
+        }
+        AiDatabase.RunRecord run = mRuntimeService.getActiveRun();
+        if (run == null) {
+            showError("Open a session first.");
+            return;
+        }
+        confirmCompactSession(run, true);
+    }
+
     private void confirmCompactSession(AiDatabase.RunRecord run) {
+        confirmCompactSession(run, false);
+    }
+
+    private void confirmCompactSession(AiDatabase.RunRecord run, boolean blocking) {
         if (mRuntimeService == null || !mRuntimeBound) {
             showError("Native runtime is still starting.");
             return;
@@ -5190,8 +5223,70 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             .setTitle("Compact this session?")
             .setMessage(info + ready)
             .setNegativeButton(android.R.string.cancel, null)
-            .setPositiveButton("Compact", (dialog, which) -> mRuntimeService.compactSessionManually(run.id))
+            .setPositiveButton("Compact", (dialog, which) -> {
+                mRuntimeService.compactSessionManually(run.id);
+                if (blocking) showCompactionBlockingDialog(run.id);
+            })
             .show();
+    }
+
+    /** Non-cancelable progress dialog: the chat is blocked until compaction
+     * finishes (sending mid-compaction would corrupt the transcript). */
+    private void showCompactionBlockingDialog(String runId) {
+        dismissCompactionDialog();
+        mCompactingRunId = runId;
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(22), dp(10), dp(22), 0);
+        android.widget.ProgressBar spinner = new android.widget.ProgressBar(this);
+        box.addView(spinner);
+        mCompactionStatus = new TextView(this);
+        mCompactionStatus.setText("Starting compaction…");
+        mCompactionStatus.setTextColor(color(R.color.ai_text));
+        mCompactionStatus.setTextSize(13);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.setMargins(0, dp(12), 0, 0);
+        box.addView(mCompactionStatus, lp);
+        mCompactionDialog = new MaterialAlertDialogBuilder(this)
+            .setTitle("Compacting session")
+            .setView(box)
+            .setCancelable(false)
+            .show();
+    }
+
+    private void dismissCompactionDialog() {
+        mCompactingRunId = null;
+        if (mCompactionDialog != null) {
+            try { mCompactionDialog.dismiss(); } catch (Exception ignored) {}
+            mCompactionDialog = null;
+        }
+        mCompactionStatus = null;
+    }
+
+    private void onCompactionProgress(String runId, String detail) {
+        if (runId != null && runId.equals(mCompactingRunId) && mCompactionStatus != null) {
+            mCompactionStatus.setText(detail);
+        } else {
+            setStatus(detail, false);
+        }
+    }
+
+    private void onCompactionComplete(String runId, JSONObject payload) {
+        dismissCompactionDialog();
+        int archived = payload.optInt("archived_messages", 0);
+        int kept = payload.optInt("protected_tail", 0);
+        addSystemMessage("Compaction complete: " + archived + " older messages archived into a checkpoint, "
+            + kept + " recent kept. Memory files stay authoritative — ask with session_search if you need pre-compaction detail.");
+        setStatus("Session compacted.", false);
+        if (mCurrentRunId != null && mCurrentRunId.equals(runId)) rebuildTranscript(runId);
+        refreshRecentRuns();
+        if (mSessionsPage != null && mSessionsPage.getVisibility() == View.VISIBLE) refreshSessionsPage();
+    }
+
+    private void onCompactionFailed(String runId, JSONObject payload) {
+        dismissCompactionDialog();
+        showError(payload.optString("error", "Compaction failed."));
     }
 
     private String sessionMarkdown(AiDatabase.RunRecord run) {

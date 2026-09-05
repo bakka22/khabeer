@@ -613,6 +613,7 @@ public void sendPrompt(String prompt, @Nullable String effort, @Nullable String 
             notifyError(null, "No active native agent session.");
             return;
         }
+        if (refuseIfCompacting(c.record.id)) return;
         // Session-authoritative resolution (khabeer _restore_session_model):
         // provider, model and credentials come from the session row and the
         // provider registry, never from ambient UI state — sessions carry
@@ -706,6 +707,7 @@ public void sendPrompt(String prompt, @Nullable String effort, @Nullable String 
             notifyError(null, "No active native agent session.");
             return;
         }
+        if (refuseIfCompacting(c.record.id)) return;
         if (c.worker != null && c.worker.isAlive()) {
             notifyError(c.record.id, "Wait for the current model turn to finish before retrying.");
             return;
@@ -755,6 +757,10 @@ public void sendPrompt(String prompt, @Nullable String effort, @Nullable String 
         RunContext c = mViewed;
         if (c == null || c.record == null) {
             try { out.put("success", false).put("error", "No active native agent session."); } catch (Exception ignored) {}
+            return out;
+        }
+        if (refuseIfCompacting(c.record.id)) {
+            try { out.put("success", false).put("error", "Compaction is running on this session — wait for it to finish."); } catch (Exception ignored) {}
             return out;
         }
         if (c.worker != null && c.worker.isAlive()) {
@@ -887,18 +893,16 @@ public void compactCurrentSessionManually() {
             notifyError(runId, "This session is still small; compaction needs a longer transcript to be useful.");
             return;
         }
-        mDatabase.appendEvent(runId, "memory/compactionStarted", new JSONObject().toString());
+        emitForRun(runId, "memory/compactionStarted", new JSONObject());
         new Thread(() -> {
             try {
-                JSONObject result = performCompactionBlocking(target, fProviderId, fBaseUrl, fApiKey, fModel);
-                try { mDatabase.appendEvent(runId, "memory/compactionComplete", result.toString()); } catch (Exception ignored) {}
+                performCompactionBlocking(target, fProviderId, fBaseUrl, fApiKey, fModel);
                 persistRun(target);
                 mContextWarnedSessions.remove(runId);
                 mHandler.post(() -> {
                     for (Listener listener : new ArrayList<>(mListeners)) listener.onRunChanged(copyRun(target.record));
                 });
             } catch (Exception e) {
-                try { mDatabase.appendEvent(runId, "memory/compactionFailed", new JSONObject().put("error", e.getMessage()).toString()); } catch (Exception ignored) {}
                 notifyError(runId, e.getMessage() == null ? "Manual compaction failed." : e.getMessage());
             }
         }, "khabeer-manual-compaction").start();
@@ -910,16 +914,45 @@ public void compactCurrentSessionManually() {
     private JSONObject performCompactionBlocking(RunContext target, String providerId, String baseUrl,
                                                  String apiKey, String model) throws Exception {
         String runId = target.record.id;
-        JSONArray transcript = mDatabase.getHistoricalTranscript(runId, 1000);
-        if (transcript.length() < 30) throw new IllegalStateException("This session is still small; compaction needs a longer transcript to be useful.");
-        String summary = callBackgroundCompactionSummary(providerId, baseUrl, apiKey, model, runId, transcript);
-        if (TextUtils.isEmpty(summary)) throw new IllegalStateException("The provider returned an empty compaction summary.");
-        if (!summary.startsWith("[CONTEXT COMPACTION")) summary = compactionPrefix() + "\n\n" + summary.trim();
-        JSONObject result = mDatabase.compactSession(runId, summary, 20);
-        if (!result.optBoolean("success")) throw new IllegalStateException(result.optString("error", "Compaction failed."));
-        rebuildReplayFromDatabase(target);
-        mContextWarnedSessions.remove(runId);
-        return result;
+        if (mCompactingRunId != null && !mCompactingRunId.equals(runId)) {
+            throw new IllegalStateException("Another session is compacting right now.");
+        }
+        mCompactingRunId = runId;
+        try {
+            JSONArray transcript = mDatabase.getHistoricalTranscript(runId, 1000);
+            if (transcript.length() < 30) throw new IllegalStateException("This session is still small; compaction needs a longer transcript to be useful.");
+            progress(runId, "started", transcript.length() + " transcript messages. Asking " + model + " for a checkpoint…");
+            String summary = callBackgroundCompactionSummary(providerId, baseUrl, apiKey, model, runId, transcript);
+            if (TextUtils.isEmpty(summary)) throw new IllegalStateException("The provider returned an empty compaction summary.");
+            if (!summary.startsWith("[CONTEXT COMPACTION")) summary = compactionPrefix() + "\n\n" + summary.trim();
+            progress(runId, "summarized", "Checkpoint written (" + summary.length() + " chars). Archiving older turns…");
+            JSONObject result = mDatabase.compactSession(runId, summary, 20);
+            if (!result.optBoolean("success")) throw new IllegalStateException(result.optString("error", "Compaction failed."));
+            progress(runId, "archived", result.optInt("archived_messages", 0) + " messages archived, "
+                + result.optInt("protected_tail", 0) + " kept. Rebuilding replay…");
+            rebuildReplayFromDatabase(target);
+            mContextWarnedSessions.remove(runId);
+            try {
+                result.put("phase", "done");
+                emitForRun(runId, "memory/compactionComplete", result);
+            } catch (Exception ignored) {}
+            return result;
+        } catch (Exception e) {
+            try {
+                emitForRun(runId, "memory/compactionFailed",
+                    new JSONObject().put("error", e.getMessage() == null ? "Compaction failed." : e.getMessage()));
+            } catch (Exception ignored) {}
+            throw e;
+        } finally {
+            if (runId.equals(mCompactingRunId)) mCompactingRunId = null;
+        }
+    }
+
+    private void progress(String runId, String phase, String detail) {
+        try {
+            emitForRun(runId, "memory/compactionProgress",
+                new JSONObject().put("phase", phase).put("detail", detail));
+        } catch (Exception ignored) {}
     }
 
     /** Model context-window estimate in tokens (mobile multi-provider
@@ -3747,6 +3780,34 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
 
     private boolean isQuiet() {
         return Boolean.TRUE.equals(mQuietTurn.get());
+    }
+
+    /** Run-targeted broadcast for work that owns no turn context
+     * (compaction): same event store as emit, always delivered. */
+    private void emitForRun(String runId, String method, JSONObject payload) {
+        if (TextUtils.isEmpty(runId) || payload == null) return;
+        mDatabase.appendEvent(runId, method, payload.toString());
+        try { payload.put("runId", runId); } catch (Exception ignored) {}
+        mHandler.post(() -> {
+            for (Listener listener : new ArrayList<>(mListeners)) listener.onProtocolEvent(runId, method, payload);
+        });
+    }
+
+    /** Session id with an in-flight compaction, if any. New turns are
+     * refused while set: interleaving a turn with archiving corrupts both. */
+    private volatile String mCompactingRunId;
+
+    public boolean isCompacting() {
+        return mCompactingRunId != null;
+    }
+
+    /** Refuses turns on the compacting session only: archiving and
+     * appending the same transcript concurrently corrupts both. Other
+     * sessions are unaffected. */
+    private boolean refuseIfCompacting(@Nullable String runId) {
+        if (mCompactingRunId == null || runId == null || !mCompactingRunId.equals(runId)) return false;
+        notifyError(runId, "Compaction is running on this session — wait for it to finish.");
+        return true;
     }
 
     private void emit(String method, JSONObject payload) {
