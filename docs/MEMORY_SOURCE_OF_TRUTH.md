@@ -24,7 +24,7 @@ Mirror everything in this doc. EXCLUDED, by decision:
 2. **Mid-session automatic compaction** (batch, micro, idle, in-place-auto,
    native server-side). Auto-compaction breaks the provider prefix cache
    mid-session. Compaction is MANUAL ONLY (§5): user-invoked from the
-   Memory page or session menu, plus a user-facing prompt when the context
+   session menu, plus a user-facing prompt when the context
    window is almost full (§5.1). Nothing else may archive, rewrite, or
    rotate the live transcript.
 
@@ -125,9 +125,11 @@ Mirror everything in this doc. EXCLUDED, by decision:
 
 ## §5 Manual compaction (ONLY compaction allowed)
 
-- Entry points: Memory page "Compact session" card (shows provider/model,
-  active replay count, readiness) and session menu. Confirmation dialog.
-  Refuse while a live model turn is running.
+- Entry points: Sessions list long-press → "Compact session" (shows
+  provider/model, active replay count, readiness), operating on THAT
+  session even when it is not live. It does NOT live on the Memory
+  page — compaction acts on session transcripts, not memory files.
+  Confirmation dialog. Refuse while a live model turn is running.
 - Structured checkpoint format (exact). Header:
   ```text
   [CONTEXT COMPACTION — REFERENCE ONLY]
@@ -230,7 +232,8 @@ Mirror everything in this doc. EXCLUDED, by decision:
   search/read/scroll/browse, §5 archive + summary rows + replay rebuild.
 - `AiRuntimeService`: §11 lifecycle, §2/§3 tool exposure to all
   providers, §6 nudge scheduling + quiet calls, §5.1 usage tracking.
-- `AiActivity` (More → Memory page, Journey, compaction card, pending
+- `AiActivity` (More → Memory page, Journey, pending approvals; Sessions
+  long-press for per-session compaction)
   approvals, editors with live usage %): §7, §8, §10, §5.
 - Legacy data: on first run after this spec, migrate
   `$HOME/.termuxAI` → `$HOME/.khabeer`, `$HOME/.katheer` →
