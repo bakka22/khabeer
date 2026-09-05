@@ -916,6 +916,138 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             "See delegated child runs, inspect their transcripts, and configure their step and timeout bounds.",
             "🤖",
             v -> showSubagentsPage()));
+        morePage.addView(createMoreEntry(
+            "Web access",
+            "Model search + page fetch. SearXNG when configured, else keyless DuckDuckGo; private hosts always refused.",
+            "🌐",
+            v -> showWebPage()));
+    }
+
+    /** Web access settings (Hermes web backend ladder, mobile trim):
+     * master switch, search backend, SearXNG instance URL, host blocklist. */
+    private void showWebPage() {
+        View morePage = findViewById(R.id.ai_more_page);
+        if (!(morePage instanceof LinearLayout)) return;
+        LinearLayout page = (LinearLayout) morePage;
+        page.removeAllViews();
+        page.setPadding(dp(16), dp(16), dp(16), dp(100));
+        mChatTitle.setText("Web access");
+        page.addView(nsBackRow("More", () -> showMorePage()));
+
+        TextView title = new TextView(this);
+        title.setText("Web access");
+        title.setTextColor(color(R.color.ai_text));
+        title.setTextSize(24);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        page.addView(title);
+
+        TextView subtitle = new TextView(this);
+        subtitle.setText("The model searches the web and fetches pages through the web tool. "
+            + "SearXNG wins when an instance URL is set, otherwise keyless DuckDuckGo HTML. "
+            + "Private-network targets are always refused; add sensitive hosts below.");
+        subtitle.setTextColor(color(R.color.ai_text_muted));
+        subtitle.setTextSize(13);
+        subtitle.setLineSpacing(dp(2), 1.0f);
+        LinearLayout.LayoutParams subLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        subLp.setMargins(0, dp(4), 0, dp(14));
+        page.addView(subtitle, subLp);
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(14), dp(12), dp(14), dp(12));
+        box.setBackgroundResource(R.drawable.bg_provider_card);
+        page.addView(box);
+
+        box.addView(memoryToggle("Enable web search + fetch",
+            mProviderConfig == null || mProviderConfig.isWebEnabled(), checked -> {
+                if (mProviderConfig != null) mProviderConfig.setWebEnabled(checked);
+                showWebPage();
+            }));
+
+        String backend = mProviderConfig == null ? "auto" : mProviderConfig.getWebSearchBackend();
+        String searxng = mProviderConfig == null ? "" : mProviderConfig.getSearxngUrl();
+        TextView status = new TextView(this);
+        status.setText("Search backend: " + backend
+            + ("searxng".equals(backend) || (!TextUtils.isEmpty(searxng) && "auto".equals(backend))
+                ? (TextUtils.isEmpty(searxng) ? " (no instance set — falls back to DuckDuckGo)" : " (" + searxng + ")")
+                : ""));
+        status.setTextColor(color(R.color.ai_text_muted));
+        status.setTextSize(12);
+        status.setPadding(0, dp(8), 0, 0);
+        box.addView(status);
+
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        rowLp.setMargins(0, dp(10), 0, 0);
+        box.addView(row, rowLp);
+        MaterialButton backendBtn = smallMemoryButton("Backend: " + backend);
+        backendBtn.setOnClickListener(v -> {
+            String[] options = new String[]{"auto", "duckduckgo", "searxng"};
+            String current = mProviderConfig == null ? "auto" : mProviderConfig.getWebSearchBackend();
+            int checked = "duckduckgo".equals(current) ? 1 : "searxng".equals(current) ? 2 : 0;
+            new MaterialAlertDialogBuilder(this)
+                .setTitle("Search backend")
+                .setSingleChoiceItems(options, checked, (dialog, which) -> {
+                    if (mProviderConfig != null) mProviderConfig.setWebSearchBackend(options[which]);
+                    dialog.dismiss();
+                    showWebPage();
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+        });
+        row.addView(backendBtn, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        MaterialButton searxngBtn = smallMemoryButton("SearXNG URL");
+        searxngBtn.setOnClickListener(v -> {
+            final android.widget.EditText input = new android.widget.EditText(this);
+            input.setSingleLine(true);
+            input.setHint("https://searx.example.com");
+            if (mProviderConfig != null) input.setText(mProviderConfig.getSearxngUrl());
+            input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+            new MaterialAlertDialogBuilder(this)
+                .setTitle("SearXNG instance")
+                .setMessage("Your SearXNG base URL (called as /search?q=…&format=json). Empty = DuckDuckGo.")
+                .setView(input)
+                .setNegativeButton(android.R.string.cancel, null)
+                .setPositiveButton("Save", (dialog, which) -> {
+                    if (mProviderConfig != null) {
+                        mProviderConfig.setSearxngUrl(input.getText().toString());
+                    }
+                    showWebPage();
+                })
+                .show();
+        });
+        LinearLayout.LayoutParams searxngLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        searxngLp.setMargins(dp(8), 0, 0, 0);
+        row.addView(searxngBtn, searxngLp);
+
+        MaterialButton blockedBtn = smallMemoryButton("Blocked hosts"
+            + (mProviderConfig != null && !TextUtils.isEmpty(mProviderConfig.getWebBlockedHosts())
+                ? ": " + mProviderConfig.getWebBlockedHosts() : " (none)"));
+        LinearLayout.LayoutParams blockedLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        blockedLp.setMargins(0, dp(8), 0, 0);
+        box.addView(blockedBtn, blockedLp);
+        blockedBtn.setOnClickListener(v -> {
+            final android.widget.EditText input = new android.widget.EditText(this);
+            input.setSingleLine(false);
+            input.setHint("intranet.example.com, 10.0.0.0/8 note: plain hosts");
+            if (mProviderConfig != null) input.setText(mProviderConfig.getWebBlockedHosts());
+            new MaterialAlertDialogBuilder(this)
+                .setTitle("Blocked hosts")
+                .setMessage("Comma-separated hosts the model may never fetch (exact or parent-domain match). Private networks are always refused.")
+                .setView(input)
+                .setNegativeButton(android.R.string.cancel, null)
+                .setPositiveButton("Save", (dialog, which) -> {
+                    if (mProviderConfig != null) {
+                        mProviderConfig.setWebBlockedHosts(input.getText().toString());
+                    }
+                    showWebPage();
+                })
+                .show();
+        });
     }
 
     private void showSubagentsPage() {

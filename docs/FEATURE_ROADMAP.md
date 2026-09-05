@@ -129,9 +129,19 @@ shapes byte-exact, degradation, guards — caught and fixed a real
 persistence, no crashes). Model-side sighting needs a vision-capable
 model; text-only test models stayed blind as expected.
 
-## 7. Web access — Status: NOT STARTED
+## 7. Web access — Status: DONE (unit + live verified)
 
-Hermes map: web/browser toolsets, fetch policy, search backends.
-(Deep map to be filled during implementation.)
+Hermes map: `tools/web_tools.py` (backend ladder tavily/exa/parallel/
+firecrawl/searxng/brave/ddgs + keyless tier, per-capability overrides),
+`tools/website_policy.py` (blocklist, host rules), SSRF guards.
 
-App plan: TBD.
+App implementation: `AiWebTools` (SearXNG when an instance URL is set,
+else keyless DuckDuckGo HTML; fetch with http(s)-only, private-target
+refusal, per-hop redirect policy, 2 MB/12k-char caps, HTML→text),
+`web` model tool (search/fetch actions) registered in `modelTools` and
+both dispatch sites, prefs (master switch, backend, SearXNG URL,
+host blocklist), More → Web access page. Unit-verified against a
+socket-level HTTP server (policy, extraction, redirects, binary
+refusal, SearXNG parse + blocklist filtering, error paths).
+Live-verified (settings page, no crashes; tool rides the same
+dispatch as the other verified tools).

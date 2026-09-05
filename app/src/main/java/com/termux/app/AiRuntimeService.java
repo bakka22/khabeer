@@ -2660,6 +2660,8 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         tools.put(chatShape ? chatShape(sessionSearchTool()) : sessionSearchTool());
         tools.put(chatShape ? chatShape(delegateTool()) : delegateTool());
         tools.put(chatShape ? chatShape(todoTool()) : todoTool());
+        if (mProviderConfig == null || mProviderConfig.isWebEnabled())
+            tools.put(chatShape ? chatShape(webTool()) : webTool());
         if (AiSkillRegistry.promptSection() != null) {
             tools.put(chatShape ? chatShape(skillsListTool()) : skillsListTool());
             tools.put(chatShape ? chatShape(skillViewTool()) : skillViewTool());
@@ -2780,6 +2782,66 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
                 .put("error", message == null ? "todo error" : message).toString();
         } catch (Exception e) {
             return "{\"success\":false,\"error\":\"todo error\"}";
+        }
+    }
+
+    private JSONObject webTool() throws Exception {
+        return new JSONObject()
+            .put("type", "function")
+            .put("name", "web")
+            .put("description", "Search the web and fetch pages. "
+                + "action='search' needs query (optional limit, default 5). "
+                + "action='fetch' needs url and returns the page as text. "
+                + "Private-network targets and blocklisted hosts are refused. "
+                + "Prefer search to discover URLs, then fetch the best hits. "
+                + "Quote what you use.")
+            .put("parameters", new JSONObject()
+                .put("type", "object")
+                .put("properties", new JSONObject()
+                    .put("action", new JSONObject().put("type", "string")
+                        .put("description", "search | fetch"))
+                    .put("query", new JSONObject().put("type", "string"))
+                    .put("url", new JSONObject().put("type", "string"))
+                    .put("limit", new JSONObject().put("type", "integer")))
+                .put("required", new JSONArray().put("action")));
+    }
+
+    private boolean isWebTool(String name) {
+        return "web".equals(name);
+    }
+
+    /** web dispatch: search via the configured backend ladder, fetch
+     * behind the fetch policy. Runs on the worker thread (network I/O). */
+    private String runWebTool(JSONObject args) {
+        try {
+            if (mProviderConfig != null && !mProviderConfig.isWebEnabled()) {
+                return webError("Web access is disabled (More → Web access).");
+            }
+            String action = args == null ? "" : args.optString("action", "").trim().toLowerCase(Locale.US);
+            String blocked = mProviderConfig == null ? "" : mProviderConfig.getWebBlockedHosts();
+            JSONObject result;
+            if ("search".equals(action)) {
+                String backend = mProviderConfig == null ? "auto" : mProviderConfig.getWebSearchBackend();
+                String searxng = mProviderConfig == null ? "" : mProviderConfig.getSearxngUrl();
+                result = AiWebTools.search(args.optString("query", ""),
+                    args.optInt("limit", 5), backend, searxng, blocked);
+            } else if ("fetch".equals(action)) {
+                result = AiWebTools.fetch(args == null ? "" : args.optString("url", ""), blocked);
+            } else {
+                return webError("web needs action='search' or action='fetch'.");
+            }
+            return result.toString();
+        } catch (Exception e) {
+            return webError(e.getMessage() == null ? "web tool failed" : e.getMessage());
+        }
+    }
+
+    private static String webError(String message) {
+        try {
+            return new JSONObject().put("success", false)
+                .put("error", message == null ? "web error" : message).toString();
+        } catch (Exception e) {
+            return "{\"success\":false,\"error\":\"web error\"}";
         }
     }
 
@@ -2961,6 +3023,10 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
             emit("tool/callStarted", json("name", name, "command", "todowrite"));
             output = runTodoTool(args);
             emit("item/commandExecution/outputDelta", json("text", memoryToolSummary(output) + "\n", "command", "todowrite"));
+        } else if (isWebTool(name)) {
+            emit("tool/callStarted", json("name", name, "command", "web"));
+            output = runWebTool(args);
+            emit("item/commandExecution/outputDelta", json("text", memoryToolSummary(output) + "\n", "command", "web"));
         } else if (isSkillsTool(name)) {
             output = runSkillsTool(name, args, approvalPolicy);
         } else if (name != null && name.startsWith(AiMcpRegistry.TOOL_PREFIX)) {
@@ -3005,6 +3071,10 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
             emit("tool/callStarted", json("name", name, "command", "todowrite"));
             output = runTodoTool(args);
             emit("item/commandExecution/outputDelta", json("text", memoryToolSummary(output) + "\n", "command", "todowrite"));
+        } else if (isWebTool(name)) {
+            emit("tool/callStarted", json("name", name, "command", "web"));
+            output = runWebTool(args);
+            emit("item/commandExecution/outputDelta", json("text", memoryToolSummary(output) + "\n", "command", "web"));
         } else if (isSkillsTool(name)) {
             output = runSkillsTool(name, args, approvalPolicy);
         } else if (name != null && name.startsWith(AiMcpRegistry.TOOL_PREFIX)) {

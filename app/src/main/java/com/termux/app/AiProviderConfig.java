@@ -46,6 +46,10 @@ public final class AiProviderConfig {
     private static final String KEY_CURATOR_INTERVAL_DAYS = "curator_interval_days";
     private static final String KEY_CURATOR_STALE_DAYS = "curator_stale_days";
     private static final String KEY_CURATOR_ARCHIVE_DAYS = "curator_archive_days";
+    private static final String KEY_WEB_ENABLED = "web_enabled";
+    private static final String KEY_WEB_SEARCH_BACKEND = "web_search_backend";
+    private static final String KEY_SEARXNG_URL = "searxng_url";
+    private static final String KEY_WEB_BLOCKED_HOSTS = "web_blocked_hosts";
 
     private final SharedPreferences mPrefs;
 
@@ -341,6 +345,47 @@ public final class AiProviderConfig {
 
     public void setCuratorArchiveDays(int days) {
         mPrefs.edit().putInt(KEY_CURATOR_ARCHIVE_DAYS, Math.max(1, Math.min(730, days))).apply();
+    }
+
+    /** Web access (Hermes web backend ladder, mobile trim): the model gets
+     * search + fetch tools. SearXNG wins when an instance URL is set,
+     * otherwise keyless DuckDuckGo HTML. Private-network targets and
+     * blocklisted hosts are always refused. */
+    public boolean isWebEnabled() {
+        return mPrefs.getBoolean(KEY_WEB_ENABLED, true);
+    }
+
+    public void setWebEnabled(boolean enabled) {
+        mPrefs.edit().putBoolean(KEY_WEB_ENABLED, enabled).apply();
+    }
+
+    /** auto | duckduckgo | searxng. Unknown values fall back to auto. */
+    public String getWebSearchBackend() {
+        String backend = mPrefs.getString(KEY_WEB_SEARCH_BACKEND, "auto");
+        if ("duckduckgo".equals(backend) || "searxng".equals(backend)) return backend;
+        return "auto";
+    }
+
+    public void setWebSearchBackend(String backend) {
+        if (!"duckduckgo".equals(backend) && !"searxng".equals(backend)) backend = "auto";
+        mPrefs.edit().putString(KEY_WEB_SEARCH_BACKEND, backend).apply();
+    }
+
+    public String getSearxngUrl() {
+        return mPrefs.getString(KEY_SEARXNG_URL, "").trim();
+    }
+
+    public void setSearxngUrl(String url) {
+        mPrefs.edit().putString(KEY_SEARXNG_URL, url == null ? "" : url.trim()).apply();
+    }
+
+    /** Comma-separated host blocklist (exact or parent-domain match). */
+    public String getWebBlockedHosts() {
+        return mPrefs.getString(KEY_WEB_BLOCKED_HOSTS, "");
+    }
+
+    public void setWebBlockedHosts(String csv) {
+        mPrefs.edit().putString(KEY_WEB_BLOCKED_HOSTS, csv == null ? "" : csv.trim()).apply();
     }
 
     /** An OpenCode route is usable when it needs no key (Free) or its key is set. */
