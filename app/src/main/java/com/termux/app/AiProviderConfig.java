@@ -42,6 +42,10 @@ public final class AiProviderConfig {
     private static final String KEY_LAST_ROUTE = "last_route";
     private static final String KEY_SUBAGENT_MAX_STEPS = "subagent_max_steps";
     private static final String KEY_SUBAGENT_TIMEOUT = "subagent_timeout_seconds";
+    private static final String KEY_CURATOR_ENABLED = "curator_enabled";
+    private static final String KEY_CURATOR_INTERVAL_DAYS = "curator_interval_days";
+    private static final String KEY_CURATOR_STALE_DAYS = "curator_stale_days";
+    private static final String KEY_CURATOR_ARCHIVE_DAYS = "curator_archive_days";
 
     private final SharedPreferences mPrefs;
 
@@ -304,6 +308,39 @@ public final class AiProviderConfig {
 
     public void setSubagentTimeoutSeconds(int seconds) {
         mPrefs.edit().putInt(KEY_SUBAGENT_TIMEOUT, Math.max(60, Math.min(1800, seconds))).apply();
+    }
+
+    /** Library janitor (Hermes curator, deterministic pass only). */
+    public boolean isCuratorEnabled() {
+        return mPrefs.getBoolean(KEY_CURATOR_ENABLED, true);
+    }
+
+    public void setCuratorEnabled(boolean enabled) {
+        mPrefs.edit().putBoolean(KEY_CURATOR_ENABLED, enabled).apply();
+    }
+
+    public int getCuratorIntervalDays() {
+        return Math.max(1, Math.min(90, mPrefs.getInt(KEY_CURATOR_INTERVAL_DAYS, 7)));
+    }
+
+    public void setCuratorIntervalDays(int days) {
+        mPrefs.edit().putInt(KEY_CURATOR_INTERVAL_DAYS, Math.max(1, Math.min(90, days))).apply();
+    }
+
+    public int getCuratorStaleDays() {
+        return Math.max(1, Math.min(365, mPrefs.getInt(KEY_CURATOR_STALE_DAYS, 30)));
+    }
+
+    public void setCuratorStaleDays(int days) {
+        mPrefs.edit().putInt(KEY_CURATOR_STALE_DAYS, Math.max(1, Math.min(365, days))).apply();
+    }
+
+    public int getCuratorArchiveDays() {
+        return Math.max(1, Math.min(730, mPrefs.getInt(KEY_CURATOR_ARCHIVE_DAYS, 90)));
+    }
+
+    public void setCuratorArchiveDays(int days) {
+        mPrefs.edit().putInt(KEY_CURATOR_ARCHIVE_DAYS, Math.max(1, Math.min(730, days))).apply();
     }
 
     /** An OpenCode route is usable when it needs no key (Free) or its key is set. */

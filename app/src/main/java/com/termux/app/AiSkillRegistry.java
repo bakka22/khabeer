@@ -444,6 +444,7 @@ public final class AiSkillRegistry {
         if (!isEnabled(target.name)) {
             return toolError("Skill '" + target.name + "' is disabled. Enable it in the Skills & extensions page.");
         }
+        recordSkillEvent(target.name, "last_viewed_at");
 
         if (filePath != null && !filePath.trim().isEmpty()) return viewFile(target, filePath.trim(), dedup);
 
@@ -590,10 +591,27 @@ public final class AiSkillRegistry {
         try {
             File root = skillsRoot();
             root.mkdirs();
+            java.util.Set<String> before = new java.util.HashSet<>();
+            for (Skill s : listSkills()) before.add(s.name);
             String[] top = context.getAssets().list("skills");
             if (top == null) return renamed;
             for (String entry : top) copyAssetDir(context, "skills/" + entry, new File(root, entry));
             invalidate();
+            java.util.Set<String> seeded = new java.util.HashSet<>();
+            try {
+                JSONArray prev = new JSONArray(readFile(seededManifest(), MAX_SKILL_FILE_BYTES));
+                for (int i = 0; i < prev.length(); i++) seeded.add(prev.optString(i));
+            } catch (Exception ignored) {}
+            for (Skill s : listSkills()) {
+                if (!before.contains(s.name)) seeded.add(s.name);
+            }
+            // Backfill: skills installed by older builds predate the manifest.
+            // Anything matching the APK asset tree is bundled, regardless of
+            // when it was copied.
+            for (Skill s : listSkills()) {
+                if (!seeded.contains(s.name) && assetSkillExists(context, s.relPath)) seeded.add(s.name);
+            }
+            writeSeededManifest(new java.util.ArrayList<>(seeded));
         } catch (Exception ignored) {}
         return renamed;
     }
@@ -932,6 +950,32 @@ public final class AiSkillRegistry {
      * skills are snapshotted and rolled back on any failure.
      */
     public static String manageTool(JSONObject args) {
+        String result = manageToolInner(args);
+        try {
+            if (new JSONObject(result).optBoolean("success")) {
+                java.util.List<String> touched = new java.util.ArrayList<>();
+                if (args != null && args.has("operations") && !args.isNull("operations")) {
+                    JSONArray ops = args.optJSONArray("operations");
+                    if (ops != null) {
+                        for (int i = 0; i < ops.length(); i++) {
+                            String n = ops.optJSONObject(i) == null ? "" : ops.optJSONObject(i).optString("name", "").trim();
+                            if (!TextUtils.isEmpty(n) && !touched.contains(n)) touched.add(n);
+                        }
+                    }
+                } else if (args != null) {
+                    String n = args.optString("name", "").trim();
+                    if (!TextUtils.isEmpty(n)) touched.add(n);
+                }
+                for (String n : touched) {
+                    recordSkillEvent(n, "last_patched_at");
+                    markAgentAuthored(n);
+                }
+            }
+        } catch (Exception ignored) {}
+        return result;
+    }
+
+    private static String manageToolInner(JSONObject args) {
         try {
             if (args.has("operations") && !args.isNull("operations")) {
                 JSONArray ops = args.optJSONArray("operations");
@@ -1055,6 +1099,263 @@ public final class AiSkillRegistry {
     }
 
     // ------------------------------------------------------------------
+    // Skill usage telemetry + curator flags (Hermes skill_usage port)
+    // ------------------------------------------------------------------
+
+    private static File usageFile() {
+        return new File(skillsRoot(), ".usage.json");
+    }
+
+    /** Records viewed/used/patched activity per skill (Hermes .usage.json
+     * sidecar). viewed = skill_view loaded it; used = invoked via /skill
+     * or executed from; patched = edited through skill_manage. */
+    public static synchronized void recordSkillEvent(String name, String event) {
+        if (TextUtils.isEmpty(name) || TextUtils.isEmpty(event)) return;
+        String clean = name.trim();
+        if (!"last_viewed_at".equals(event) && !"last_used_at".equals(event) && !"last_patched_at".equals(event)) return;
+        File path = usageFile();
+        File lockPath = new File(path.getParentFile(), path.getName() + ".lock");
+        try {
+            if (lockPath.getParentFile() != null) lockPath.getParentFile().mkdirs();
+            try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(lockPath, "rw");
+                 java.nio.channels.FileChannel channel = raf.getChannel();
+                 java.nio.channels.FileLock ignored = channel.lock()) {
+                JSONObject usage = readUsageLocked();
+                JSONObject rec = usage.optJSONObject(clean);
+                if (rec == null) rec = new JSONObject();
+                rec.put(event, System.currentTimeMillis());
+                usage.put(clean, rec);
+                writeTextFile(path, usage.toString(2));
+            }
+        } catch (Exception ignored) {}
+    }
+
+    public static synchronized void markAgentAuthored(String name) {
+        if (TextUtils.isEmpty(name)) return;
+        String clean = name.trim();
+        File path = usageFile();
+        File lockPath = new File(path.getParentFile(), path.getName() + ".lock");
+        try {
+            if (lockPath.getParentFile() != null) lockPath.getParentFile().mkdirs();
+            try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(lockPath, "rw");
+                 java.nio.channels.FileChannel channel = raf.getChannel();
+                 java.nio.channels.FileLock ignored = channel.lock()) {
+                JSONObject usage = readUsageLocked();
+                JSONObject rec = usage.optJSONObject(clean);
+                if (rec == null) rec = new JSONObject();
+                rec.put("agent_authored", true);
+                if (!rec.has("first_seen_at")) rec.put("first_seen_at", System.currentTimeMillis());
+                usage.put(clean, rec);
+                writeTextFile(path, usage.toString(2));
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private static JSONObject readUsageLocked() {
+        try {
+            String raw = readFile(usageFile(), MAX_SKILL_FILE_BYTES);
+            if (!TextUtils.isEmpty(raw)) return new JSONObject(raw);
+        } catch (Exception ignored) {}
+        return new JSONObject();
+    }
+
+    public static synchronized JSONObject loadSkillUsage() {
+        File path = usageFile();
+        File lockPath = new File(path.getParentFile(), path.getName() + ".lock");
+        try {
+            if (!path.isFile()) return new JSONObject();
+            try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(lockPath, "rw");
+                 java.nio.channels.FileChannel channel = raf.getChannel();
+                 java.nio.channels.FileLock ignored = channel.lock()) {
+                return readUsageLocked();
+            }
+        } catch (Exception ignored) {}
+        return new JSONObject();
+    }
+
+    /** Newest real activity timestamp, or 0 when never touched. */
+    public static synchronized long skillLastActivity(String name) {
+        if (TextUtils.isEmpty(name)) return 0;
+        JSONObject rec = loadSkillUsage().optJSONObject(name.trim());
+        if (rec == null) return 0;
+        return Math.max(rec.optLong("last_used_at", 0),
+            Math.max(rec.optLong("last_viewed_at", 0), rec.optLong("last_patched_at", 0)));
+    }
+
+    /** Generic frontmatter flag reader/writer (khabeer-review, khabeer-pinned). */
+    static synchronized boolean hasFrontmatterFlag(String name, String key) {
+        Skill skill = findSkill(name == null ? "" : name.trim());
+        if (skill == null || skill.skillMd == null || !skill.skillMd.isFile()) return false;
+        String content = readFile(skill.skillMd, MAX_SKILL_FILE_BYTES);
+        if (content == null) return false;
+        int fence = content.indexOf("\n---", 3);
+        String yaml = fence < 0 ? content : content.substring(0, fence);
+        java.util.regex.Matcher m = java.util.regex.Pattern
+            .compile("(?m)^" + java.util.regex.Pattern.quote(key) + "\\s*:\\s*(.+)$")
+            .matcher(yaml);
+        return m.find() && "true".equalsIgnoreCase(m.group(1).trim());
+    }
+
+    static synchronized boolean setFrontmatterFlag(String name, String key, boolean value) {
+        Skill skill = findSkill(name == null ? "" : name.trim());
+        if (skill == null || skill.skillMd == null || !skill.skillMd.isFile()) return false;
+        String content = readFile(skill.skillMd, MAX_SKILL_FILE_BYTES);
+        if (content == null || !content.startsWith("---")) return false;
+        java.util.regex.Matcher m = java.util.regex.Pattern
+            .compile("(?m)^" + java.util.regex.Pattern.quote(key) + "\\s*:\\s*.+$")
+            .matcher(content);
+        String updated;
+        if (m.find()) {
+            updated = content.substring(0, m.start()) + key + ": " + value + content.substring(m.end());
+        } else {
+            int fence = content.indexOf("\n---", 3);
+            if (fence < 0) return false;
+            updated = content.substring(0, fence) + "\n" + key + ": " + value + content.substring(fence);
+        }
+        boolean ok = writeTextFile(skill.skillMd, updated);
+        if (ok) invalidate();
+        return ok;
+    }
+
+    /** Pinned skills are exempt from review writes and curator archiving. */
+    public static synchronized boolean isPinned(String name) {
+        return hasFrontmatterFlag(name, "khabeer-pinned");
+    }
+
+    public static synchronized boolean setPinned(String name, boolean pinned) {
+        return setFrontmatterFlag(name, "khabeer-pinned", pinned);
+    }
+
+    /** Adopt: let background reviews improve a user/installed skill. */
+    public static synchronized boolean adoptSkill(String name) {
+        return markReviewManaged(name);
+    }
+
+    private static File seededManifest() {
+        return new File(skillsRoot(), ".seeded.json");
+    }
+
+    /** True when the APK ships a SKILL.md at this library-relative path. */
+    private static boolean assetSkillExists(Context context, String relPath) {
+        if (context == null || TextUtils.isEmpty(relPath)) return false;
+        try {
+            String dir = "skills/" + relPath.replace('\\', '/');
+            String[] files = context.getAssets().list(dir);
+            if (files != null) {
+                for (String f : files) {
+                    if ("SKILL.md".equals(f)) return true;
+                }
+            }
+        } catch (Exception ignored) {}
+        return false;
+    }
+
+    static synchronized void writeSeededManifest(java.util.List<String> names) {
+        try {
+            skillsRoot().mkdirs();
+            writeTextFile(seededManifest(), new JSONArray(names).toString(2));
+        } catch (Exception ignored) {}
+    }
+
+    /** Bundled skills are never auto-archived (mobile safety decision —
+     * Hermes prunes builtins by default; we keep core skills put). */
+    public static synchronized boolean isSeeded(String name) {
+        if (TextUtils.isEmpty(name)) return false;
+        try {
+            String raw = readFile(seededManifest(), MAX_SKILL_FILE_BYTES);
+            if (TextUtils.isEmpty(raw)) return false;
+            JSONArray arr = new JSONArray(raw);
+            for (int i = 0; i < arr.length(); i++) {
+                if (name.trim().equals(arr.optString(i))) return true;
+            }
+        } catch (Exception ignored) {}
+        return false;
+    }
+
+    private static File archiveRoot() {
+        return new File(skillsRoot(), ".archive");
+    }
+
+    private static File archiveIndex() {
+        return new File(archiveRoot(), ".archive.json");
+    }
+
+    /** Archives a skill dir (restorable). Refuses pinned skills. */
+    public static synchronized JSONObject archiveSkill(String name) {
+        JSONObject out = new JSONObject();
+        try {
+            Skill skill = findSkill(name == null ? "" : name.trim());
+            if (skill == null) return jsonToolError("Skill not found: '" + name + "'.");
+            if (isPinned(skill.name)) return jsonToolError("'" + skill.name + "' is pinned and cannot be archived.");
+            archiveRoot().mkdirs();
+            String stamped = skill.name + "-" + (System.currentTimeMillis() / 1000L);
+            File dest = new File(archiveRoot(), stamped);
+            if (!skill.dir.renameTo(dest)) {
+                copyDir(skill.dir, dest);
+                if (!dest.isDirectory()) return jsonToolError("Could not archive '" + skill.name + "'.");
+                deleteRecursive(skill.dir);
+            }
+            JSONObject index = readArchiveIndex();
+            index.put(skill.name, new JSONObject().put("dir", stamped).put("archived_at", System.currentTimeMillis()));
+            writeTextFile(archiveIndex(), index.toString(2));
+            invalidate();
+            out.put("success", true).put("message", "Archived '" + skill.name + "'. Restore it from the Skills page.");
+        } catch (Exception e) {
+            try { out.put("success", false).put("error", e.getMessage()); } catch (Exception ignored) {}
+        }
+        return out;
+    }
+
+    /** Restores an archived skill to the library. */
+    public static synchronized JSONObject restoreSkill(String name) {
+        JSONObject out = new JSONObject();
+        try {
+            JSONObject index = readArchiveIndex();
+            JSONObject entry = index.optJSONObject(name == null ? "" : name.trim());
+            if (entry == null) return jsonToolError("No archived skill named '" + name + "'.");
+            File src = new File(archiveRoot(), entry.optString("dir", ""));
+            if (!src.isDirectory()) return jsonToolError("Archive data for '" + name + "' is missing.");
+            File dest = new File(skillsRoot(), name.trim());
+            if (dest.exists()) return jsonToolError("A skill named '" + name + "' already exists.");
+            if (!src.renameTo(dest)) {
+                copyDir(src, dest);
+                if (!dest.isDirectory()) return jsonToolError("Could not restore '" + name + "'.");
+                deleteRecursive(src);
+            }
+            index.remove(name.trim());
+            writeTextFile(archiveIndex(), index.toString(2));
+            invalidate();
+            out.put("success", true).put("message", "Restored '" + name.trim() + "'.");
+        } catch (Exception e) {
+            try { out.put("success", false).put("error", e.getMessage()); } catch (Exception ignored) {}
+        }
+        return out;
+    }
+
+    public static synchronized JSONArray archivedSkills() {
+        JSONArray out = new JSONArray();
+        JSONObject index = readArchiveIndex();
+        for (java.util.Iterator<String> it = index.keys(); it.hasNext();) {
+            String name = it.next();
+            JSONObject entry = index.optJSONObject(name);
+            if (entry == null) continue;
+            try {
+                out.put(new JSONObject().put("name", name)
+                    .put("archived_at", entry.optLong("archived_at", 0)));
+            } catch (Exception ignored) {}
+        }
+        return out;
+    }
+
+    private static JSONObject readArchiveIndex() {
+        try {
+            String raw = readFile(archiveIndex(), MAX_SKILL_FILE_BYTES);
+            if (!TextUtils.isEmpty(raw)) return new JSONObject(raw);
+        } catch (Exception ignored) {}
+        return new JSONObject();
+    }
+
+    // ------------------------------------------------------------------
     // Background-review skill learning (Hermes skill-nudge port)
     // ------------------------------------------------------------------
 
@@ -1124,30 +1425,14 @@ public final class AiSkillRegistry {
      * (Hermes protected skills: bundled, hub-installed, pinned, user-owned
      * are off-limits to background writes). */
     public static synchronized boolean isReviewManaged(String name) {
-        Skill skill = findSkill(name == null ? "" : name.trim());
-        if (skill == null || skill.skillMd == null || !skill.skillMd.isFile()) return false;
-        String content = readFile(skill.skillMd, MAX_SKILL_FILE_BYTES);
-        if (content == null) return false;
-        int fence = content.indexOf("\n---", 3);
-        String yaml = fence < 0 ? content : content.substring(0, fence);
-        java.util.regex.Matcher m = java.util.regex.Pattern
-            .compile("(?m)^" + java.util.regex.Pattern.quote(REVIEW_MANAGED_KEY) + "\\s*:\\s*(.+)$")
-            .matcher(yaml);
-        return m.find() && "true".equalsIgnoreCase(m.group(1).trim());
+        if (isPinned(name)) return false;
+        return hasFrontmatterFlag(name, REVIEW_MANAGED_KEY);
     }
 
     /** Tags a review-created skill as review-writable. No-op when the flag
      * is already present or the file cannot be safely rewritten. */
     public static synchronized boolean markReviewManaged(String name) {
-        Skill skill = findSkill(name == null ? "" : name.trim());
-        if (skill == null || skill.skillMd == null || !skill.skillMd.isFile()) return false;
-        if (isReviewManaged(name)) return true;
-        String content = readFile(skill.skillMd, MAX_SKILL_FILE_BYTES);
-        if (content == null || !content.startsWith("---")) return false;
-        int fence = content.indexOf("\n---", 3);
-        if (fence < 0) return false;
-        String updated = content.substring(0, fence) + "\n" + REVIEW_MANAGED_KEY + ": true" + content.substring(fence);
-        return writeTextFile(skill.skillMd, updated);
+        return setFrontmatterFlag(name, REVIEW_MANAGED_KEY, true);
     }
 
     /** Executes review-proposed skill ops (skill_manage shapes) with the
@@ -1794,6 +2079,7 @@ public final class AiSkillRegistry {
             if (remaining.isEmpty()) break;
         }
         if (loaded.isEmpty()) return null;
+        for (Skill skill : loaded) recordSkillEvent(skill.name, "last_used_at");
         StringBuilder sb = new StringBuilder();
         if (loaded.size() > 1) {
             sb.append("[IMPORTANT: The user has invoked the stacked skill bundle \"")

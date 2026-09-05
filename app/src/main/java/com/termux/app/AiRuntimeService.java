@@ -338,6 +338,8 @@ public final class AiRuntimeService extends Service {
         // rewritten before any server is spawned.
         AiSkillRegistry.migrateKhabeerHome();
         AiMemoryStore.ensureDefaults();
+        // Deterministic library janitor when due (file ops only, no model).
+        AiSkillCurator.maybeRun(mProviderConfig);
         mDatabase.rewriteMcpServerDataRoot(".termuxAI", ".khabeer");
         mDatabase.rewriteMcpServerDataRoot(".katheer", ".khabeer");
         createNotificationChannel();

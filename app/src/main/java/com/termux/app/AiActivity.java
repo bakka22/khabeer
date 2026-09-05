@@ -1983,7 +1983,37 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             setStatus("Skills refreshed.", false);
         });
         toolbar.addView(refresh);
+
+        MaterialButton check = new MaterialButton(this);
+        check.setText("Check library");
+        check.setTextSize(12);
+        check.setAllCaps(false);
+        check.setStrokeColor(android.content.res.ColorStateList.valueOf(color(R.color.ai_border)));
+        check.setBackgroundTintList(android.content.res.ColorStateList.valueOf(color(R.color.ai_surface)));
+        check.setTextColor(color(R.color.ai_text));
+        check.setCornerRadius(dp(10));
+        LinearLayout.LayoutParams checkLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        checkLp.setMargins(dp(8), 0, 0, 0);
+        check.setLayoutParams(checkLp);
+        check.setOnClickListener(v -> showCuratorDryRun());
+        toolbar.addView(check);
         mExtensionsList.addView(toolbar);
+
+        TextView curatorStatus = new TextView(this);
+        String lastSummary = "";
+        try {
+            lastSummary = AiSkillCurator.loadState().optString("last_summary", "");
+        } catch (Exception ignored) {}
+        curatorStatus.setText(TextUtils.isEmpty(lastSummary)
+            ? "Library check has not run yet. It archives skills unused for "
+                + (mProviderConfig == null ? 90 : mProviderConfig.getCuratorArchiveDays())
+                + " days (bundled and pinned skills are never touched)."
+            : "Last library check: " + lastSummary);
+        curatorStatus.setTextColor(color(R.color.ai_text_muted));
+        curatorStatus.setTextSize(11);
+        curatorStatus.setPadding(0, 0, 0, dp(10));
+        mExtensionsList.addView(curatorStatus);
 
         Set<String> disabled = AiSkillRegistry.readDisabled();
         List<AiSkillRegistry.Skill> skills = AiSkillRegistry.listSkills();
@@ -2006,7 +2036,52 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             empty.setPadding(0, dp(6), 0, dp(16));
             mExtensionsList.addView(empty);
         }
+        buildArchivedSkillsSection();
         buildMcpSection();
+    }
+
+    private void buildArchivedSkillsSection() {
+        JSONArray archived = AiSkillRegistry.archivedSkills();
+        if (archived.length() == 0) return;
+        TextView heading = new TextView(this);
+        heading.setText("ARCHIVED");
+        heading.setTextColor(color(R.color.ai_text_muted));
+        heading.setTextSize(12);
+        heading.setTypeface(Typeface.DEFAULT_BOLD);
+        heading.setLetterSpacing(0.08f);
+        heading.setPadding(0, dp(18), 0, dp(10));
+        mExtensionsList.addView(heading);
+        for (int i = 0; i < archived.length(); i++) {
+            JSONObject entry = archived.optJSONObject(i);
+            if (entry == null) continue;
+            String name = entry.optString("name", "");
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(dp(14), dp(10), dp(14), dp(10));
+            row.setBackgroundResource(R.drawable.bg_provider_card);
+            LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            rowLp.setMargins(0, 0, 0, dp(8));
+            row.setLayoutParams(rowLp);
+            TextView label = new TextView(this);
+            label.setText(name);
+            label.setTextColor(color(R.color.ai_text));
+            label.setTextSize(13);
+            LinearLayout.LayoutParams labelLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+            row.addView(label, labelLp);
+            MaterialButton restore = smallMemoryButton("Restore");
+            restore.setOnClickListener(v -> {
+                JSONObject result = AiSkillRegistry.restoreSkill(name);
+                if (result.optBoolean("success")) {
+                    Toast.makeText(this, "Skill restored.", Toast.LENGTH_SHORT).show();
+                } else showError(result.optString("error", "Restore failed."));
+                AiSkillRegistry.invalidate();
+                refreshExtensionsPage();
+            });
+            row.addView(restore);
+            mExtensionsList.addView(row);
+        }
     }
 
     /** MCP servers section (Streamable HTTP, phase 2): list, add, edit,
@@ -2832,6 +2907,50 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         dir.delete();
     }
 
+    /** Dry-run preview first — archiving is destructive-adjacent, so the
+     * user always sees what would move before confirming. */
+    private void showCuratorDryRun() {
+        new Thread(() -> {
+            final JSONObject report = AiSkillCurator.run(mProviderConfig, true);
+            runOnUiThread(() -> showCuratorReport(report));
+        }, "khabeer-curator-dryrun").start();
+    }
+
+    private void showCuratorReport(JSONObject report) {
+        boolean dry = report.optBoolean("dry_run", true);
+        StringBuilder text = new StringBuilder();
+        text.append("Checked ").append(report.optInt("checked", 0)).append(" skills.\n");
+        appendNames(text, "Stale (unused past threshold)", report.optJSONArray("stale"));
+        appendNames(text, dry ? "Would archive" : "Archived", report.optJSONArray("archived"));
+        appendNames(text, "Skipped", report.optJSONArray("skipped"));
+        MaterialAlertDialogBuilder builder = new MaterialAlertDialogBuilder(this)
+            .setTitle(dry ? "Library check preview" : "Library check result")
+            .setMessage(text.toString().trim())
+            .setNegativeButton(dry ? android.R.string.cancel : android.R.string.ok, null);
+        if (dry) {
+            builder.setPositiveButton("Run for real", (dialog, which) -> new Thread(() -> {
+                final JSONObject real = AiSkillCurator.run(mProviderConfig, false);
+                runOnUiThread(() -> {
+                    AiSkillRegistry.invalidate();
+                    refreshExtensionsPage();
+                    showCuratorReport(real);
+                });
+            }, "khabeer-curator-run").start());
+        } else {
+            builder.setOnDismissListener(d -> {
+                AiSkillRegistry.invalidate();
+                refreshExtensionsPage();
+            });
+        }
+        builder.show();
+    }
+
+    private void appendNames(StringBuilder text, String label, JSONArray names) {
+        if (names == null || names.length() == 0) return;
+        text.append("\n").append(label).append(":\n");
+        for (int i = 0; i < names.length(); i++) text.append("· ").append(names.optString(i)).append("\n");
+    }
+
     private View createSkillCard(AiSkillRegistry.Skill skill, boolean disabled) {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
@@ -2864,6 +2983,15 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         if (!TextUtils.isEmpty(skill.version)) metaText.append(" · v").append(skill.version);
         if (!skill.platformSupported) metaText.append(" · not available on Android");
         else if (disabled) metaText.append(" · disabled");
+        boolean pinned = AiSkillRegistry.isPinned(skill.name);
+        boolean managed = AiSkillRegistry.isReviewManaged(skill.name);
+        boolean stale = false;
+        try {
+            stale = AiSkillCurator.staleSkills(mProviderConfig).contains(skill.name);
+        } catch (Exception ignored) {}
+        if (pinned) metaText.append(" · pinned");
+        if (managed) metaText.append(" · auto-learned");
+        if (stale) metaText.append(" · stale");
         meta.setText(metaText.toString());
         meta.setTextColor(color(!skill.platformSupported || disabled ? R.color.ai_warning : R.color.ai_text_muted));
         meta.setTextSize(11);
@@ -2889,6 +3017,58 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             desc.setPadding(0, dp(6), 0, 0);
             card.addView(desc);
         }
+
+        boolean isSeeded = AiSkillRegistry.isSeeded(skill.name);
+        if (isSeeded) {
+            card.setOnClickListener(v -> showSkillViewer(skill));
+            toggle.setOnClickListener(v -> {
+            });
+            return card;
+        }
+        LinearLayout actions = new LinearLayout(this);
+        actions.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams actionsLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        actionsLp.setMargins(0, dp(8), 0, 0);
+        actions.setLayoutParams(actionsLp);
+        boolean isManaged = AiSkillRegistry.isReviewManaged(skill.name);
+        boolean isPinned = AiSkillRegistry.isPinned(skill.name);
+        MaterialButton pinBtn = smallMemoryButton(isPinned ? "Unpin" : "Pin");
+        pinBtn.setOnClickListener(v -> {
+            AiSkillRegistry.setPinned(skill.name, !isPinned);
+            setStatus(isPinned ? "Skill '" + skill.name + "' unpinned." : "Skill '" + skill.name + "' pinned — reviews and auto-archive will leave it alone.", false);
+            AiSkillRegistry.invalidate();
+            refreshExtensionsPage();
+        });
+        actions.addView(pinBtn, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        if (!isManaged && !isSeeded) {
+            MaterialButton adoptBtn = smallMemoryButton("Adopt");
+            adoptBtn.setOnClickListener(v -> {
+                if (AiSkillRegistry.adoptSkill(skill.name)) {
+                    Toast.makeText(this, "Reviews may now improve '" + skill.name + "'.", Toast.LENGTH_SHORT).show();
+                } else showError("Could not adopt '" + skill.name + "'.");
+                AiSkillRegistry.invalidate();
+                refreshExtensionsPage();
+            });
+            LinearLayout.LayoutParams adoptLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+            adoptLp.setMargins(dp(8), 0, 0, 0);
+            actions.addView(adoptBtn, adoptLp);
+        }
+        if (!isSeeded && !isPinned) {
+            MaterialButton archiveBtn = smallMemoryButton("Archive");
+            archiveBtn.setOnClickListener(v -> {
+                JSONObject result = AiSkillRegistry.archiveSkill(skill.name);
+                if (result.optBoolean("success")) {
+                    Toast.makeText(this, "Skill archived.", Toast.LENGTH_SHORT).show();
+                } else showError(result.optString("error", "Archive failed."));
+                AiSkillRegistry.invalidate();
+                refreshExtensionsPage();
+            });
+            LinearLayout.LayoutParams archiveLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+            archiveLp.setMargins(dp(8), 0, 0, 0);
+            actions.addView(archiveBtn, archiveLp);
+        }
+        card.addView(actions);
 
         card.setOnClickListener(v -> showSkillViewer(skill));
         toggle.setOnClickListener(v -> {
