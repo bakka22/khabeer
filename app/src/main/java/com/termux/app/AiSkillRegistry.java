@@ -90,11 +90,19 @@ public final class AiSkillRegistry {
     // Layout
     // ------------------------------------------------------------------
 
+    private static File sRootOverride;
+
+    static synchronized void setRootForTests(File root) {
+        sRootOverride = root;
+    }
+
     public static File skillsRoot() {
+        if (sRootOverride != null) return new File(sRootOverride, "skills");
         return new File(TermuxConstants.TERMUX_HOME_DIR_PATH, ".khabeer/skills");
     }
 
     private static File dataRoot() {
+        if (sRootOverride != null) return sRootOverride;
         return new File(TermuxConstants.TERMUX_HOME_DIR_PATH, ".khabeer");
     }
 
@@ -1044,6 +1052,164 @@ public final class AiSkillRegistry {
         } catch (Exception e) {
             return toolError("skill_manage failed: " + e.getMessage());
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Background-review skill learning (Hermes skill-nudge port)
+    // ------------------------------------------------------------------
+
+    private static File pendingSkillsDir() {
+        return new File(dataRoot(), "pending/skills");
+    }
+
+    /** Stage a review-proposed skill op for user approval. */
+    public static synchronized JSONObject stageSkillWrite(JSONObject args, String origin) {
+        JSONObject item = new JSONObject();
+        try {
+            pendingSkillsDir().mkdirs();
+            String id = "skl-" + System.currentTimeMillis() + "-" + Math.abs((args == null ? "" : args.toString()).hashCode());
+            item.put("id", id);
+            item.put("origin", origin == null ? "background_review" : origin);
+            item.put("created_at", System.currentTimeMillis());
+            item.put("args", args == null ? new JSONObject() : args);
+            writeTextFile(new File(pendingSkillsDir(), id + ".json"), item.toString(2));
+            item.put("success", true);
+            item.put("message", "Skill write staged for approval.");
+        } catch (Exception e) {
+            return jsonToolError("Could not stage skill write: " + e.getMessage());
+        }
+        return item;
+    }
+
+    public static synchronized JSONArray pendingSkillWrites() {
+        JSONArray out = new JSONArray();
+        File[] files = pendingSkillsDir().listFiles((dir, name) -> name.endsWith(".json"));
+        if (files == null) return out;
+        for (File f : files) {
+            try { out.put(new JSONObject(readFile(f, MAX_SKILL_FILE_BYTES))); } catch (Exception ignored) {}
+        }
+        return out;
+    }
+
+    public static synchronized JSONObject approvePendingSkill(String id) {
+        File f = new File(pendingSkillsDir(), id + ".json");
+        if (!f.exists()) return jsonToolError("No staged skill write found for " + id);
+        try {
+            JSONObject item = new JSONObject(readFile(f, MAX_SKILL_FILE_BYTES));
+            JSONObject opArgs = item.optJSONObject("args");
+            JSONArray single = new JSONArray();
+            if (opArgs != null) single.put(opArgs);
+            JSONObject result = applyReviewSkillOps(single);
+            if (result.optInt("applied", 0) > 0) //noinspection ResultOfMethodCallIgnored
+                f.delete();
+            return result;
+        } catch (Exception e) {
+            return jsonToolError("Could not approve staged skill write: " + e.getMessage());
+        }
+    }
+
+    public static synchronized JSONObject rejectPendingSkill(String id) {
+        File f = new File(pendingSkillsDir(), id + ".json");
+        if (!f.exists()) return jsonToolError("No staged skill write found for " + id);
+        //noinspection ResultOfMethodCallIgnored
+        f.delete();
+        JSONObject o = new JSONObject();
+        try { o.put("success", true).put("done", true).put("message", "Rejected staged skill write " + id); } catch (Exception ignored) {}
+        return o;
+    }
+
+    private static final String REVIEW_MANAGED_KEY = "khabeer-review";
+
+    /** A skill is review-writable only when the review loop created it
+     * (Hermes protected skills: bundled, hub-installed, pinned, user-owned
+     * are off-limits to background writes). */
+    public static synchronized boolean isReviewManaged(String name) {
+        Skill skill = findSkill(name == null ? "" : name.trim());
+        if (skill == null || skill.skillMd == null || !skill.skillMd.isFile()) return false;
+        String content = readFile(skill.skillMd, MAX_SKILL_FILE_BYTES);
+        if (content == null) return false;
+        int fence = content.indexOf("\n---", 3);
+        String yaml = fence < 0 ? content : content.substring(0, fence);
+        java.util.regex.Matcher m = java.util.regex.Pattern
+            .compile("(?m)^" + java.util.regex.Pattern.quote(REVIEW_MANAGED_KEY) + "\\s*:\\s*(.+)$")
+            .matcher(yaml);
+        return m.find() && "true".equalsIgnoreCase(m.group(1).trim());
+    }
+
+    /** Tags a review-created skill as review-writable. No-op when the flag
+     * is already present or the file cannot be safely rewritten. */
+    public static synchronized boolean markReviewManaged(String name) {
+        Skill skill = findSkill(name == null ? "" : name.trim());
+        if (skill == null || skill.skillMd == null || !skill.skillMd.isFile()) return false;
+        if (isReviewManaged(name)) return true;
+        String content = readFile(skill.skillMd, MAX_SKILL_FILE_BYTES);
+        if (content == null || !content.startsWith("---")) return false;
+        int fence = content.indexOf("\n---", 3);
+        if (fence < 0) return false;
+        String updated = content.substring(0, fence) + "\n" + REVIEW_MANAGED_KEY + ": true" + content.substring(fence);
+        return writeTextFile(skill.skillMd, updated);
+    }
+
+    /** Executes review-proposed skill ops (skill_manage shapes) with the
+     * background-write contract: create always allowed; patch/write/remove/
+     * delete only on review-managed skills; creates get tagged so future
+     * reviews can extend them. Every op runs the normal validators and
+     * guard scan inside manageTool. Lenient: applies what passes and
+     * reports per-op results. */
+    public static synchronized JSONObject applyReviewSkillOps(JSONArray ops) {
+        JSONObject out = new JSONObject();
+        JSONArray applied = new JSONArray();
+        JSONArray skipped = new JSONArray();
+        try {
+            if (ops != null) {
+                for (int i = 0; i < ops.length(); i++) {
+                    JSONObject op = ops.optJSONObject(i);
+                    if (op == null) continue;
+                    String action = op.optString("action", "");
+                    String name = op.optString("name", "").trim();
+                    if (!"create".equals(action) && !TextUtils.isEmpty(name)
+                        && findSkill(name) != null && !isReviewManaged(name)) {
+                        skipped.put(opName(op) + ": protected skill (bundled, installed, or user-owned) — left untouched");
+                        continue;
+                    }
+                    JSONObject result;
+                    try {
+                        result = new JSONObject(manageTool(op));
+                    } catch (Exception e) {
+                        result = new JSONObject().put("success", false).put("error", e.getMessage());
+                    }
+                    if (result.optBoolean("success")) {
+                        if ("create".equals(action) && !TextUtils.isEmpty(name)) markReviewManaged(name);
+                        applied.put(opName(op));
+                    } else {
+                        skipped.put(opName(op) + ": " + result.optString("error", "failed"));
+                    }
+                }
+            }
+            out.put("success", true);
+            out.put("done", true);
+            out.put("applied", applied.length());
+            out.put("applied_ops", applied);
+            out.put("skipped", skipped);
+            out.put("message", applied.length() == 0
+                ? "No skill changes applied."
+                : "Applied " + applied.length() + " skill change(s).");
+        } catch (Exception e) {
+            try { out.put("success", false).put("error", e.getMessage()); } catch (Exception ignored) {}
+        }
+        return out;
+    }
+
+    private static JSONObject jsonToolError(String message) {
+        JSONObject o = new JSONObject();
+        try { o.put("success", false).put("error", message == null ? "skill error" : message); } catch (Exception ignored) {}
+        return o;
+    }
+
+    private static String opName(JSONObject op) {
+        String action = op.optString("action", "op");
+        String name = op.optString("name", "").trim();
+        return TextUtils.isEmpty(name) ? action : action + ":" + name;
     }
 
     // --- validators (khabeer _validate_*) ---

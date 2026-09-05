@@ -1662,6 +1662,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
 
     private View createPendingMemoryCard() {
         JSONArray pending = AiMemoryStore.pendingWrites();
+        JSONArray pendingSkills = AiSkillRegistry.pendingSkillWrites();
         MaterialCardView card = new MaterialCardView(this);
         card.setCardBackgroundColor(color(R.color.ai_surface_elevated));
         card.setStrokeColor(color(R.color.ai_border));
@@ -1700,7 +1701,63 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             if (item == null) continue;
             box.addView(createPendingMemoryRow(item));
         }
+        if (pendingSkills.length() > 0) {
+            TextView skillsHeading = new TextView(this);
+            skillsHeading.setText("Pending skill writes");
+            skillsHeading.setTextColor(color(R.color.ai_text));
+            skillsHeading.setTextSize(14);
+            skillsHeading.setTypeface(Typeface.DEFAULT_BOLD);
+            LinearLayout.LayoutParams shLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            shLp.setMargins(0, dp(10), 0, dp(4));
+            box.addView(skillsHeading, shLp);
+            for (int i = 0; i < pendingSkills.length(); i++) {
+                JSONObject item = pendingSkills.optJSONObject(i);
+                if (item == null) continue;
+                box.addView(createPendingSkillRow(item));
+            }
+        }
         return card;
+    }
+
+    private View createPendingSkillRow(JSONObject item) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.VERTICAL);
+        row.setPadding(0, dp(8), 0, dp(8));
+        String id = item.optString("id");
+        JSONObject args = item.optJSONObject("args");
+
+        TextView text = new TextView(this);
+        text.setText((TextUtils.isEmpty(id) ? "pending" : id) + "\n" + oneLine(args == null ? "" : args.toString(), 140));
+        text.setTextColor(color(R.color.ai_text_muted));
+        text.setTextSize(11);
+        row.addView(text);
+
+        LinearLayout buttons = new LinearLayout(this);
+        buttons.setOrientation(LinearLayout.HORIZONTAL);
+        MaterialButton approve = smallMemoryButton("Approve");
+        MaterialButton reject = smallMemoryButton("Reject");
+        buttons.addView(approve, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        LinearLayout.LayoutParams rejectLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        rejectLp.setMargins(dp(8), 0, 0, 0);
+        buttons.addView(reject, rejectLp);
+        row.addView(buttons);
+
+        approve.setOnClickListener(v -> {
+            JSONObject result = AiSkillRegistry.approvePendingSkill(id);
+            if (result.optBoolean("success") || result.optInt("applied", 0) > 0) {
+                Toast.makeText(this, "Skill write approved", Toast.LENGTH_SHORT).show();
+                showMemoryPage();
+            } else showError(result.optString("error", "Approval failed."));
+        });
+        reject.setOnClickListener(v -> {
+            JSONObject result = AiSkillRegistry.rejectPendingSkill(id);
+            if (result.optBoolean("success")) {
+                Toast.makeText(this, "Skill write rejected", Toast.LENGTH_SHORT).show();
+                showMemoryPage();
+            } else showError(result.optString("error", "Reject failed."));
+        });
+        return row;
     }
 
     private View createPendingMemoryRow(JSONObject item) {
@@ -4782,12 +4839,13 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             setStatus("Session compacted.", false);
         } else if ("memory/reviewApplied".equals(method)) {
             String target = payload.optString("target", "memory");
+            String kind = "skill".equals(target) ? "Skill" : "Memory";
             if (payload.optBoolean("staged")) {
-                setStatus("Memory review staged writes for approval (" + target + ").", false);
+                setStatus(kind + " review staged writes for approval (" + target + ").", false);
             } else if ("verbose".equals(payload.optString("mode"))) {
-                addSystemMessage("Memory updated (" + target + "):\n" + payload.optString("preview", ""));
+                addSystemMessage(kind + " updated (" + target + "):\n" + payload.optString("preview", ""));
             } else {
-                Toast.makeText(this, "Memory updated (" + target + ")", Toast.LENGTH_SHORT).show();
+                Toast.makeText(this, kind + " updated (" + target + ")", Toast.LENGTH_SHORT).show();
             }
         } else if ("memory/contextUsage".equals(method)) {
             // Tracked for the Memory page readiness card; rendered on show.

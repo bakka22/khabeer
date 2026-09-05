@@ -166,9 +166,16 @@ Mirror everything in this doc. EXCLUDED, by decision:
 - Review returns memory `operations[]` only; they pass through the same
   gate/staging/write path as foreground writes (§2, §7).
 - Prompt-cache parity is approximate (compact review request, not a full
-  agent clone). No skill-review sibling. Optional notification mode
-  (`off` / `on` = "Memory updated" / `verbose` = previews) to be added
-  with the nudge settings.
+  agent clone). Notification modes `off`/`on`/`verbose` live in nudge
+  settings.
+- Skill-review sibling (Hermes skill nudge): the same quiet call also
+  returns `skill_operations[]` (create/patch/write_file/remove_file/
+  delete, skill_manage shapes). Creates always allowed and get tagged
+  `khabeer-review: true`; edits only on tagged skills — bundled,
+  installed, and user-owned skills are refused. Every op runs the
+  normal validators + guard scan. With write approval on, skill ops
+  stage under `pending/skills/` with approve/reject on the Memory page;
+  otherwise they apply directly with the same notice event.
 
 ## §7 Config and write approval (Memory page)
 

@@ -3535,7 +3535,8 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
                 String review = callBackgroundMemoryReview(providerId, baseUrl, apiKey, model, transcript, memoryEnabled, userEnabled, runId);
                 JSONObject parsed = parseReviewJson(review);
                 JSONArray ops = parsed == null ? null : parsed.optJSONArray("operations");
-                if (ops == null || ops.length() == 0) return;
+                JSONArray skillOps = parsed == null ? null : parsed.optJSONArray("skill_operations");
+                if ((ops == null || ops.length() == 0) && (skillOps == null || skillOps.length() == 0)) return;
                 JSONObject byMemory = new JSONObject().put("target", AiMemoryStore.TARGET_MEMORY).put("operations", new JSONArray());
                 JSONObject byUser = new JSONObject().put("target", AiMemoryStore.TARGET_USER).put("operations", new JSONArray());
                 for (int i = 0; i < ops.length(); i++) {
@@ -3549,10 +3550,52 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
                 }
                 applyReviewOps(runId, byMemory, memoryApproval, memoryEnabled, userEnabled);
                 applyReviewOps(runId, byUser, memoryApproval, memoryEnabled, userEnabled);
+                applyReviewSkillOps(runId, skillOps, memoryApproval);
             } catch (Exception e) {
                 try { mDatabase.appendEvent(runId, "memory/reviewSkipped", new JSONObject().put("error", e.getMessage()).toString()); } catch (Exception ignored) {}
             }
         }, "khabeer-memory-review").start();
+    }
+
+    /** Skill side of the review nudge: staged for approval like memory
+     * when the write gate is on, else applied through the ownership +
+     * guard-scan path. Surfaced with the same notice event. */
+    private void applyReviewSkillOps(String runId, JSONArray skillOps, boolean approval) throws Exception {
+        if (skillOps == null || skillOps.length() == 0) return;
+        JSONObject result;
+        if (approval) {
+            JSONArray stagedIds = new JSONArray();
+            for (int i = 0; i < skillOps.length(); i++) {
+                JSONObject op = skillOps.optJSONObject(i);
+                if (op == null) continue;
+                JSONObject staged = AiSkillRegistry.stageSkillWrite(op, "background_review");
+                if (staged.optBoolean("success")) stagedIds.put(staged.optString("id"));
+            }
+            result = new JSONObject().put("success", true).put("done", true)
+                .put("applied", 0).put("staged_ids", stagedIds)
+                .put("message", "Staged " + stagedIds.length() + " skill change(s) for approval.");
+        } else {
+            result = AiSkillRegistry.applyReviewSkillOps(skillOps);
+        }
+        mDatabase.appendEvent(runId, "memory/reviewResult", result.toString());
+        if (mProviderConfig == null || !result.optBoolean("success")) return;
+        String mode = mProviderConfig.getMemoryNotifyMode();
+        if ("off".equals(mode)) return;
+        JSONArray names = new JSONArray();
+        for (int i = 0; i < skillOps.length(); i++) {
+            JSONObject op = skillOps.optJSONObject(i);
+            if (op != null && !TextUtils.isEmpty(op.optString("name", "").trim())) names.put(op.optString("name", "").trim());
+        }
+        JSONObject notice = new JSONObject()
+            .put("mode", mode)
+            .put("target", "skill")
+            .put("staged", approval)
+            .put("skills", names)
+            .put("usage", result.optString("message", ""));
+        if ("verbose".equals(mode) && names.length() > 0) {
+            notice.put("preview", "📝 " + names.join(", ").replace("\"", ""));
+        }
+        emit("memory/reviewApplied", notice);
     }
 
     private void applyReviewOps(String runId, JSONObject args, boolean approval, boolean memoryEnabled, boolean userEnabled) throws Exception {
@@ -3593,7 +3636,13 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
             "Otherwise return {\"operations\":[{\"target\":\"memory|user\",\"action\":\"add|replace|remove\",\"content\":\"...\",\"old_text\":\"...\"}]}. " +
             "Save user preferences/corrections/profile to user. Save stable environment/project/tool lessons to memory. " +
             "Skip task progress, transient paths, raw dumps, and procedures that belong in skills. Write declarative facts, not imperatives. " +
-            "Enabled targets: memory=" + memoryEnabled + ", user=" + userEnabled + ". Transcript JSON:\n" + transcript.toString();
+            "Enabled targets: memory=" + memoryEnabled + ", user=" + userEnabled + ". " +
+            "Then review SKILLS: if the session surfaced a reusable procedure, technique, workaround, or pitfall a future session would benefit from, " +
+            "return it too as \"skill_operations\":[{\"action\":\"create|patch|write_file\",\"name\":\"...\",\"content|old_string|new_string|file_path|file_content\":\"...\"}]. " +
+            "Prefer patching an existing skill you saw loaded over creating narrow one-off skills; new names must be class-level, never error strings or session artifacts. " +
+            "Never capture env failures, missing tools, transient errors, one-off narratives, or unvalidated guesses. " +
+            "If no skill lesson emerged, use \"skill_operations\":[]. " +
+            "Transcript JSON:\n" + transcript.toString();
         if ("openai-codex".equals(providerId)) return callBackgroundCodex(model, prompt, "Return strict JSON only.");
         if (ANTHROPIC_MESSAGES_PROVIDERS.contains(providerId)) return callBackgroundAnthropic(baseUrl, apiKey, model, prompt, 1024, "Return strict JSON only.", sessionId);
         if (usesChatCompletions(providerId)) return callBackgroundChatCompletions(providerId, baseUrl, apiKey, model, prompt, 1024, "Return strict JSON only.", sessionId);
