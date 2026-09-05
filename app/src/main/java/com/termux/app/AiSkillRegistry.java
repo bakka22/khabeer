@@ -81,6 +81,10 @@ public final class AiSkillRegistry {
         public List<String> platforms = new ArrayList<>();
         public boolean platformSupported = true;
         public boolean hasFrontmatter;
+        /** Owning plugin name when contributed by a plugin package; null
+         * for library skills. Plugin skills are read-only to skill_manage
+         * and exempt from curator archiving. */
+        public String plugin;
         public File dir;
         public File skillMd;
         public long mtime;
@@ -149,10 +153,22 @@ public final class AiSkillRegistry {
         List<Skill> out = new ArrayList<>();
         File root = skillsRoot();
         File[] entries = root.listFiles();
-        if (entries == null) return out;
-        Arrays.sort(entries, (a, b) -> a.getName().compareToIgnoreCase(b.getName()));
-        for (File entry : entries) walk(entry, 0, "", out);
-        // First-wins on duplicate names (root-level beats categorized on ties).
+        if (entries != null) {
+            Arrays.sort(entries, (a, b) -> a.getName().compareToIgnoreCase(b.getName()));
+            for (File entry : entries) walk(entry, 0, "", null, out);
+        }
+        // Plugin-contributed skills merge after the library — library names
+        // win on duplicates (first-wins below).
+        try {
+            for (File pluginRoot : AiPluginRegistry.pluginSkillRoots()) {
+                String owner = AiPluginRegistry.ownerOfSkillRoot(pluginRoot);
+                File[] pentries = pluginRoot.listFiles();
+                if (pentries == null) continue;
+                Arrays.sort(pentries, (a, b) -> a.getName().compareToIgnoreCase(b.getName()));
+                for (File entry : pentries) walk(entry, 0, "", owner, out);
+            }
+        } catch (Exception ignored) {}
+        // First-wins on duplicate names (library beats categorized beats plugin on ties).
         Set<String> seen = new HashSet<>();
         List<Skill> deduped = new ArrayList<>();
         for (Skill skill : out) {
@@ -169,12 +185,16 @@ public final class AiSkillRegistry {
     }
 
     private static void walk(File dir, int depth, String category, List<Skill> out) {
+        walk(dir, depth, category, null, out);
+    }
+
+    private static void walk(File dir, int depth, String category, String plugin, List<Skill> out) {
         if (depth > MAX_WALK_DEPTH || dir == null || !dir.isDirectory()) return;
         String name = dir.getName();
         if (EXCLUDED_DIRS.contains(name)) return;
         File skillMd = new File(dir, "SKILL.md");
         if (skillMd.isFile()) {
-            out.add(parseSkill(dir, skillMd, category));
+            out.add(parseSkill(dir, skillMd, category, plugin));
             return; // never descend into a skill (support dirs are not skills)
         }
         File[] children = dir.listFiles();
@@ -184,19 +204,36 @@ public final class AiSkillRegistry {
             if (!child.isDirectory()) continue;
             // A top-level container dir IS the category layer; deeper levels inherit it.
             String childCategory = depth == 0 ? name : category;
-            walk(child, depth + 1, childCategory, out);
+            walk(child, depth + 1, childCategory, plugin, out);
         }
     }
 
     private static Skill parseSkill(File dir, File skillMd, String category) {
+        return parseSkill(dir, skillMd, category, null);
+    }
+
+    /** True when the skill ships inside a plugin package — read-only to
+     * skill_manage, curator, and the review writer. */
+    public static synchronized boolean isPluginManaged(String name) {
+        if (TextUtils.isEmpty(name)) return false;
+        Skill skill = findSkill(name.trim());
+        return skill != null && !TextUtils.isEmpty(skill.plugin);
+    }
+
+    private static Skill parseSkill(File dir, File skillMd, String category, String plugin) {
         Skill skill = new Skill();
         skill.dir = dir;
         skill.skillMd = skillMd;
         skill.dirName = dir.getName();
         skill.mtime = skillMd.lastModified();
+        skill.plugin = plugin;
         skill.category = TextUtils.isEmpty(category) ? "general" : category;
-        String rel = skillsRoot().toPath().relativize(dir.toPath()).toString().replace(File.separatorChar, '/');
-        skill.relPath = rel;
+        try {
+            String rel = skillsRoot().toPath().relativize(dir.toPath()).toString().replace(File.separatorChar, '/');
+            skill.relPath = rel;
+        } catch (Exception e) {
+            skill.relPath = (plugin == null ? "" : "plugin:" + plugin + "/") + dir.getName();
+        }
 
         String text = readFile(skillMd, 512 * 1024);
         String[] parts = splitFrontmatter(text);
@@ -1061,6 +1098,9 @@ public final class AiSkillRegistry {
         try {
             String action = op.optString("action", "");
             String name = op.optString("name", "");
+            if (!"create".equals(action) && isPluginManaged(name)) {
+                return toolError("Skill '" + name + "' ships inside a plugin — edit the plugin package instead.");
+            }
             String content = op.optString("content", null);
             String category = op.optString("category", null);
             String filePath = op.optString("file_path", null);
@@ -1199,6 +1239,7 @@ public final class AiSkillRegistry {
     static synchronized boolean setFrontmatterFlag(String name, String key, boolean value) {
         Skill skill = findSkill(name == null ? "" : name.trim());
         if (skill == null || skill.skillMd == null || !skill.skillMd.isFile()) return false;
+        if (!TextUtils.isEmpty(skill.plugin)) return false;
         String content = readFile(skill.skillMd, MAX_SKILL_FILE_BYTES);
         if (content == null || !content.startsWith("---")) return false;
         java.util.regex.Matcher m = java.util.regex.Pattern
@@ -1286,6 +1327,7 @@ public final class AiSkillRegistry {
         try {
             Skill skill = findSkill(name == null ? "" : name.trim());
             if (skill == null) return jsonToolError("Skill not found: '" + name + "'.");
+            if (!TextUtils.isEmpty(skill.plugin)) return jsonToolError("'" + skill.name + "' ships with plugin '" + skill.plugin + "' — disable the plugin instead.");
             if (isPinned(skill.name)) return jsonToolError("'" + skill.name + "' is pinned and cannot be archived.");
             archiveRoot().mkdirs();
             String stamped = skill.name + "-" + (System.currentTimeMillis() / 1000L);

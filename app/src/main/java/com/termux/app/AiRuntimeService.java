@@ -351,6 +351,9 @@ public final class AiRuntimeService extends Service {
         // rewritten before any server is spawned.
         AiSkillRegistry.migrateKhabeerHome();
         AiMemoryStore.ensureDefaults();
+        // Runtime-loadable providers/tools: rebuild the provider overlay and
+        // sync plugin MCP servers (file + DB ops only, no model).
+        AiPluginRegistry.refreshOverlay(mDatabase);
         // Deterministic library janitor when due (file ops only, no model).
         AiSkillCurator.maybeRun(mProviderConfig);
         mDatabase.rewriteMcpServerDataRoot(".termuxAI", ".khabeer");
@@ -420,8 +423,12 @@ public void addListener(Listener listener) {
     }
 
     @Nullable
-public AiDatabase.RunRecord getActiveRun() {
+ public AiDatabase.RunRecord getActiveRun() {
         return mViewed == null ? null : copyRun(mViewed.record);
+    }
+
+    public AiDatabase getDatabase() {
+        return mDatabase;
     }
 
     public List<AiDatabase.RunRecord> getRecentRuns() {
@@ -1244,7 +1251,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
                 executeCodexTurn(ctx, workspace, prompt, model, effort, approvalPolicy);
                 return;
             }
-            if (ANTHROPIC_MESSAGES_PROVIDERS.contains(providerId)) {
+            if (usesAnthropicMessages(providerId)) {
                 executeAnthropicTurn(ctx, providerId, baseUrl, apiKey, workspace, prompt, model, approvalPolicy);
                 return;
             }
@@ -2412,7 +2419,16 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
     }
 
     private boolean usesChatCompletions(String providerId) {
+        AiProviderProfile profile = AiProviderProfile.find(providerId);
+        if (profile != null && profile.dialect != null) return "chat".equals(profile.dialect);
         return CHAT_COMPLETIONS_PROVIDERS.contains(providerId);
+    }
+
+    /** Anthropic Messages dialect, honoring runtime-loaded profiles. */
+    private boolean usesAnthropicMessages(String providerId) {
+        AiProviderProfile profile = AiProviderProfile.find(providerId);
+        if (profile != null && profile.dialect != null) return "anthropic".equals(profile.dialect);
+        return ANTHROPIC_MESSAGES_PROVIDERS.contains(providerId);
     }
 
     /** Providers that speak OpenAI chat completions (khabeer dialect table:

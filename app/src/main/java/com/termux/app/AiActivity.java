@@ -523,7 +523,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     private void setupProviderTiles() {
         showFeaturedProviders();
         mDrawerProviderList.removeAllViews();
-        for (AiProviderProfile profile : AiProviderProfile.PROFILES) {
+        for (AiProviderProfile profile : AiProviderProfile.all()) {
             mDrawerProviderList.addView(createProviderRow(profile));
         }
     }
@@ -2037,7 +2037,242 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             mExtensionsList.addView(empty);
         }
         buildArchivedSkillsSection();
+        buildPluginSection();
         buildMcpSection();
+    }
+
+    /** Plugin packages (Hermes portable contract): install from URL,
+     * enable/disable, delete, and per-package diagnostics. Plugins
+     * contribute providers, skills, and MCP servers at runtime — no code
+     * is ever imported. stdio MCP servers run commands on this device, so
+     * installs always preview before applying. */
+    private void buildPluginSection() {
+        TextView heading = new TextView(this);
+        heading.setText("PLUGINS");
+        heading.setTextColor(color(R.color.ai_text_muted));
+        heading.setTextSize(12);
+        heading.setTypeface(Typeface.DEFAULT_BOLD);
+        heading.setLetterSpacing(0.08f);
+        heading.setPadding(0, dp(18), 0, dp(10));
+        mExtensionsList.addView(heading);
+        TextView blurb = new TextView(this);
+        blurb.setText("Portable packages (plugin.json) that add providers, skills, and MCP servers. Directory installs also work: drop a folder into $HOME/.khabeer/plugins.");
+        blurb.setTextColor(color(R.color.ai_text_muted));
+        blurb.setTextSize(11);
+        blurb.setPadding(0, 0, 0, dp(8));
+        mExtensionsList.addView(blurb);
+        MaterialButton install = smallMemoryButton("Install from URL");
+        install.setOnClickListener(v -> promptPluginInstallFromUrl());
+        mExtensionsList.addView(install);
+        List<AiPluginRegistry.PluginPackage> plugins = AiPluginRegistry.loadPlugins();
+        if (plugins.isEmpty()) {
+            TextView empty = new TextView(this);
+            empty.setText("No plugins installed.");
+            empty.setTextColor(color(R.color.ai_text_muted));
+            empty.setTextSize(12);
+            empty.setPadding(0, dp(8), 0, 0);
+            mExtensionsList.addView(empty);
+            return;
+        }
+        for (AiPluginRegistry.PluginPackage pkg : plugins) {
+            LinearLayout card = new LinearLayout(this);
+            card.setOrientation(LinearLayout.VERTICAL);
+            card.setPadding(dp(14), dp(12), dp(14), dp(12));
+            card.setBackgroundResource(R.drawable.bg_provider_card);
+            LinearLayout.LayoutParams cardLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            cardLp.setMargins(0, dp(8), 0, 0);
+            card.setLayoutParams(cardLp);
+            TextView title = new TextView(this);
+            title.setText(pkg.name + (TextUtils.isEmpty(pkg.version) ? "" : " · v" + pkg.version)
+                + (pkg.enabled ? "" : " · disabled"));
+            title.setTextColor(color(R.color.ai_text));
+            title.setTextSize(13);
+            title.setTypeface(Typeface.DEFAULT_BOLD);
+            card.addView(title);
+            if (!TextUtils.isEmpty(pkg.description)) {
+                TextView desc = new TextView(this);
+                desc.setText(pkg.description);
+                desc.setTextColor(color(R.color.ai_text_muted));
+                desc.setTextSize(11);
+                desc.setPadding(0, dp(2), 0, 0);
+                card.addView(desc);
+            }
+            StringBuilder contributes = new StringBuilder();
+            if (!pkg.providers.isEmpty()) {
+                contributes.append("Providers: ");
+                for (int i = 0; i < pkg.providers.size(); i++) {
+                    if (i > 0) contributes.append(", ");
+                    contributes.append(pkg.providers.get(i).name);
+                }
+                contributes.append("\n");
+            }
+            if (pkg.skillsDir != null) contributes.append("Skills: ").append(pkg.skillsDir.getName()).append(" dir\n");
+            if (!pkg.mcpServers.isEmpty()) {
+                contributes.append("MCP: ");
+                for (int i = 0; i < pkg.mcpServers.size(); i++) {
+                    if (i > 0) contributes.append(", ");
+                    String n = pkg.mcpServers.get(i).optString("name", "");
+                    int slash = n.lastIndexOf('/');
+                    contributes.append(slash >= 0 ? n.substring(slash + 1) : n);
+                }
+                contributes.append("\n");
+            }
+            if (!pkg.diagnostics.isEmpty()) {
+                contributes.append("Notes: ").append(pkg.diagnostics.get(0));
+                if (pkg.diagnostics.size() > 1) contributes.append(" (+").append(pkg.diagnostics.size() - 1).append(" more)");
+                contributes.append("\n");
+            }
+            if (contributes.length() > 0) {
+                TextView meta = new TextView(this);
+                meta.setText(contributes.toString().trim());
+                meta.setTextColor(color(R.color.ai_text_muted));
+                meta.setTextSize(11);
+                meta.setPadding(0, dp(4), 0, 0);
+                card.addView(meta);
+            }
+            LinearLayout actions = new LinearLayout(this);
+            actions.setOrientation(LinearLayout.HORIZONTAL);
+            LinearLayout.LayoutParams actionsLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            actionsLp.setMargins(0, dp(8), 0, 0);
+            actions.setLayoutParams(actionsLp);
+            MaterialButton toggle = smallMemoryButton(pkg.enabled ? "Disable" : "Enable");
+            toggle.setOnClickListener(v -> {
+                AiPluginRegistry.setPluginEnabled(pkg.name, !pkg.enabled);
+                if (mRuntimeService != null) AiPluginRegistry.refreshOverlay(mRuntimeService.getDatabase());
+                AiSkillRegistry.invalidate();
+                refreshExtensionsPage();
+                showFeaturedProviders();
+            });
+            actions.addView(toggle, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+            MaterialButton delete = smallMemoryButton("Delete");
+            delete.setOnClickListener(v -> new MaterialAlertDialogBuilder(this)
+                .setTitle("Delete plugin?")
+                .setMessage("Remove '" + pkg.name + "' and its synced MCP servers? Its skills vanish with it.")
+                .setNegativeButton(android.R.string.cancel, null)
+                .setPositiveButton("Delete", (d, w) -> {
+                    JSONObject result = mRuntimeService == null
+                        ? AiPluginRegistry.deletePlugin(pkg.name, null)
+                        : AiPluginRegistry.deletePlugin(pkg.name, mRuntimeService.getDatabase());
+                    if (!result.optBoolean("success")) showError(result.optString("error", "Delete failed."));
+                    AiSkillRegistry.invalidate();
+                    refreshExtensionsPage();
+                    showFeaturedProviders();
+                })
+                .show());
+            LinearLayout.LayoutParams deleteLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+            deleteLp.setMargins(dp(8), 0, 0, 0);
+            actions.addView(delete, deleteLp);
+            card.addView(actions);
+            mExtensionsList.addView(card);
+        }
+    }
+
+    private void promptPluginInstallFromUrl() {
+        final android.widget.EditText urlInput = new android.widget.EditText(this);
+        urlInput.setSingleLine(true);
+        urlInput.setHint("https://example.com/my-plugin.zip");
+        urlInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        new MaterialAlertDialogBuilder(this)
+            .setTitle("Install plugin from URL")
+            .setMessage("A .zip or .tar.gz containing a plugin.json at its root. It is downloaded, extracted to quarantine, and previewed — nothing installs until you confirm. stdio MCP servers run commands on this device: only install plugins you trust.")
+            .setView(urlInput)
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton("Download & preview", (dialog, which) -> {
+                String url = urlInput.getText().toString().trim();
+                if (!url.startsWith("http")) {
+                    showError("Enter an http(s) URL to a .zip or .tar.gz.");
+                    return;
+                }
+                setStatus("Downloading plugin archive…", false);
+                new Thread(() -> installPluginFromUrl(url), "plugin-install").start();
+            })
+            .show();
+    }
+
+    private void installPluginFromUrl(String url) {
+        File quarantine = new File(getCacheDir(), "plugin_install");
+        try {
+            deleteDirectory(quarantine);
+            if (!url.startsWith("http")) throw new IllegalStateException("Not an http(s) URL.");
+            File archive = downloadArchive(url, new File(getCacheDir(), "plugin_install_download"));
+            byte[] magic = new byte[2];
+            try (InputStream in = new FileInputStream(archive)) {
+                if (in.read(magic) != 2) throw new IllegalStateException("Downloaded file is empty.");
+            }
+            if (magic[0] == 'P' && magic[1] == 'K') extractZip(archive, quarantine);
+            else if ((magic[0] & 0xFF) == 0x1f && (magic[1] & 0xFF) == 0x8b) extractTarGz(archive, quarantine);
+            else throw new IllegalStateException("Unsupported archive type (expected .zip or .tar.gz).");
+            File root = new File(quarantine, "plugin.json").isFile() ? quarantine : findPluginRoot(quarantine);
+            if (root == null) throw new IllegalStateException("No plugin.json found in the archive.");
+            AiPluginRegistry.PluginPackage preview = AiPluginRegistry.previewDir(root);
+            if (preview == null) throw new IllegalStateException("Could not read the plugin.");
+            File finalRoot = root;
+            runOnUiThread(() -> showPluginInstallConfirm(finalRoot, preview));
+        } catch (Exception e) {
+            String message = e.getMessage() == null ? e.toString() : e.getMessage();
+            runOnUiThread(() -> setStatus("Plugin install failed: " + message, true));
+            deleteDirectory(quarantine);
+        }
+    }
+
+    private File findPluginRoot(File dir) {
+        if (dir == null || !dir.isDirectory()) return null;
+        File[] children = dir.listFiles();
+        if (children == null) return null;
+        for (File child : children) {
+            if (child.isDirectory() && new File(child, "plugin.json").isFile()) return child;
+        }
+        return null;
+    }
+
+    private void showPluginInstallConfirm(File root, AiPluginRegistry.PluginPackage preview) {
+        StringBuilder text = new StringBuilder();
+        text.append("Name: ").append(preview.name).append("\n");
+        if (!TextUtils.isEmpty(preview.version)) text.append("Version: ").append(preview.version).append("\n");
+        if (!TextUtils.isEmpty(preview.description)) text.append(preview.description).append("\n");
+        if (!preview.providers.isEmpty()) {
+            text.append("\nProviders:\n");
+            for (AiProviderProfile p : preview.providers) {
+                text.append("· ").append(p.name).append(" (").append(p.defaultBaseUrl).append(")\n");
+            }
+        }
+        if (preview.skillsDir != null) text.append("\nSkills: ").append(preview.skillsDir.getName()).append(" dir\n");
+        if (!preview.mcpServers.isEmpty()) {
+            text.append("\nMCP servers:\n");
+            for (int i = 0; i < preview.mcpServers.size(); i++) {
+                JSONObject s = preview.mcpServers.get(i);
+                text.append("· ").append(s.optString("name", "?"));
+                if ("stdio".equals(s.optString("transport"))) {
+                    text.append(" [runs commands on this device: ").append(s.optString("command", "?")).append("]");
+                }
+                text.append("\n");
+            }
+        }
+        if (!preview.diagnostics.isEmpty()) {
+            text.append("\nNotes:\n");
+            for (String d : preview.diagnostics) text.append("· ").append(d).append("\n");
+        }
+        new MaterialAlertDialogBuilder(this)
+            .setTitle("Install '" + preview.name + "'?")
+            .setMessage(text.toString().trim())
+            .setNegativeButton(android.R.string.cancel, (d, w) -> deleteDirectory(new File(getCacheDir(), "plugin_install")))
+            .setPositiveButton("Install", (d, w) -> new Thread(() -> {
+                JSONObject result = mRuntimeService == null
+                    ? AiPluginRegistry.installFromDir(root, null)
+                    : AiPluginRegistry.installFromDir(root, mRuntimeService.getDatabase());
+                deleteDirectory(new File(getCacheDir(), "plugin_install"));
+                runOnUiThread(() -> {
+                    if (result.optBoolean("success")) {
+                        Toast.makeText(this, "Plugin installed.", Toast.LENGTH_SHORT).show();
+                    } else showError(result.optString("error", "Install failed."));
+                    AiSkillRegistry.invalidate();
+                    refreshExtensionsPage();
+                    showFeaturedProviders();
+                });
+            }, "plugin-install-apply").start())
+            .show();
     }
 
     private void buildArchivedSkillsSection() {
@@ -3126,9 +3361,33 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mProviderGrid.removeAllViews();
         mHomeTitle.setText("Configure");
         mHomeBody.setText("Set up providers below: API keys, sign-ins, endpoints, and default models. Start chats from Sessions or Chat.");
-        for (AiProviderProfile profile : AiProviderProfile.PROFILES) {
+        for (AiProviderProfile profile : AiProviderProfile.all()) {
             mProviderGrid.addView(createProviderTile(profile));
         }
+        MaterialCardView addCustom = new MaterialCardView(this);
+        addCustom.setCardBackgroundColor(color(R.color.ai_surface));
+        addCustom.setStrokeColor(color(R.color.ai_accent));
+        addCustom.setStrokeWidth(dp(1));
+        addCustom.setRadius(dp(16));
+        addCustom.setClickable(true);
+        addCustom.setFocusable(true);
+        addCustom.setOnClickListener(view -> showCustomProviderDialog(null));
+        LinearLayout.LayoutParams addLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        addLp.setMargins(0, 0, 0, dp(10));
+        addCustom.setLayoutParams(addLp);
+        LinearLayout addContent = new LinearLayout(this);
+        addContent.setOrientation(LinearLayout.HORIZONTAL);
+        addContent.setGravity(Gravity.CENTER_VERTICAL);
+        addContent.setPadding(dp(14), dp(14), dp(14), dp(14));
+        addCustom.addView(addContent);
+        TextView addText = new TextView(this);
+        addText.setText("+ Add custom provider — any OpenAI-compatible endpoint");
+        addText.setTextColor(color(R.color.ai_accent));
+        addText.setTextSize(13);
+        addText.setTypeface(Typeface.DEFAULT_BOLD);
+        addContent.addView(addText);
+        mProviderGrid.addView(addCustom);
         mHomePanel.setVisibility(View.VISIBLE);
         mSetupPanel.setVisibility(View.GONE);
         mChatPage.setVisibility(View.GONE);
@@ -3136,6 +3395,87 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         if (mOpenCodePage != null) mOpenCodePage.setVisibility(View.GONE);
         if (mExtensionsPage != null) mExtensionsPage.setVisibility(View.GONE);
         mChatTitle.setText("khabeer");
+    }
+
+    /** Add or edit a custom provider (OpenAI-compatible endpoint with a
+     * chat, Responses, or Anthropic-Messages dialect). Saving refreshes the
+     * provider overlay so the new profile works everywhere immediately. */
+    private void showCustomProviderDialog(@Nullable AiProviderProfile existing) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(22), dp(6), dp(22), 0);
+        final android.widget.EditText nameInput = new android.widget.EditText(this);
+        nameInput.setHint("Name (e.g. My Gateway)");
+        nameInput.setSingleLine(true);
+        final android.widget.EditText urlInput = new android.widget.EditText(this);
+        urlInput.setHint("Base URL (https://…)");
+        urlInput.setSingleLine(true);
+        urlInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        final android.widget.EditText modelInput = new android.widget.EditText(this);
+        modelInput.setHint("Default model");
+        modelInput.setSingleLine(true);
+        final android.widget.CheckBox keyCheck = new android.widget.CheckBox(this);
+        keyCheck.setText("Needs API key");
+        keyCheck.setChecked(true);
+        final android.widget.Spinner dialectSpinner = new android.widget.Spinner(this);
+        dialectSpinner.setAdapter(new android.widget.ArrayAdapter<>(this,
+            android.R.layout.simple_spinner_dropdown_item,
+            new String[]{"chat-completions", "responses", "anthropic-messages"}));
+        if (existing != null) {
+            nameInput.setText(existing.name);
+            urlInput.setText(existing.defaultBaseUrl);
+            modelInput.setText(mProviderConfig == null ? existing.defaultModel
+                : mProviderConfig.getModel(existing));
+            keyCheck.setChecked(existing.apiKeyAuth);
+            dialectSpinner.setSelection("anthropic".equals(existing.dialect) ? 2
+                : "responses".equals(existing.dialect) ? 1 : 0);
+        }
+        box.addView(nameInput);
+        box.addView(urlInput);
+        box.addView(modelInput);
+        box.addView(keyCheck);
+        box.addView(dialectSpinner);
+        MaterialAlertDialogBuilder builder = new MaterialAlertDialogBuilder(this)
+            .setTitle(existing == null ? "Add custom provider" : "Edit provider")
+            .setView(box)
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton(existing == null ? "Add" : "Save", (dialog, which) -> {
+                String dialect = dialectSpinner.getSelectedItemPosition() == 2 ? "anthropic"
+                    : dialectSpinner.getSelectedItemPosition() == 1 ? "responses" : "chat";
+                JSONObject result = existing == null
+                    ? AiPluginRegistry.addCustomProvider(
+                        nameInput.getText().toString(), urlInput.getText().toString(),
+                        modelInput.getText().toString(), keyCheck.isChecked(), dialect)
+                    : AiPluginRegistry.updateCustomProvider(existing.id,
+                        nameInput.getText().toString(), urlInput.getText().toString(),
+                        modelInput.getText().toString(), keyCheck.isChecked(), dialect);
+                if (result.optBoolean("success")) {
+                    setStatus(existing == null ? "Custom provider added." : "Custom provider updated.", false);
+                } else showError(result.optString("error", "Save failed."));
+                AiProviderProfile reloaded = existing == null || mProviderConfig == null ? null
+                    : AiProviderProfile.find(existing.id);
+                if (mProviderConfig != null && existing == null && result.has("id")) {
+                    AiProviderProfile created = AiProviderProfile.find(result.optString("id"));
+                    if (created != null && !TextUtils.isEmpty(modelInput.getText().toString().trim())) {
+                        mProviderConfig.setModel(created, modelInput.getText().toString().trim());
+                    }
+                }
+                if (reloaded == null) AiSkillRegistry.invalidate();
+                showFeaturedProviders();
+            });
+        if (existing != null) {
+            builder.setNeutralButton("Delete", (dialog, which) -> new MaterialAlertDialogBuilder(this)
+                .setTitle("Delete provider?")
+                .setMessage("Remove '" + existing.name + "'? Its sessions stay, but cannot start new turns.")
+                .setNegativeButton(android.R.string.cancel, null)
+                .setPositiveButton("Delete", (d, w) -> {
+                    JSONObject result = AiPluginRegistry.deleteCustomProvider(existing.id);
+                    if (!result.optBoolean("success")) showError(result.optString("error", "Delete failed."));
+                    showFeaturedProviders();
+                })
+                .show());
+        }
+        builder.show();
     }
 
     private void showProviderDirectory() {
@@ -3146,7 +3486,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mHomeBody.setText(mPickingSessionProvider
             ? "Pick a provider, configure it if needed, then Continue to bind it to this session only."
             : "khabeer provider registry. Adapters marked “coming next” are listed honestly until their native request/auth flow is implemented.");
-        for (AiProviderProfile profile : AiProviderProfile.PROFILES) {
+        for (AiProviderProfile profile : AiProviderProfile.all()) {
             boolean featured = "openai".equals(profile.id) || "anthropic".equals(profile.id) || "opencode".equals(profile.id);
             if (!featured || mPickingSessionProvider) mProviderGrid.addView(createProviderTile(profile));
         }
@@ -3198,7 +3538,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         TextView section = nsSectionLabel("PROVIDERS");
         mProviderGrid.addView(section);
         boolean any = false;
-        for (AiProviderProfile profile : AiProviderProfile.PROFILES) {
+        for (AiProviderProfile profile : AiProviderProfile.all()) {
             if (profile.terminalOnly || !profile.implemented) continue;
             mProviderGrid.addView(createProviderTile(profile));
             any = true;
@@ -3553,6 +3893,12 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             else if (mPickingSessionProvider) openSessionProviderSetup(profile);
             else openProviderConfig(profile);
         });
+        if (profile.custom) {
+            card.setOnLongClickListener(view -> {
+                if (!mNsActive && !mPickingSessionProvider) showCustomProviderDialog(profile);
+                return true;
+            });
+        }
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         lp.setMargins(0, 0, 0, dp(10));
         card.setLayoutParams(lp);
@@ -3583,7 +3929,9 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         text.addView(title);
 
         TextView body = new TextView(this);
-        body.setText(mProviderConfig == null ? shortProviderDesc(profile) : mProviderConfig.configuredSummary(profile));
+        String summary = mProviderConfig == null ? shortProviderDesc(profile) : mProviderConfig.configuredSummary(profile);
+        if (profile.custom && !mNsActive) summary += " · custom (long-press to edit)";
+        body.setText(summary);
         body.setTextColor(color(R.color.ai_text_muted));
         body.setTextSize(11);
         body.setMaxLines(2);

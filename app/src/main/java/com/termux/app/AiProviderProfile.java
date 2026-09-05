@@ -15,11 +15,17 @@ public final class AiProviderProfile {
     public final boolean oauthAuth;
     public final boolean terminalOnly;
     public final boolean implemented;
+    /** Request dialect: responses | chat | anthropic | codex. Builtins carry
+     * their dialect; runtime falls back to the legacy id tables when null. */
+    public final String dialect;
+    /** True for runtime-loaded profiles (custom endpoints, plugin
+     * providers) — editable and deletable from the UI. */
+    public final boolean custom;
 
     private AiProviderProfile(String id, String name, String mark, String description,
                               String defaultBaseUrl, String defaultModel,
                               boolean apiKeyAuth, boolean oauthAuth, boolean terminalOnly,
-                              boolean implemented) {
+                              boolean implemented, String dialect, boolean custom) {
         this.id = id;
         this.name = name;
         this.mark = mark;
@@ -30,6 +36,30 @@ public final class AiProviderProfile {
         this.oauthAuth = oauthAuth;
         this.terminalOnly = terminalOnly;
         this.implemented = implemented;
+        this.dialect = dialect;
+        this.custom = custom;
+    }
+
+    private AiProviderProfile(String id, String name, String mark, String description,
+                              String defaultBaseUrl, String defaultModel,
+                              boolean apiKeyAuth, boolean oauthAuth, boolean terminalOnly,
+                              boolean implemented) {
+        this(id, name, mark, description, defaultBaseUrl, defaultModel,
+            apiKeyAuth, oauthAuth, terminalOnly, implemented, null, false);
+    }
+
+    /** Runtime-loaded provider profile (custom endpoint or plugin). Only
+     * key-or-keyless chat/responses/anthropic dialects are expressible —
+     * OAuth flows stay builtin-only. */
+    public static AiProviderProfile customProfile(String id, String name, String mark,
+                                                  String description, String baseUrl,
+                                                  String model, boolean needsKey,
+                                                  String dialect) {
+        String safeDialect = "anthropic".equals(dialect) ? "anthropic"
+            : "responses".equals(dialect) ? "responses" : "chat";
+        return new AiProviderProfile(id, name, mark, description,
+            baseUrl == null ? "" : baseUrl, model == null ? "" : model,
+            needsKey, false, false, true, safeDialect, true);
     }
 
     public static final AiProviderProfile[] PROFILES = new AiProviderProfile[]{
@@ -133,10 +163,32 @@ public final class AiProviderProfile {
 
     public static final String[] FEATURED_PROVIDER_IDS = new String[]{"openai", "anthropic", "opencode"};
 
+    private static volatile java.util.List<AiProviderProfile> sOverlay =
+        java.util.Collections.emptyList();
+
+    /** Runtime-loaded profiles (custom endpoints + plugin providers),
+     * refreshed by AiPluginRegistry on start and on every change. */
+    public static void setOverlay(@Nullable java.util.List<AiProviderProfile> overlay) {
+        sOverlay = overlay == null
+            ? java.util.Collections.emptyList()
+            : java.util.Collections.unmodifiableList(new java.util.ArrayList<>(overlay));
+    }
+
+    /** Builtins first, then runtime-loaded profiles. */
+    public static java.util.List<AiProviderProfile> all() {
+        java.util.List<AiProviderProfile> out =
+            new java.util.ArrayList<>(java.util.Arrays.asList(PROFILES));
+        out.addAll(sOverlay);
+        return out;
+    }
+
     @Nullable
     public static AiProviderProfile find(String id) {
         if (id == null) return null;
         for (AiProviderProfile profile : PROFILES) {
+            if (id.equals(profile.id)) return profile;
+        }
+        for (AiProviderProfile profile : sOverlay) {
             if (id.equals(profile.id)) return profile;
         }
         return null;

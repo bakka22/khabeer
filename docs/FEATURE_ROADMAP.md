@@ -86,12 +86,28 @@ badge in session meta. Parent preserved untouched. Unit-verified
 (history copy, lineage, refusal). Live-verified on Codex session
 (child "#2" opened with full history, parent intact).
 
-## 5. Plugin architecture — Status: NOT STARTED
+## 5. Plugin architecture — Status: DONE (unit + live verified)
 
-Hermes map: provider/tool plugin discovery, manifests, sandboxing.
-(Deep map to be filled during implementation.)
+Hermes map: `hermes_cli/agent_plugins.py` — portable `plugin.json`
+v1 packages (name/version/description/author/extensions), unknown-field
+tolerance, `${PLUGIN_ROOT}/${PLUGIN_DATA}` expansion, translation into
+skill + MCP runtimes, no plugin code imports.
 
-App plan: TBD.
+App implementation: `AiPluginRegistry` (manifest validation with
+diagnostics, name/id regexes, builtin-id collision rejection,
+enable/disable, URL-zip/tar.gz install with quarantine preview +
+explicit stdio warning, directory installs, delete), custom providers
+(name/baseUrl/model/needsKey/dialect, validated, overlay ids
+`custom-*`), `AiProviderProfile` runtime overlay (`all()`/`find()` cover
+builtins + custom + plugin; `dialect` on custom profiles drives
+chat/responses/anthropic dispatch in `AiRuntimeService`), plugin skill
+roots merged into discovery (library wins duplicates; plugin skills
+read-only to skill_manage/review/curator), plugin MCP servers synced as
+`plugin/<plugin>/<server>` (user servers untouched; user enabled flags
+survive re-sync). UI: Home "+ Add custom provider" + long-press
+edit/delete, Skills PLUGINS section (install/enable/delete/diagnostics).
+Unit-verified (round-trip, collisions, MCP sync, broken-manifest
+diagnostics). Live-verified (grid tile, dialog, section, no crashes).
 
 ## 6. Vision/image inputs + clip button — Status: NOT STARTED
 
