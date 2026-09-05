@@ -762,6 +762,88 @@ public final class AiDatabase extends SQLiteOpenHelper {
         return out;
     }
 
+    /** Forks a session into an independent child (Hermes /branch port).
+     * Copies the full message history so the child can explore a different
+     * approach while the parent is preserved untouched. Returns the child,
+     * or null when the parent does not exist or has no messages to fork.
+     * An explicit name wins; otherwise the title follows the lineage
+     * "base", "base #2", "base #3" … */
+    public synchronized RunRecord branchSession(String parentId, @Nullable String name) {
+        RunRecord parent = parentId == null ? null : getRun(parentId);
+        if (parent == null) return null;
+        Cursor count = getReadableDatabase().rawQuery(
+            "SELECT COUNT(*) FROM messages WHERE session_id=?", new String[]{parentId});
+        boolean hasHistory = false;
+        try { if (count.moveToFirst()) hasHistory = count.getLong(0) > 0; } finally { count.close(); }
+        if (!hasHistory) return null;
+        String title = name == null ? "" : name.trim();
+        if (title.isEmpty()) title = nextTitleInLineage(
+            TextUtils.isEmpty(parent.title) ? "branch" : parent.title);
+        RunRecord child = new RunRecord();
+        child.id = UUID.randomUUID().toString();
+        child.harnessId = parent.harnessId;
+        child.workspace = parent.workspace;
+        child.sessionKey = TextUtils.isEmpty(parent.sessionKey)
+            ? buildSessionKey(parent.harnessId, parent.workspace) : parent.sessionKey;
+        child.state = AiRunStateMachine.State.CREATED;
+        child.parentSessionId = parent.id;
+        child.route = parent.route;
+        child.modelOverride = parent.modelOverride;
+        child.lastResolvedModel = parent.lastResolvedModel;
+        child.todoJson = parent.todoJson;
+        child.source = TextUtils.isEmpty(parent.source) ? "agent" : parent.source;
+        child.title = boundTitle(title);
+        child.titleSource = "branch";
+        child.createdAt = System.currentTimeMillis();
+        child.updatedAt = child.createdAt;
+        saveRun(child);
+        Cursor rows = getReadableDatabase().query("messages", null, "session_id=?",
+            new String[]{parentId}, null, null, "id ASC");
+        try {
+            while (rows.moveToNext()) {
+                ContentValues v = new ContentValues();
+                for (int i = 0; i < rows.getColumnCount(); i++) {
+                    String col = rows.getColumnName(i);
+                    if ("id".equals(col) || "session_id".equals(col)) continue;
+                    if (rows.isNull(i)) { v.putNull(col); continue; }
+                    switch (rows.getType(i)) {
+                        case Cursor.FIELD_TYPE_INTEGER: v.put(col, rows.getLong(i)); break;
+                        case Cursor.FIELD_TYPE_FLOAT: v.put(col, rows.getDouble(i)); break;
+                        default: v.put(col, rows.getString(i)); break;
+                    }
+                }
+                v.put("session_id", child.id);
+                getWritableDatabase().insertOrThrow("messages", null, v);
+            }
+        } finally { rows.close(); }
+        return getRun(child.id);
+    }
+
+    private String nextTitleInLineage(String base) {
+        String stem = base.trim();
+        java.util.regex.Matcher numbered =
+            java.util.regex.Pattern.compile("^(.*)\\s+#(\\d+)$").matcher(stem);
+        if (numbered.find()) stem = numbered.group(1).trim();
+        if (stem.isEmpty()) stem = "branch";
+        int max = 1;
+        Cursor c = getReadableDatabase().query("runs", new String[]{"title"},
+            "title=? OR title LIKE ?", new String[]{stem, stem + " #%"},
+            null, null, null);
+        try {
+            while (c.moveToNext()) {
+                String t = c.getString(0);
+                if (t == null) continue;
+                java.util.regex.Matcher m =
+                    java.util.regex.Pattern.compile("^" + java.util.regex.Pattern.quote(stem) + "\\s+#(\\d+)$")
+                        .matcher(t.trim());
+                if (m.find()) {
+                    try { max = Math.max(max, Integer.parseInt(m.group(1))); } catch (Exception ignored) {}
+                }
+            }
+        } finally { c.close(); }
+        return max < 1 ? stem : stem + " #" + (max + 1);
+    }
+
     public synchronized void appendMessage(String sessionId, String role, String content) {
         ContentValues v = new ContentValues();
         v.put("session_id", sessionId);

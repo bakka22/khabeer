@@ -5415,11 +5415,47 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     private void showSessionActions(AiDatabase.RunRecord run) {
         new MaterialAlertDialogBuilder(this)
             .setTitle(run.title == null ? "Session" : run.title)
-            .setItems(new String[]{"Compact session", "Share as markdown", "Save .md file", "Archive session"}, (dialog, which) -> {
-                if (which == 0) confirmCompactSession(run);
-                else if (which == 1) shareSessionMarkdown(run);
-                else if (which == 2) saveSessionMarkdown(run);
+            .setItems(new String[]{"Branch session", "Compact session", "Share as markdown", "Save .md file", "Archive session"}, (dialog, which) -> {
+                if (which == 0) promptBranchSession(run);
+                else if (which == 1) confirmCompactSession(run);
+                else if (which == 2) shareSessionMarkdown(run);
+                else if (which == 3) saveSessionMarkdown(run);
                 else confirmArchive(run);
+            })
+            .show();
+    }
+
+    /** Forks the session into an independent child and opens it. The
+     * parent stays exactly as it was; the child carries the full history
+     * under the next lineage title ("base #2" …) unless renamed here. */
+    private void promptBranchSession(AiDatabase.RunRecord run) {
+        if (mRuntimeService == null || !mRuntimeBound) {
+            showError("Native runtime is still starting.");
+            return;
+        }
+        final android.widget.EditText input = new android.widget.EditText(this);
+        input.setHint("Branch name (optional — defaults to lineage title)");
+        input.setSingleLine(true);
+        int pad = dp(4);
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(22), dp(6), dp(22), 0);
+        box.addView(input);
+        new MaterialAlertDialogBuilder(this)
+            .setTitle("Branch this session?")
+            .setMessage("The full history copies into a new session you keep working in. The original is preserved.")
+            .setView(box)
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton("Branch", (dialog, which) -> {
+                String name = input.getText() == null ? "" : input.getText().toString().trim();
+                AiDatabase.RunRecord child =
+                    mRuntimeService.branchRun(run.id, name.isEmpty() ? null : name);
+                if (child == null) {
+                    showError("Nothing to branch yet — send a message first.");
+                    return;
+                }
+                openResumedSession(child.id);
+                setStatus("Branched into '" + (child.title == null ? "session" : child.title) + "'.", false);
             })
             .show();
     }
@@ -5591,6 +5627,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
                 }
             } catch (Exception ignored) {}
         }
+        if (!TextUtils.isEmpty(run.parentSessionId)) sub.append(" · branch");
         if (archived) sub.append(" · archived");
         else if (run.state == AiRunStateMachine.State.FAILED) sub.append(" · failed");
         else if (run.state == AiRunStateMachine.State.CANCELED) sub.append(" · interrupted");

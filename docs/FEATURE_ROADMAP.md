@@ -70,13 +70,21 @@ tool + dispatch in `AiRuntimeService`, durable snapshot in
 (merge, injection, nesting, caps). Live-verified on Codex
 gpt-5.6-sol: model called todowrite, 2 tasks stored and confirmed.
 
-## 4. Branching — Status: NOT STARTED
+## 4. Branching — Status: DONE (unit + live verified)
 
-Hermes map: branch command, lineage (`parent_session_id`), session
-switching and recovery semantics.
-(Deep map to be filled during implementation.)
+Hermes map: `_handle_branch_command` (`hermes_cli/cli_commands_mixin.py`)
+— flush history, end old as "branched", `create_session` with
+`parent_session_id` + `_branched_from` marker, batched history copy
+with `api_content` sidecar, `get_next_title_in_lineage` ("base #2" …),
+switch to child.
 
-App plan: TBD.
+App implementation: `AiDatabase.branchSession` (parent link, full
+message-row copy, lineage titles, empty-history refusal),
+`AiRuntimeService.branchRun` (stops live parent turn, forks, resumes
+child), long-press "Branch session" with optional rename, `· branch`
+badge in session meta. Parent preserved untouched. Unit-verified
+(history copy, lineage, refusal). Live-verified on Codex session
+(child "#2" opened with full history, parent intact).
 
 ## 5. Plugin architecture — Status: NOT STARTED
 

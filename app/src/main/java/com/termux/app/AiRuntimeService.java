@@ -487,10 +487,24 @@ public void resumeRun(String runId) {
         for (Listener listener : new ArrayList<>(mListeners)) listener.onRunChanged(copyRun(r));
     }
 
+    /** Forks a session into an independent child and opens it (Hermes
+     * /branch). The parent is preserved untouched; a live parent turn is
+     * stopped first so history cannot scramble mid-copy. Returns the
+     * child, or null when there is nothing to fork. */
+    public AiDatabase.RunRecord branchRun(String parentId, @Nullable String name) {
+        if (TextUtils.isEmpty(parentId)) return null;
+        RunContext live = mRuns.get(parentId);
+        if (live != null && live.worker != null && live.worker.isAlive()) stopRun(live);
+        AiDatabase.RunRecord child = mDatabase.branchSession(parentId, name);
+        if (child == null) return null;
+        resumeRun(child.id);
+        return copyRun(mDatabase.getRun(child.id));
+    }
+
     /** Starts a true session boundary: stops any turn and drops the current
      * run entirely so the next prompt creates a fresh session (khabeer
      * session_reset). stopActiveRun alone keeps the run as current. */
-public void newSession() {
+    public void newSession() {
         // Parallel sessions: leave every live run untouched — this only moves
         // the UI focus off the current session (khabeer session boundary).
         mViewed = null;
@@ -3998,6 +4012,8 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         copy.title = source.title;
         copy.titleSource = source.titleSource;
         copy.route = source.route;
+        copy.source = source.source;
+        copy.todoJson = source.todoJson;
         return copy;
     }
 
