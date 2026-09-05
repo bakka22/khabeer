@@ -285,6 +285,11 @@ public final class AiRuntimeService extends Service {
         return mDatabase.getSessionUsage(sessionId);
     }
 
+    public int countActiveMessages(String sessionId) {
+        if (mDatabase == null || TextUtils.isEmpty(sessionId)) return 0;
+        return mDatabase.countActiveMessages(sessionId);
+    }
+
     public String exportSessionMarkdown(String sessionId) {
         if (mDatabase == null || TextUtils.isEmpty(sessionId)) return "";
         return mDatabase.buildSessionMarkdown(sessionId);
@@ -823,10 +828,21 @@ public void setSessionProvider(String providerId) {
      * checkpoint flow while keeping MEMORY.md / USER.md authoritative and
      * never mutating a live turn underneath the model. */
 public void compactCurrentSessionManually() {
-        RunContext c = mViewed;
+        compactSessionManually(null);
+    }
+
+    /** Manual compaction for any session (Sessions list entry point).
+     * Null selects the viewed session. Compaction archives transcript rows
+     * in the database, so it works even when the session is not live. */
+    public void compactSessionManually(@Nullable String targetRunId) {
+        RunContext c = targetRunId == null ? mViewed : mRuns.get(targetRunId);
         if (c == null || c.record == null) {
-            notifyError(null, "No active session to compact.");
-            return;
+            AiDatabase.RunRecord stored = targetRunId == null ? null : mDatabase.getRun(targetRunId);
+            if (stored == null) {
+                notifyError(null, "No active session to compact.");
+                return;
+            }
+            c = adoptRun(stored);
         }
         if (c.worker != null && c.worker.isAlive()) {
             notifyError(c.record.id, "Wait for the current model turn to finish before compacting this session.");
@@ -842,17 +858,21 @@ public void compactCurrentSessionManually() {
         String apiKey = mProviderConfig.resolveCredential(profile);
         String model = TextUtils.isEmpty(c.record.modelOverride) ? mProviderConfig.getModel(profile) : c.record.modelOverride;
         if (TextUtils.isEmpty(model)) model = profile.defaultModel;
+        boolean needsKey = profile.apiKeyAuth;
         if ("opencode".equals(providerId)) {
             String route = TextUtils.isEmpty(c.record.route) ? mProviderConfig.getOpenCodeSelectedRoute() : c.record.route;
             baseUrl = AiProviderConfig.ocRouteUrl(route);
-            apiKey = mProviderConfig.getOpenCodeRouteKey(route);
+            String routeKey = mProviderConfig.getOpenCodeRouteKey(route);
+            if (!TextUtils.isEmpty(routeKey)) apiKey = routeKey;
             if (TextUtils.isEmpty(c.record.modelOverride)) model = mProviderConfig.getOpenCodeRouteModel(route);
+            // Keyless routes (Free) compact without credentials.
+            needsKey = AiProviderConfig.ocRouteNeedsKey(route);
         }
         if (TextUtils.isEmpty(baseUrl) || TextUtils.isEmpty(model)) {
             notifyError(c.record.id, "Provider endpoint and model are required before compaction.");
             return;
         }
-        if ((profile.apiKeyAuth || "opencode".equals(providerId)) && TextUtils.isEmpty(apiKey)) {
+        if (needsKey && TextUtils.isEmpty(apiKey)) {
             notifyError(c.record.id, "Add credentials for this provider before compaction.");
             return;
         }

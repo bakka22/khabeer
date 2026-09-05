@@ -1121,7 +1121,6 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
 
         page.addView(createMemoryStatusCard());
         page.addView(createJourneyEntryCard());
-        page.addView(createManualCompactionCard());
         page.addView(createPendingMemoryCard());
 
         page.addView(createMemoryEditor(
@@ -1434,90 +1433,6 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         } else {
             showError(result.optString("error", "Memory node save failed."));
         }
-    }
-
-    private View createManualCompactionCard() {
-        MaterialCardView card = new MaterialCardView(this);
-        card.setCardBackgroundColor(color(R.color.ai_surface_elevated));
-        card.setStrokeColor(color(R.color.ai_border));
-        card.setStrokeWidth(dp(1));
-        card.setRadius(dp(18));
-        LinearLayout.LayoutParams cardLp = new LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        cardLp.setMargins(0, 0, 0, dp(12));
-        card.setLayoutParams(cardLp);
-
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(16), dp(14), dp(16), dp(14));
-        card.addView(box);
-
-        TextView heading = new TextView(this);
-        heading.setText("Manual session compaction");
-        heading.setTextColor(color(R.color.ai_text));
-        heading.setTextSize(17);
-        heading.setTypeface(Typeface.DEFAULT_BOLD);
-        box.addView(heading);
-
-        TextView body = new TextView(this);
-        body.setText("Compress the current session into a Hermes-style structured checkpoint, keep the newest messages live, and preserve recovery through session_search. This never runs automatically.");
-        body.setTextColor(color(R.color.ai_text_muted));
-        body.setTextSize(12);
-        body.setLineSpacing(dp(1), 1.0f);
-        LinearLayout.LayoutParams bodyLp = new LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        bodyLp.setMargins(0, dp(6), 0, dp(10));
-        box.addView(body, bodyLp);
-
-        TextView status = new TextView(this);
-        status.setText(currentCompactionStatusText());
-        status.setTextColor(color(R.color.ai_text_dim));
-        status.setTextSize(11);
-        status.setLineSpacing(dp(1), 1.0f);
-        LinearLayout.LayoutParams statusLp = new LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        statusLp.setMargins(0, 0, 0, dp(10));
-        box.addView(status, statusLp);
-
-        MaterialButton compact = smallMemoryButton("Compact current session");
-        compact.setEnabled(mRuntimeService != null && mRuntimeService.getActiveRun() != null);
-        box.addView(compact, new LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        compact.setOnClickListener(v -> confirmManualCompaction());
-        return card;
-    }
-
-    private String currentCompactionStatusText() {
-        if (mRuntimeService == null) return "Runtime not connected yet.";
-        AiDatabase.RunRecord run = mRuntimeService.getActiveRun();
-        if (run == null) return "No current session selected.";
-        int activeMessages = 0;
-        try { activeMessages = mRuntimeService.getTranscript(run.id).length(); } catch (Exception ignored) {}
-        String model = TextUtils.isEmpty(run.modelOverride) ? run.lastResolvedModel : run.modelOverride;
-        if (TextUtils.isEmpty(model)) model = "model not resolved yet";
-        String provider = TextUtils.isEmpty(run.harnessId) ? "unknown provider" : run.harnessId;
-        String readiness = activeMessages >= 30
-            ? "Ready for manual compaction."
-            : "Still small; compaction will refuse until roughly 30 active replay messages.";
-        return "Current session: " + provider + " · " + model + "\n" +
-            "Active replay messages: " + activeMessages + "\n" +
-            readiness;
-    }
-
-    private void confirmManualCompaction() {
-        if (mRuntimeService == null) {
-            showError("Runtime is not connected yet.");
-            return;
-        }
-        new MaterialAlertDialogBuilder(this)
-            .setTitle("Compact current session?")
-            .setMessage("The app will ask this session's selected provider/model to create a structured checkpoint, archive older active messages, and keep a protected recent tail. This is manual and cannot run mid-turn.")
-            .setNegativeButton("Cancel", null)
-            .setPositiveButton("Compact", (dialog, which) -> {
-                setStatus("Compaction started…", true);
-                mRuntimeService.compactCurrentSessionManually();
-            })
-            .show();
     }
 
     private View createMemoryStatusCard() {
@@ -5248,11 +5163,34 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     private void showSessionActions(AiDatabase.RunRecord run) {
         new MaterialAlertDialogBuilder(this)
             .setTitle(run.title == null ? "Session" : run.title)
-            .setItems(new String[]{"Share as markdown", "Save .md file", "Archive session"}, (dialog, which) -> {
-                if (which == 0) shareSessionMarkdown(run);
-                else if (which == 1) saveSessionMarkdown(run);
+            .setItems(new String[]{"Compact session", "Share as markdown", "Save .md file", "Archive session"}, (dialog, which) -> {
+                if (which == 0) confirmCompactSession(run);
+                else if (which == 1) shareSessionMarkdown(run);
+                else if (which == 2) saveSessionMarkdown(run);
                 else confirmArchive(run);
             })
+            .show();
+    }
+
+    private void confirmCompactSession(AiDatabase.RunRecord run) {
+        if (mRuntimeService == null || !mRuntimeBound) {
+            showError("Native runtime is still starting.");
+            return;
+        }
+        AiProviderProfile profile = AiProviderProfile.find(run.harnessId);
+        String model = TextUtils.isEmpty(run.modelOverride) ? run.lastResolvedModel : run.modelOverride;
+        int active = mRuntimeService.countActiveMessages(run.id);
+        String info = (profile == null ? run.harnessId : profile.name)
+            + (TextUtils.isEmpty(model) ? "" : " · " + model)
+            + "\n" + active + " active replay messages.";
+        String ready = active < 30
+            ? "\nToo small to compact usefully yet."
+            : "\nOlder turns archive into one checkpoint; memory files stay authoritative.";
+        new MaterialAlertDialogBuilder(this)
+            .setTitle("Compact this session?")
+            .setMessage(info + ready)
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton("Compact", (dialog, which) -> mRuntimeService.compactSessionManually(run.id))
             .show();
     }
 

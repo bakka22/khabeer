@@ -877,6 +877,13 @@ public final class AiDatabase extends SQLiteOpenHelper {
         return out;
     }
 
+    public synchronized int countActiveMessages(String sessionId) {
+        Cursor c = getReadableDatabase().rawQuery(
+            "SELECT COUNT(*) FROM messages WHERE session_id=? AND active=1",
+            new String[]{sessionId});
+        try { return c.moveToFirst() ? c.getInt(0) : 0; } finally { c.close(); }
+    }
+
     public synchronized int countUserMessages(String sessionId) {
         Cursor c = getReadableDatabase().rawQuery(
             "SELECT COUNT(*) FROM messages WHERE session_id=? AND active=1 AND role='user'",
