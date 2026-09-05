@@ -21,7 +21,7 @@ public final class AiDatabase extends SQLiteOpenHelper {
 
     private static final String TAG = "AiDatabase";
     private static final String DATABASE_NAME = "termux_ai_runtime.db";
-    private static final int DATABASE_VERSION = 19;
+    private static final int DATABASE_VERSION = 20;
 
     public static final class RunRecord {
         public String id;
@@ -68,6 +68,7 @@ public final class AiDatabase extends SQLiteOpenHelper {
         createV17Schema(db);
         createV18Schema(db);
         createV19Schema(db);
+        createV20Schema(db);
     }
 
     /** Durable per-session todo snapshot (mobile necessity: processes die).
@@ -75,6 +76,13 @@ public final class AiDatabase extends SQLiteOpenHelper {
      * undo, and compaction rebuilds never lose the plan. */
     private void createV19Schema(SQLiteDatabase db) {
         try { db.execSQL("ALTER TABLE runs ADD COLUMN todo_json TEXT"); } catch (Exception ignored) {}
+    }
+
+    /** Image refs per message (vision port): lightweight {name, mime, path}
+     * JSON — base64 never touches the DB; bytes load from the attachments
+     * dir at wire time. */
+    private void createV20Schema(SQLiteDatabase db) {
+        try { db.execSQL("ALTER TABLE messages ADD COLUMN images_json TEXT"); } catch (Exception ignored) {}
     }
 
     /** Subagent session source (Hermes source taxonomy, trimmed): child
@@ -656,6 +664,9 @@ public final class AiDatabase extends SQLiteOpenHelper {
         if (oldVersion < 19) {
             createV19Schema(db);
         }
+        if (oldVersion < 20) {
+            createV20Schema(db);
+        }
         if (oldVersion < 6) {
             // Title provenance (khabeer title_source): 'message' = derived from
             // the first user message, 'ai' = model-generated summary. Existing
@@ -845,13 +856,29 @@ public final class AiDatabase extends SQLiteOpenHelper {
     }
 
     public synchronized void appendMessage(String sessionId, String role, String content) {
+        appendMessage(sessionId, role, content, null);
+    }
+
+    /** Appends a message row, optionally carrying image refs
+     * ({name, mime, path} JSON — never base64). */
+    public synchronized void appendMessage(String sessionId, String role, String content,
+                                           @Nullable JSONArray images) {
         ContentValues v = new ContentValues();
         v.put("session_id", sessionId);
         v.put("role", role);
         v.put("content", content);
         v.put("active", 1);
         v.put("created_at", System.currentTimeMillis());
-        getWritableDatabase().insertOrThrow("messages", null, v);
+        if (images != null && images.length() > 0) v.put("images_json", images.toString());
+        try {
+            getWritableDatabase().insertOrThrow("messages", null, v);
+        } catch (RuntimeException e) {
+            // Pre-v20 databases without images_json: retry without it.
+            if (images != null && images.length() > 0) {
+                v.remove("images_json");
+                getWritableDatabase().insertOrThrow("messages", null, v);
+            } else throw e;
+        }
         // Session listing mirrors khabeer: last_active ordering (fresh message
         // bumps recency) and preview = first user message, bounded to 60 chars.
         ContentValues runUpdate = new ContentValues();
@@ -1228,19 +1255,16 @@ public final class AiDatabase extends SQLiteOpenHelper {
 
     public synchronized JSONArray getTranscript(String sessionId, int limit) {
         JSONArray out = new JSONArray();
-        Cursor c = getReadableDatabase().query("messages",
-            new String[]{"id", "role", "content", "created_at"}, "session_id=? AND active=1",
-            new String[]{sessionId}, null, null, "_compressed_summary DESC, id ASC", String.valueOf(limit));
+        Cursor c;
+        try {
+            c = getReadableDatabase().query("messages", null, "session_id=? AND active=1",
+                new String[]{sessionId}, null, null, "_compressed_summary DESC, id ASC", String.valueOf(limit));
+        } catch (RuntimeException e) {
+            return out;
+        }
         try {
             while (c.moveToNext()) {
-                try {
-                    JSONObject row = new JSONObject();
-                    row.put("id", c.getLong(0));
-                    row.put("role", c.getString(1));
-                    row.put("content", c.getString(2));
-                    row.put("created_at", c.getLong(3));
-                    out.put(row);
-                } catch (Exception ignored) {}
+                try { out.put(messageRow(c)); } catch (Exception ignored) {}
             }
         } finally { c.close(); }
         return out;
@@ -1248,9 +1272,13 @@ public final class AiDatabase extends SQLiteOpenHelper {
 
     public synchronized JSONArray getHistoricalTranscript(String sessionId, int limit) {
         JSONArray out = new JSONArray();
-        Cursor c = getReadableDatabase().query("messages",
-            new String[]{"id", "role", "content", "created_at"}, "session_id=?",
-            new String[]{sessionId}, null, null, "id ASC", String.valueOf(limit));
+        Cursor c;
+        try {
+            c = getReadableDatabase().query("messages", null, "session_id=?",
+                new String[]{sessionId}, null, null, "id ASC", String.valueOf(limit));
+        } catch (RuntimeException e) {
+            return out;
+        }
         try {
             while (c.moveToNext()) {
                 try { out.put(messageRow(c)); } catch (Exception ignored) {}
@@ -1519,10 +1547,17 @@ public final class AiDatabase extends SQLiteOpenHelper {
 
     private JSONObject messageRow(Cursor c) throws Exception {
         JSONObject row = new JSONObject();
-        row.put("id", c.getLong(0));
-        row.put("role", c.getString(1));
-        row.put("content", c.getString(2));
-        row.put("created_at", c.getLong(3));
+        row.put("id", c.getLong(c.getColumnIndexOrThrow("id")));
+        row.put("role", c.getString(c.getColumnIndexOrThrow("role")));
+        row.put("content", c.getString(c.getColumnIndexOrThrow("content")));
+        row.put("created_at", c.getLong(c.getColumnIndexOrThrow("created_at")));
+        int imgIdx = c.getColumnIndex("images_json");
+        if (imgIdx >= 0 && !c.isNull(imgIdx)) {
+            try {
+                JSONArray images = new JSONArray(c.getString(imgIdx));
+                if (images.length() > 0) row.put("images", images);
+            } catch (Exception ignored) {}
+        }
         return row;
     }
 

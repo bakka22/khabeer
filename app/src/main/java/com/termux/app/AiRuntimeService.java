@@ -143,6 +143,10 @@ public final class AiRuntimeService extends Service {
         int maxSteps;
         /** Per-session task list (Hermes TodoStore, durable via runs.todo_json). */
         final AiTodoStore todos = new AiTodoStore();
+        /** Image refs for the turn being built (vision port): consumed once
+         * by appendUserTurnToHistory, then cleared. Refs only — bytes load
+         * from the attachments dir at wire time. */
+        JSONArray pendingImages;
         /** skill_view repeat-view dedup: "name|file" -> "mtime:size" (khabeer
          * repeat-view dedup — unchanged re-reads return a stub, not content). */
         final HashMap<String, String> skillViewCache = new HashMap<>();
@@ -431,6 +435,21 @@ public void addListener(Listener listener) {
         return mDatabase;
     }
 
+    private JSONArray mPendingImages;
+
+    /** Stashes image refs for the next turn (clip-button attachments).
+     * Consumed once by the next startAgent/sendPrompt, then cleared. */
+    public void setPendingImages(@Nullable JSONArray images) {
+        if (images == null || images.length() == 0) mPendingImages = null;
+        else mPendingImages = images;
+    }
+
+    private JSONArray takePendingImages() {
+        JSONArray out = mPendingImages;
+        mPendingImages = null;
+        return out;
+    }
+
     public List<AiDatabase.RunRecord> getRecentRuns() {
         List<AiDatabase.RunRecord> result = new ArrayList<>();
         for (AiDatabase.RunRecord record : mDatabase.getRecentRuns(12)) result.add(copyRun(record));
@@ -574,6 +593,7 @@ public void startAgent(String providerId, String baseUrl, String apiKey, String 
         if ("opencode".equals(providerId) && !TextUtils.isEmpty(route)) record.route = route;
         mProviderConfig.setLastUsed(record.harnessId, model, record.route);
         RunContext ctx = adoptRun(record);
+        ctx.pendingImages = AiAttachments.rehome(takePendingImages(), record.id);
         mViewed = ctx;
         KhabeerSessionState ss = sessionState(sessionKey);
         ss.persistent.bumpGeneration();
@@ -697,6 +717,8 @@ public void sendPrompt(String prompt, @Nullable String effort, @Nullable String 
         c.stopRequested = false;
         c.steerText = null;
         prompt = applyInterruptScaffold(c, prompt);
+        JSONArray pending = takePendingImages();
+        if (pending != null && pending.length() > 0) c.pendingImages = pending;
         persistRun(c);
         runTurn(c, providerId, baseUrl, apiKey, c.record.workspace, prompt, model, effort, approvalPolicy);
     }
@@ -1074,7 +1096,12 @@ public void compactCurrentSessionManually() {
                 if (row == null) continue;
                 String role = row.optString("role", "user");
                 if (!"assistant".equals(role) && !"user".equals(role) && !"tool".equals(role)) role = "user";
-                rebuilt.put(json("role", role, "content", row.optString("content", "")));
+                JSONObject rebuiltRow = json("role", role, "content", row.optString("content", ""));
+                JSONArray images = row.optJSONArray("images");
+                if ("user".equals(role) && images != null && images.length() > 0) {
+                    rebuiltRow.put("images", images);
+                }
+                rebuilt.put(rebuiltRow);
             }
             ctx.chatMessages = rebuilt;
             ctx.previousResponseId = null;
@@ -1329,11 +1356,16 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         if (ctx == null) throw new IllegalStateException("No active run context.");
         AiMemoryStore.resetTurnFailureBudget();
         resetTurnUsage(ctx);
-        mDatabase.appendMessage(ctx.record.id, "user", prompt);
+        JSONArray images = ctx.pendingImages;
+        ctx.pendingImages = null;
+        if (images != null && images.length() == 0) images = null;
+        mDatabase.appendMessage(ctx.record.id, "user", prompt, images);
         refreshSystemMessage();
         sanitizeReplayHistory();
         if (ctx.chatMessages == null) ctx.chatMessages = new JSONArray();
-        ctx.chatMessages.put(json("role", "user", "content", prompt));
+        JSONObject userMessage = json("role", "user", "content", prompt);
+        if (images != null) userMessage.put("images", images);
+        ctx.chatMessages.put(userMessage);
         saveChatHistory(ctx);
     }
 
@@ -1365,6 +1397,78 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         return builder.toString();
     }
 
+    /** Native image parts for a user message (vision port). Hermes shapes:
+     * Chat {@code image_url}, Responses/Codex {@code input_image} (user
+     * messages only — assistant image parts brick replay), Anthropic image
+     * blocks. Returns null when the message carries no usable images, so
+     * callers keep the plain string shape. Missing files degrade to a
+     * placeholder line instead of failing the turn. */
+    private JSONArray userContentParts(String text, JSONObject m, String style) {
+        JSONArray images = m == null ? null : m.optJSONArray("images");
+        if (images == null || images.length() == 0) return null;
+        StringBuilder body = new StringBuilder(text == null ? "" : text);
+        JSONArray imageParts = new JSONArray();
+        try {
+            for (int i = 0; i < images.length(); i++) {
+                JSONObject img = images.optJSONObject(i);
+                if (img == null) continue;
+                String dataUrl = AiAttachments.dataUrl(img);
+                if (dataUrl == null) {
+                    body.append("\n[image unavailable: ").append(img.optString("name", "?")).append("]");
+                    continue;
+                }
+                if ("anthropic".equals(style)) {
+                    int comma = dataUrl.indexOf(',');
+                    imageParts.put(new JSONObject().put("type", "image")
+                        .put("source", new JSONObject().put("type", "base64")
+                            .put("media_type", img.optString("mime", "image/jpeg"))
+                            .put("data", comma < 0 ? dataUrl : dataUrl.substring(comma + 1))));
+                } else if ("chat".equals(style)) {
+                    imageParts.put(new JSONObject().put("type", "image_url")
+                        .put("image_url", new JSONObject().put("url", dataUrl)));
+                } else {
+                    imageParts.put(new JSONObject().put("type", "input_image").put("image_url", dataUrl));
+                }
+            }
+            String baseText = text == null ? "" : text;
+            if (imageParts.length() == 0 && body.toString().equals(baseText)) return null;
+            String finalText = body.toString();
+            if (TextUtils.isEmpty(finalText)) finalText = "(see attached images)";
+            JSONArray parts = new JSONArray();
+            if ("anthropic".equals(style) || "chat".equals(style)) {
+                parts.put(new JSONObject().put("type", "text").put("text", finalText));
+            } else {
+                parts.put(new JSONObject().put("type", "input_text").put("text", finalText));
+            }
+            for (int i = 0; i < imageParts.length(); i++) parts.put(imageParts.opt(i));
+            return parts;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** Chat-completions wire history: user messages with images become
+     * content arrays; everything else passes through untouched. */
+    private JSONArray toChatWireMessages(JSONArray messages) {
+        JSONArray out = new JSONArray();
+        if (messages == null) return out;
+        for (int i = 0; i < messages.length(); i++) {
+            JSONObject m = messages.optJSONObject(i);
+            if (m == null) continue;
+            if ("user".equals(m.optString("role"))) {
+                JSONArray parts = userContentParts(m.optString("content", ""), m, "chat");
+                if (parts != null) {
+                    try {
+                        out.put(new JSONObject().put("role", "user").put("content", parts));
+                        continue;
+                    } catch (Exception ignored) {}
+                }
+            }
+            out.put(m);
+        }
+        return out;
+    }
+
     /** Convert the chat-format history into Responses-API input items (full replay, khabeer-style). */
     private JSONArray toResponsesInput(JSONArray messages) throws Exception {
         JSONArray input = new JSONArray();
@@ -1374,7 +1478,10 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
             String role = m.optString("role");
             if ("system".equals(role)) continue;
             if ("user".equals(role)) {
-                input.put(new JSONObject().put("role", "user").put("content", m.optString("content", "")));
+                JSONArray parts = userContentParts(m.optString("content", ""), m, "responses");
+                input.put(parts == null
+                    ? new JSONObject().put("role", "user").put("content", m.optString("content", ""))
+                    : new JSONObject().put("role", "user").put("content", parts));
             } else if ("assistant".equals(role)) {
                 JSONArray tcs = m.optJSONArray("tool_calls");
                 if (tcs != null && tcs.length() > 0) {
@@ -1774,8 +1881,12 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
             String role = m.optString("role");
             if ("system".equals(role)) continue;
             if ("user".equals(role)) {
-                input.put(new JSONObject().put("role", "user")
-                    .put("content", new JSONArray().put(new JSONObject().put("type", "input_text").put("text", m.optString("content", "")))));
+                JSONArray parts = userContentParts(m.optString("content", ""), m, "responses");
+                if (parts == null) {
+                    parts = new JSONArray().put(new JSONObject().put("type", "input_text")
+                        .put("text", m.optString("content", "")));
+                }
+                input.put(new JSONObject().put("role", "user").put("content", parts));
             } else if ("assistant".equals(role)) {
                 JSONArray reasoning = m.optJSONArray("codex_reasoning_items");
                 if (reasoning != null) {
@@ -2021,8 +2132,12 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
             String role = m.optString("role");
             if ("system".equals(role)) continue;
             if ("user".equals(role)) {
-                out.put(new JSONObject().put("role", "user")
-                    .put("content", new JSONArray().put(new JSONObject().put("type", "text").put("text", m.optString("content", "")))));
+                JSONArray parts = userContentParts(m.optString("content", ""), m, "anthropic");
+                if (parts == null) {
+                    parts = new JSONArray().put(new JSONObject().put("type", "text")
+                        .put("text", m.optString("content", "")));
+                }
+                out.put(new JSONObject().put("role", "user").put("content", parts));
             } else if ("assistant".equals(role)) {
                 JSONArray blocks = new JSONArray();
                 String c = m.optString("content", "");
@@ -2078,7 +2193,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         refreshReplayHistory(ctx);
 
         for (int step = 0; step < turnMaxSteps(ctx()) && !ctx().stopRequested && !KhabeerInterruptManager.isInterrupted(); step++) {
-            JSONObject response = callChatCompletionsApiWithRetry(providerId, baseUrl, apiKey, model, ctx().chatMessages);
+            JSONObject response = callChatCompletionsApiWithRetry(providerId, baseUrl, apiKey, model, toChatWireMessages(ctx().chatMessages));
             JSONArray choices = response.optJSONArray("choices");
             JSONObject choice = choices == null ? null : choices.optJSONObject(0);
             JSONObject message = choice == null ? null : choice.optJSONObject("message");

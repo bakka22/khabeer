@@ -10,6 +10,7 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.provider.DocumentsContract;
+import android.view.ViewParent;
 import android.text.InputType;
 import android.text.TextUtils;
 import android.view.Gravity;
@@ -76,6 +77,8 @@ import java.util.zip.ZipInputStream;
 public final class AiActivity extends AppCompatActivity implements AiRuntimeService.Listener {
 
     private static final int REQUEST_PICK_WORKSPACE = 7001;
+    private static final int REQUEST_PICK_IMAGE = 7002;
+    private static final int REQUEST_PICK_FILE = 7003;
 
     private static final String MODEL_AUTO = "";
     private static final String EFFORT_AUTO = "";
@@ -89,7 +92,10 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     private Runnable mApprovalCountdown;
     private long mApprovalDeadline;
     private static final long APPROVAL_AUTO_DENY_MS = 120_000;
-    private final List<String> mAttachedPaths = new ArrayList<>();
+    /** Outgoing attachments: {name, mime, path, isImage} refs into the
+     * session attachments dir (images ride as native parts per dialect;
+     * other files append as paths the terminal tools can read). */
+    private final JSONArray mAttachments = new JSONArray();
 
     private DrawerLayout mDrawer;
     private NestedScrollView mConversationScroll;
@@ -4289,7 +4295,15 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             handleUndoCommand(prompt);
             return;
         }
-        if (!mAttachedPaths.isEmpty()) prompt += "\n\nAttached files:\n- " + TextUtils.join("\n- ", mAttachedPaths);
+        JSONArray images = AiAttachments.imagesOnly(mAttachments);
+        List<String> files = new ArrayList<>();
+        for (int i = 0; i < mAttachments.length(); i++) {
+            JSONObject record = mAttachments.optJSONObject(i);
+            if (record != null && !AiAttachments.isImageRecord(record)) {
+                files.add(record.optString("path", record.optString("name", "?")));
+            }
+        }
+        if (!files.isEmpty()) prompt += "\n\nAttached files:\n- " + TextUtils.join("\n- ", files);
         AiProviderProfile profile = mSelectedProfile;
         String workspace = validateWorkspace();
         if (profile == null || workspace == null) return;
@@ -4298,11 +4312,14 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         // Anything that doesn't resolve to an installed skill is sent as-is.
         String typedPrompt = prompt;
         String[] invocation = AiSkillRegistry.buildSkillInvocationMessage(prompt);
-        if (invocation != null && mAttachedPaths.isEmpty()) {
+        if (invocation != null && mAttachments.length() == 0) {
             prompt = invocation[0];
             setStatus("Loaded skill" + (invocation[1].contains(",") ? "s" : "") + ": " + invocation[1], false);
         }
-        addUserMessage(typedPrompt);
+        if (mRuntimeService != null) mRuntimeService.setPendingImages(images.length() == 0 ? null : images);
+        addUserMessage(typedPrompt, images);
+        while (mAttachments.length() > 0) mAttachments.remove(0);
+        refreshAttachments();
         mUserScrolledUp = false;
         mPromptInput.setText("");
         mEmptyChatHint.setVisibility(View.GONE);
@@ -5150,7 +5167,29 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             .show();
     }
 
+    /** Clip button: pick an image (native vision parts), pick any file
+     * (copied into the session attachments dir), or type a path (legacy —
+     * used as-is). Chips preview below the composer; tap one to remove. */
     private void showAttachDialog() {
+        new MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.ai_attach_file)
+            .setItems(new String[]{"Choose image", "Choose file", "Type a path"}, (dialog, which) -> {
+                if (which == 0) {
+                    Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                    intent.addCategory(Intent.CATEGORY_OPENABLE);
+                    intent.setType("image/*");
+                    startActivityForResult(intent, REQUEST_PICK_IMAGE);
+                } else if (which == 1) {
+                    Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                    intent.addCategory(Intent.CATEGORY_OPENABLE);
+                    intent.setType("*/*");
+                    startActivityForResult(intent, REQUEST_PICK_FILE);
+                } else showAttachPathDialog();
+            })
+            .show();
+    }
+
+    private void showAttachPathDialog() {
         EditText pathInput = new EditText(this);
         pathInput.setSingleLine(true);
         pathInput.setHint(R.string.ai_attach_file_hint);
@@ -5160,12 +5199,44 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             .setNegativeButton(android.R.string.cancel, null)
             .setPositiveButton(R.string.ai_continue, (dialog, which) -> {
                 String path = pathInput.getText().toString().trim();
-                if (!path.isEmpty()) {
-                    mAttachedPaths.add(path);
+                if (path.isEmpty()) return;
+                JSONObject record = AiAttachments.importFile(new File(path), attachmentSessionId());
+                if (record == null) {
+                    // Unreadable as a file (content URI, huge, missing) —
+                    // keep the legacy behavior: pass the raw path through.
+                    try {
+                        record = new JSONObject().put("name", path).put("path", path)
+                            .put("mime", "text/plain").put("isImage", false);
+                    } catch (Exception ignored) {}
+                }
+                if (record != null) {
+                    mAttachments.put(record);
                     refreshAttachments();
                 }
             })
             .show();
+    }
+
+    private String attachmentSessionId() {
+        return TextUtils.isEmpty(mCurrentRunId) ? "pending" : mCurrentRunId;
+    }
+
+    private void importAttachmentUri(Uri uri) {
+        if (uri == null) return;
+        new Thread(() -> {
+            JSONObject record = AiAttachments.importUri(getContentResolver(), uri, attachmentSessionId());
+            runOnUiThread(() -> {
+                if (record == null) {
+                    showError("Could not import that file (too large or unreadable).");
+                    return;
+                }
+                mAttachments.put(record);
+                refreshAttachments();
+                if (!AiAttachments.isImageRecord(record)) {
+                    setStatus("Attached '" + record.optString("name", "file") + "'.", false);
+                }
+            });
+        }, "attachment-import").start();
     }
 
     private void syncControlLabels() {
@@ -5182,17 +5253,67 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
 
     private void refreshAttachments() {
         mAttachmentList.removeAllViews();
-        for (String path : mAttachedPaths) {
+        for (int i = 0; i < mAttachments.length(); i++) {
+            JSONObject record = mAttachments.optJSONObject(i);
+            if (record == null) continue;
+            String name = record.optString("name", "?");
+            final int index = i;
+            if (AiAttachments.isImageRecord(record)) {
+                android.widget.ImageView thumb = new android.widget.ImageView(this);
+                thumb.setImageBitmap(decodeThumb(new File(record.optString("path", "")), dp(56)));
+                thumb.setBackgroundResource(R.drawable.bg_ai_chip);
+                thumb.setPadding(dp(3), dp(3), dp(3), dp(3));
+                thumb.setContentDescription(name + " (tap to remove)");
+                thumb.setOnClickListener(v -> removeAttachment(index));
+                LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(dp(62), dp(62));
+                params.setMargins(0, 0, dp(8), dp(6));
+                mAttachmentList.addView(thumb, params);
+                continue;
+            }
             TextView chip = new TextView(this);
-            chip.setText(path);
+            chip.setText(name + " ✕");
             chip.setTextColor(color(R.color.ai_text));
             chip.setTextSize(12);
             chip.setPadding(dp(12), dp(6), dp(12), dp(6));
             chip.setBackgroundResource(R.drawable.bg_ai_chip);
+            chip.setOnClickListener(v -> removeAttachment(index));
             LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
             params.setMargins(0, 0, dp(8), dp(6));
             mAttachmentList.addView(chip, params);
+        }
+    }
+
+    private void removeAttachment(int index) {
+        try {
+            JSONObject record = mAttachments.optJSONObject(index);
+            if (record != null) AiAttachments.removeRecord(record);
+            if (android.os.Build.VERSION.SDK_INT >= 19) {
+                JSONArray kept = new JSONArray();
+                for (int i = 0; i < mAttachments.length(); i++) {
+                    if (i != index) kept.put(mAttachments.opt(i));
+                }
+                while (mAttachments.length() > 0) mAttachments.remove(0);
+                for (int i = 0; i < kept.length(); i++) mAttachments.put(kept.opt(i));
+            }
+        } catch (Exception ignored) {}
+        refreshAttachments();
+    }
+
+    private android.graphics.Bitmap decodeThumb(File file, int targetPx) {
+        if (file == null || !file.isFile()) return null;
+        try {
+            android.graphics.BitmapFactory.Options bounds = new android.graphics.BitmapFactory.Options();
+            bounds.inJustDecodeBounds = true;
+            android.graphics.BitmapFactory.decodeFile(file.getAbsolutePath(), bounds);
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null;
+            int sample = 1;
+            while (Math.max(bounds.outWidth, bounds.outHeight) / sample > targetPx * 2) sample *= 2;
+            android.graphics.BitmapFactory.Options opts = new android.graphics.BitmapFactory.Options();
+            opts.inSampleSize = sample;
+            return android.graphics.BitmapFactory.decodeFile(file.getAbsolutePath(), opts);
+        } catch (Exception e) {
+            return null;
         }
     }
 
@@ -5248,6 +5369,11 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     @Override
     protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if ((requestCode == REQUEST_PICK_IMAGE || requestCode == REQUEST_PICK_FILE)
+            && resultCode == RESULT_OK && data != null && data.getData() != null) {
+            importAttachmentUri(data.getData());
+            return;
+        }
         if (requestCode != REQUEST_PICK_WORKSPACE || resultCode != RESULT_OK || data == null || data.getData() == null)
             return;
         Uri uri = data.getData();
@@ -5413,7 +5539,36 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     }
 
     private void addUserMessage(String text) {
-        addBubble("You", text, true, R.drawable.bg_ai_user_bubble, R.color.ai_text);
+        addUserMessage(text, null);
+    }
+
+    /** User bubble with attached image thumbnails (vision port). */
+    private void addUserMessage(String text, @Nullable JSONArray images) {
+        TextView bubble = addBubble("You", text, true, R.drawable.bg_ai_user_bubble, R.color.ai_text);
+        if (images == null || images.length() == 0) return;
+        ViewParent parent = bubble.getParent();
+        if (!(parent instanceof LinearLayout)) return;
+        LinearLayout wrapper = (LinearLayout) parent;
+        LinearLayout thumbs = new LinearLayout(this);
+        thumbs.setOrientation(LinearLayout.HORIZONTAL);
+        thumbs.setGravity(Gravity.END);
+        LinearLayout.LayoutParams thumbsLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        thumbsLp.setMargins(0, dp(6), 0, 0);
+        for (int i = 0; i < images.length(); i++) {
+            JSONObject img = images.optJSONObject(i);
+            if (img == null) continue;
+            android.graphics.Bitmap bitmap =
+                decodeThumb(new File(img.optString("path", "")), dp(112));
+            if (bitmap == null) continue;
+            android.widget.ImageView thumb = new android.widget.ImageView(this);
+            thumb.setImageBitmap(bitmap);
+            thumb.setContentDescription(img.optString("name", "attached image"));
+            LinearLayout.LayoutParams thumbLp = new LinearLayout.LayoutParams(dp(120), dp(120));
+            thumbLp.setMargins(dp(6), 0, 0, 0);
+            thumbs.addView(thumb, thumbLp);
+        }
+        if (thumbs.getChildCount() > 0) wrapper.addView(thumbs, thumbsLp);
     }
 
     private void appendAgentDelta(String text) {
@@ -6091,7 +6246,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             if (TextUtils.isEmpty(content) || content.trim().isEmpty()) continue;
             if ("Thinking…".equals(content.trim()) || "Thinking...".equals(content.trim())) continue; // legacy placeholder rows
             if ("user".equals(role)) {
-                addUserMessage(content);
+                addUserMessage(content, row.optJSONArray("images"));
                 rendered++;
             } else if ("assistant".equals(role)) {
                 addBubble("Agent", content, false, R.drawable.bg_ai_agent_bubble, R.color.ai_text);

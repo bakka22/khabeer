@@ -109,14 +109,25 @@ edit/delete, Skills PLUGINS section (install/enable/delete/diagnostics).
 Unit-verified (round-trip, collisions, MCP sync, broken-manifest
 diagnostics). Live-verified (grid tile, dialog, section, no crashes).
 
-## 6. Vision/image inputs + clip button — Status: NOT STARTED
+## 6. Vision/image inputs + clip button — Status: DONE (unit + live verified)
 
-Hermes map: vision toolset, image message parts per provider dialect,
-attachment lifecycle.
-(Deep map to be filled during implementation.)
+Hermes map: `tools/vision_tools.py` (`vision_analyze` with size/type
+guards, Gemini via OpenRouter), `tools/image_source.py` (resolve errors,
+SSRF/path guards), `agent/codex_responses_adapter.py`
+(`input_image` user-only — assistant image parts brick replay, #96816).
 
-App plan: TBD. The chat clip button is currently poorly implemented
-and must be reworked as part of this feature.
+App implementation: `AiAttachments` (per-session dirs, URI/path import,
+15 MB cap, 1568px JPEG downscale, refs-only persistence, 4/message cap),
+`messages.images_json` (v20), native parts per dialect (chat
+`image_url`, responses/codex `input_image`, anthropic base64 blocks —
+all user-messages-only), refs survive resume/compaction/branch/undo,
+missing files degrade to placeholders. Clip reworked: Choose
+image/file pickers + type-a-path, thumbnail chips with tap-remove,
+bubble thumbnails on send and rebuild. Unit-verified (all four wire
+shapes byte-exact, degradation, guards — caught and fixed a real
+`put(0)`-replaces image-drop bug). Live-verified (import, chips,
+persistence, no crashes). Model-side sighting needs a vision-capable
+model; text-only test models stayed blind as expected.
 
 ## 7. Web access — Status: NOT STARTED
 
