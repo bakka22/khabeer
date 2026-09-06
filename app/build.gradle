@@ -88,6 +88,12 @@ android {
             storePassword 'xrj45yWGLbsO7W0v'
             keyPassword 'xrj45yWGLbsO7W0v'
         }
+        release {
+            storeFile file(System.getenv("KHABEER_KEYSTORE_PATH") ?: "../.signing/khabeer-release.jks")
+            storePassword System.getenv("KHABEER_STORE_PASSWORD") ?: "YOUR_STORE_PASSWORD"
+            keyAlias System.getenv("KHABEER_KEY_ALIAS") ?: "YOUR_KEY_ALIAS"
+            keyPassword System.getenv("KHABEER_KEY_PASSWORD") ?: "YOUR_KEY_PASSWORD"
+        }
     }
 
     buildTypes {
@@ -95,6 +101,7 @@ android {
             minifyEnabled true
             shrinkResources false // Reproducible builds
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            signingConfig signingConfigs.release
         }
 
         debug {
