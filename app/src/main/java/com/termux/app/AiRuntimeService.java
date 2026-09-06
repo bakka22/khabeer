@@ -61,6 +61,16 @@ public final class AiRuntimeService extends Service {
 
     private static final int NOTIFICATION_ID = 2401;
     private static final String CHANNEL_ID = "termux_ai_runtime";
+    private static final String CHANNEL_APPROVAL = "khabeer_approval";
+    private static final String CHANNEL_DONE = "khabeer_done";
+    private static final int NOTIF_APPROVAL_BASE = 2500;
+    private static final int NOTIF_DONE_BASE = 2600;
+    public static final String ACTION_APPROVAL_ALLOW = "com.termux.app.AI_APPROVAL_ALLOW";
+    public static final String ACTION_APPROVAL_DENY = "com.termux.app.AI_APPROVAL_DENY";
+    public static final String EXTRA_REQUEST_ID = "com.termux.app.extra.APPROVAL_REQUEST_ID";
+    public static final String EXTRA_RUN_ID = "com.termux.app.extra.RUN_ID";
+    private volatile boolean mUiVisible = false;
+    private final java.util.Set<Integer> mSessionNotifIds = new java.util.HashSet<>();
     private static final int MAX_MODEL_STEPS = 80;
     /** Bounded child turns (Hermes leaf discipline): fewer steps than a
      * full session turn, plus a wall-clock timeout in runDelegateTask. */
@@ -245,6 +255,7 @@ public final class AiRuntimeService extends Service {
         ctx.record.state = AiRunStateMachine.State.FAILED;
         persistRun(ctx);
         notifyError(ctx.record.id, ctx.record.lastError);
+        postCompletionNotification(ctx, true, ctx.record.lastError);
     }
 
     /** Adds one provider usage object to the turn ledger. Accepts OpenAI
@@ -340,6 +351,7 @@ public final class AiRuntimeService extends Service {
         if (isQuiet()) return;
         if (!"ai".equals(ctx.record.titleSource)) generateSessionTitleAsync(ctx.record.id);
         maybeRunMemoryReview(ctx);
+        postCompletionNotification(ctx, false, null);
     }
 
     @Override
@@ -409,7 +421,151 @@ private void restoreLatestActiveRun() {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        if (intent != null) {
+            String action = intent.getAction();
+            if (ACTION_APPROVAL_ALLOW.equals(action) || ACTION_APPROVAL_DENY.equals(action)) {
+                long reqId = intent.getLongExtra(EXTRA_REQUEST_ID, -1);
+                if (reqId >= 0) {
+                    JSONObject result = new JSONObject();
+                    try { result.put("approved", ACTION_APPROVAL_ALLOW.equals(action)); } catch (Exception ignored) {}
+                    respondToRequest(reqId, result);
+                }
+                return START_STICKY;
+            }
+        }
         return START_STICKY;
+    }
+
+    public void setUiVisible(boolean visible) {
+        mUiVisible = visible;
+        if (visible) { clearSessionNotifications(); return; }
+        for (Map.Entry<Long, PendingApproval> entry : new java.util.ArrayList<>(mPendingApprovals.entrySet())) {
+            PendingApproval pending = entry.getValue();
+            if (pending != null) postApprovalNotification(entry.getKey(), pending.runId, pending.command, pending.workspace);
+        }
+    }
+
+    public void clearSessionNotifications() {
+        try {
+            NotificationManager manager = getSystemService(NotificationManager.class);
+            if (manager == null) return;
+            synchronized (mSessionNotifIds) {
+                for (int id : new java.util.ArrayList<>(mSessionNotifIds)) {
+                    try { manager.cancel(id); } catch (Exception ignored) {}
+                }
+                mSessionNotifIds.clear();
+            }
+        } catch (Exception ignored) {}
+    }
+
+    /** Payload of a still-pending approval, or null once answered/timed out.
+     * Lets the UI re-show the dialog when returning from background. */
+    public JSONObject getPendingApprovalPayload(long id) {
+        PendingApproval approval = mPendingApprovals.get(id);
+        return approval == null ? null : approval.payload;
+    }
+
+    public void cancelApprovalNotification(long requestId) {
+        try {
+            NotificationManager manager = getSystemService(NotificationManager.class);
+            if (manager == null) return;
+            int id = approvalNotifId(requestId);
+            try { manager.cancel(id); } catch (Exception ignored) {}
+            synchronized (mSessionNotifIds) { mSessionNotifIds.remove(id); }
+        } catch (Exception ignored) {}
+    }
+
+    private static int approvalNotifId(long requestId) {
+        return NOTIF_APPROVAL_BASE + (int) (Math.abs(requestId) % 800);
+    }
+
+    private static int doneNotifId(String runId) {
+        return NOTIF_DONE_BASE + (runId == null ? 0 : Math.abs(runId.hashCode()) % 800);
+    }
+
+    private boolean shouldNotify() {
+        return !mUiVisible;
+    }
+
+    private android.app.PendingIntent openSessionIntent(String runId, int code) {
+        Intent open = new Intent(this, AiActivity.class);
+        open.setAction("com.termux.app.OPEN_SESSION");
+        if (runId != null) open.putExtra(AiActivity.EXTRA_OPEN_RUN_ID, runId);
+        open.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        int flags = android.app.PendingIntent.FLAG_UPDATE_CURRENT;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) flags |= android.app.PendingIntent.FLAG_IMMUTABLE;
+        return android.app.PendingIntent.getActivity(this, code, open, flags);
+    }
+
+    private void postApprovalNotification(long requestId, String runId, String command, String workspace) {
+        if (!shouldNotify()) return;
+        try {
+            String cmd = command == null ? "" : command;
+            if (cmd.length() > 200) cmd = cmd.substring(0, 200) + "…";
+            android.app.PendingIntent open = openSessionIntent(runId, 1000 + approvalNotifId(requestId));
+            Intent allow = new Intent(this, AiRuntimeService.class);
+            allow.setAction(ACTION_APPROVAL_ALLOW);
+            allow.putExtra(EXTRA_REQUEST_ID, requestId);
+            Intent deny = new Intent(this, AiRuntimeService.class);
+            deny.setAction(ACTION_APPROVAL_DENY);
+            deny.putExtra(EXTRA_REQUEST_ID, requestId);
+            int flags = android.app.PendingIntent.FLAG_UPDATE_CURRENT;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) flags |= android.app.PendingIntent.FLAG_IMMUTABLE;
+            android.app.PendingIntent allowPi = android.app.PendingIntent.getService(this, (int) requestId * 2 + 1, allow, flags);
+            android.app.PendingIntent denyPi = android.app.PendingIntent.getService(this, (int) requestId * 2 + 2, deny, flags);
+            Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                ? new Notification.Builder(this, CHANNEL_APPROVAL)
+                : new Notification.Builder(this);
+            builder.setSmallIcon(R.drawable.ic_khabeer_notification)
+                .setContentTitle("Approval needed")
+                .setContentText(cmd.isEmpty() ? "The model wants to run a command." : cmd)
+                .setStyle(new Notification.BigTextStyle().bigText(
+                    (cmd.isEmpty() ? "The model wants to run a command." : cmd)
+                    + (workspace == null || workspace.isEmpty() ? "" : "\n" + workspace)))
+                .setContentIntent(open)
+                .addAction(new Notification.Action.Builder(null, "Allow", allowPi).build())
+                .addAction(new Notification.Action.Builder(null, "Deny", denyPi).build())
+                .setAutoCancel(false)
+                .setOngoing(true);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) builder.setTimeoutAfter(APPROVAL_AUTO_DENY_MS);
+            NotificationManager manager = getSystemService(NotificationManager.class);
+            if (manager == null) return;
+            int id = approvalNotifId(requestId);
+            manager.notify(id, builder.build());
+            synchronized (mSessionNotifIds) { mSessionNotifIds.add(id); }
+        } catch (Exception ignored) {}
+    }
+
+    private void postCompletionNotification(RunContext ctx, boolean failed, @Nullable String error) {
+        if (ctx == null || ctx.record == null) return;
+        if (isQuiet()) return;
+        if (!shouldNotify()) return;
+        try {
+            String runId = ctx.record.id;
+            String title = ctx.record.title;
+            if (TextUtils.isEmpty(title)) title = failed ? "Session failed" : "Session finished";
+            String body;
+            if (failed) body = error == null ? "The turn failed." : error;
+            else {
+                body = lastAssistantText(ctx.chatMessages);
+                if (TextUtils.isEmpty(body)) body = "The model finished the turn.";
+            }
+            String shortBody = body.length() > 160 ? body.substring(0, 160) + "…" : body;
+            Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                ? new Notification.Builder(this, CHANNEL_DONE)
+                : new Notification.Builder(this);
+            builder.setSmallIcon(R.drawable.ic_khabeer_notification)
+                .setContentTitle(title)
+                .setContentText(shortBody)
+                .setStyle(new Notification.BigTextStyle().bigText(body))
+                .setContentIntent(openSessionIntent(runId, 2000 + doneNotifId(runId)))
+                .setAutoCancel(true);
+            NotificationManager manager = getSystemService(NotificationManager.class);
+            if (manager == null) return;
+            int id = doneNotifId(runId);
+            manager.notify(id, builder.build());
+            synchronized (mSessionNotifIds) { mSessionNotifIds.add(id); }
+        } catch (Exception ignored) {}
     }
 
     @Override
@@ -1218,6 +1374,7 @@ public void interruptActiveRun() {
 
 public void respondToRequest(long id, JSONObject result) {
         PendingApproval approval = mPendingApprovals.remove(id);
+        cancelApprovalNotification(id);
         if (approval == null) return; // already answered or auto-denied by timeout
         approval.answer(result != null && result.optBoolean("approved", false));
         RunContext ctx = approval.runId == null ? null : mRuns.get(approval.runId);
@@ -3636,6 +3793,8 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         KhabeerInterruptManager.clearCurrentThread();
         long id = mNextRequestId++;
         PendingApproval approval = new PendingApproval(ctx().record.id);
+        approval.command = command;
+        approval.workspace = workspace;
         mPendingApprovals.put(id, approval);
         KhabeerSessionState ss = sessionState(ctx().record.sessionKey == null ? ctx().record.id : ctx().record.sessionKey);
         ss.persistent.pendingApproval = command;
@@ -3649,8 +3808,11 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
             payload.put("reason", "The model wants to run this command in Termux.");
         } catch (Exception ignored) {
         }
+        approval.payload = payload;
         emit("terminal/requestApproval", payload);
+        postApprovalNotification(id, ctx().record.id, command, workspace);
         boolean ans = approval.await();
+        cancelApprovalNotification(id);
         ss.persistent.pendingApproval = null;
         return ans;
     }
@@ -4256,7 +4418,7 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
             ? new Notification.Builder(this, CHANNEL_ID)
             : new Notification.Builder(this);
         return builder
-            .setSmallIcon(R.drawable.ic_service_notification)
+            .setSmallIcon(R.drawable.ic_khabeer_notification)
             .setContentTitle(getString(R.string.ai_app_title))
             .setContentText(getString(R.string.ai_runtime_active))
             .setContentIntent(pendingIntent)
@@ -4267,8 +4429,13 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return;
         NotificationManager manager = getSystemService(NotificationManager.class);
+        if (manager == null) return;
         manager.createNotificationChannel(new NotificationChannel(CHANNEL_ID,
             getString(R.string.ai_app_title), NotificationManager.IMPORTANCE_LOW));
+        manager.createNotificationChannel(new NotificationChannel(CHANNEL_APPROVAL,
+            "Approvals", NotificationManager.IMPORTANCE_HIGH));
+        manager.createNotificationChannel(new NotificationChannel(CHANNEL_DONE,
+            "Finished sessions", NotificationManager.IMPORTANCE_DEFAULT));
     }
 
     private final java.util.concurrent.atomic.AtomicBoolean mTitleBusy = new java.util.concurrent.atomic.AtomicBoolean(false);
@@ -4460,6 +4627,9 @@ public void backfillSessionTitles() {
         private final CountDownLatch latch = new CountDownLatch(1);
         private volatile boolean approved;
         final String runId;
+        volatile String command;
+        volatile String workspace;
+        volatile JSONObject payload;
 
         PendingApproval(String runId) { this.runId = runId; }
 

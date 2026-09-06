@@ -88,6 +88,9 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     private static final int REASONING_FLUSH_DELAY_MS = 250;
     private static final int MAX_VISIBLE_REASONING_CHARS = 12000;
 
+    public static final String EXTRA_OPEN_RUN_ID = "com.termux.app.extra.OPEN_RUN_ID";
+    private String mPendingOpenRunId;
+    private boolean mResumed;
     private final Set<Long> mDisplayedRequestIds = new HashSet<>();
     private androidx.appcompat.app.AlertDialog mApprovalDialog;
     private Runnable mApprovalCountdown;
@@ -221,8 +224,15 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             mRuntimeBound = true;
             mRuntimeService = ((AiRuntimeService.LocalBinder) service).getService();
             mRuntimeService.addListener(AiActivity.this);
+            mRuntimeService.setUiVisible(mResumed);
+            if (mResumed) mRuntimeService.clearSessionNotifications();
             refreshRecentRuns();
             setStatus("Native agent runtime ready.", false);
+            if (mPendingOpenRunId != null) {
+                String runId = mPendingOpenRunId;
+                mPendingOpenRunId = null;
+                openResumedSession(runId);
+            }
         }
 
         @Override
@@ -269,10 +279,62 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     }
 
     @Override
+    protected void onResume() {
+        super.onResume();
+        mResumed = true;
+        if (mRuntimeService != null) {
+            mRuntimeService.setUiVisible(true);
+            mRuntimeService.clearSessionNotifications();
+            for (long id : new java.util.ArrayList<>(mDisplayedRequestIds)) {
+                JSONObject pending = mRuntimeService.getPendingApprovalPayload(id);
+                if (pending == null) mDisplayedRequestIds.remove(id);
+                else if (mApprovalDialog == null)
+                    showApprovalDialog(id, pending.optString("command", pending.optString("cwd", "")));
+            }
+        }
+        handleNotificationIntent(getIntent());
+    }
+
+    @Override
+    protected void onPause() {
+        mResumed = false;
+        if (mRuntimeService != null) mRuntimeService.setUiVisible(false);
+        super.onPause();
+    }
+
+    @Override
+    protected void onNewIntent(android.content.Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleNotificationIntent(intent);
+    }
+
+    private void handleNotificationIntent(android.content.Intent intent) {
+        if (intent == null || mRuntimeService == null || !mRuntimeBound) {
+            if (intent != null && intent.hasExtra(EXTRA_OPEN_RUN_ID))
+                mPendingOpenRunId = intent.getStringExtra(EXTRA_OPEN_RUN_ID);
+            if (intent != null) intent.removeExtra(EXTRA_OPEN_RUN_ID);
+            return;
+        }
+        String runId = intent.getStringExtra(EXTRA_OPEN_RUN_ID);
+        intent.removeExtra(EXTRA_OPEN_RUN_ID);
+        if (runId == null || runId.isEmpty()) return;
+        AiDatabase.RunRecord active = mRuntimeService.getActiveRun();
+        if (active != null && runId.equals(active.id)) {
+            showChatPage();
+            return;
+        }
+        openResumedSession(runId);
+    }
+
+    @Override
     protected void onDestroy() {
         mUiHandler.removeCallbacks(mThinkingAnimator);
         mUiHandler.removeCallbacks(mReasoningFlusher);
-        if (mRuntimeService != null) mRuntimeService.removeListener(this);
+        if (mRuntimeService != null) {
+            mRuntimeService.setUiVisible(false);
+            mRuntimeService.removeListener(this);
+        }
         if (mRuntimeBound) unbindService(mRuntimeConnection);
         if (mTermuxBound) unbindService(mTermuxConnection);
         super.onDestroy();
@@ -6017,7 +6079,14 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         long id = payload.optLong("_requestId", -1);
         if (id < 0 || mDisplayedRequestIds.contains(id)) return;
         mDisplayedRequestIds.add(id);
-        String command = payload.optString("command", payload.optString("cwd", ""));
+        // Backgrounded: leave the Allow/Deny notification up; the dialog
+        // reappears on return (onResume re-shows still-pending approvals).
+        if (!mResumed) return;
+        showApprovalDialog(id, payload.optString("command", payload.optString("cwd", "")));
+    }
+
+    private void showApprovalDialog(long id, String command) {
+        if (mRuntimeService != null) mRuntimeService.cancelApprovalNotification(id);
         // The dialog must never be dismissible from outside taps or the back
         // button — a dismissed dialog would leave the turn wedged in
         // WAITING_APPROVAL. A visible countdown auto-denies on inactivity.

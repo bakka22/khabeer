@@ -808,7 +808,7 @@ public final class TermuxService extends Service implements AppShell.AppShellCli
         // Build the notification
         Notification.Builder builder =  NotificationUtils.geNotificationBuilder(this,
             TermuxConstants.TERMUX_APP_NOTIFICATION_CHANNEL_ID, priority,
-            TermuxConstants.TERMUX_APP_NAME, notificationText, null,
+            res.getString(R.string.ai_app_title), notificationText, null,
             contentIntent, null, NotificationUtils.NOTIFICATION_MODE_SILENT);
         if (builder == null)  return null;
 
@@ -816,7 +816,7 @@ public final class TermuxService extends Service implements AppShell.AppShellCli
         builder.setShowWhen(false);
 
         // Set notification icon
-        builder.setSmallIcon(R.drawable.ic_service_notification);
+        builder.setSmallIcon(R.drawable.ic_khabeer_notification);
 
         // Set background color for small notification icon
         builder.setColor(0xFF607D8B);
