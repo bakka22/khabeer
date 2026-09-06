@@ -161,6 +161,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     private View mOpenCodePage;
     private View mExtensionsPage;
     private LinearLayout mExtensionsList;
+    private String mExtensionsTab = "skills";
     private MaterialButton mExtensionsButton;
     private LinearLayout mArchivedRuns;
     private View mProvidersHeader;
@@ -276,6 +277,31 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mChatTitle.setText("khabeer");
         bindRuntime();
         bindTermux();
+        ensureNotificationPermission();
+    }
+
+    private static final int REQUEST_POST_NOTIFICATIONS = 9001;
+
+    /** Android 13+ needs an explicit grant before background approval and
+     * finish alerts can appear. Asked once per install; a denial just
+     * disables those alerts with a status note. */
+    private void ensureNotificationPermission() {
+        if (android.os.Build.VERSION.SDK_INT < 33) return;
+        if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+            == android.content.pm.PackageManager.PERMISSION_GRANTED) return;
+        if (getPreferences(MODE_PRIVATE).getBoolean("notif_perm_asked", false)) return;
+        getPreferences(MODE_PRIVATE).edit().putBoolean("notif_perm_asked", true).apply();
+        requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, REQUEST_POST_NOTIFICATIONS);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != REQUEST_POST_NOTIFICATIONS) return;
+        boolean granted = grantResults != null && grantResults.length > 0
+            && grantResults[0] == android.content.pm.PackageManager.PERMISSION_GRANTED;
+        setStatus(granted ? "Notifications on — approvals and finish alerts will appear when the app is backgrounded."
+            : "Notifications off — approval and finish alerts are disabled. Re-enable in system settings.", !granted);
     }
 
     @Override
@@ -2125,6 +2151,11 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     private void refreshExtensionsPage() {
         if (mExtensionsList == null) return;
         mExtensionsList.removeAllViews();
+        mExtensionsList.addView(buildExtensionsPicker());
+        if ("mcps".equals(mExtensionsTab)) {
+            buildMcpSection();
+            return;
+        }
 
         TextView title = new TextView(this);
         title.setText("Skills");
@@ -2261,7 +2292,48 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         }
         buildArchivedSkillsSection();
         buildPluginSection();
-        buildMcpSection();
+    }
+
+    /** Skills | MCPs picker: each tab shows only its own section so the
+     * long skills list no longer buries the servers. */
+    private View buildExtensionsPicker() {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        rowLp.setMargins(0, dp(4), 0, dp(12));
+        row.setLayoutParams(rowLp);
+        row.addView(extensionsTabButton("Skills", "skills"));
+        row.addView(extensionsTabButton("MCPs", "mcps"));
+        return row;
+    }
+
+    private View extensionsTabButton(String label, String tab) {
+        boolean selected = tab.equals(mExtensionsTab);
+        MaterialButton button = new MaterialButton(this);
+        button.setText(label);
+        button.setTextSize(13);
+        button.setAllCaps(false);
+        button.setCornerRadius(dp(10));
+        if (selected) {
+            button.setTextColor(0xFFFFFFFF);
+            button.setBackgroundTintList(android.content.res.ColorStateList.valueOf(color(R.color.ai_accent)));
+            button.setStrokeWidth(0);
+        } else {
+            button.setTextColor(color(R.color.ai_text));
+            button.setBackgroundTintList(android.content.res.ColorStateList.valueOf(color(R.color.ai_surface)));
+            button.setStrokeColor(android.content.res.ColorStateList.valueOf(color(R.color.ai_border)));
+            button.setStrokeWidth(dp(1));
+        }
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        lp.setMargins(0, 0, dp(8), 0);
+        button.setLayoutParams(lp);
+        button.setOnClickListener(v -> {
+            mExtensionsTab = tab;
+            refreshExtensionsPage();
+        });
+        return button;
     }
 
     /** Plugin packages (Hermes portable contract): install from URL,

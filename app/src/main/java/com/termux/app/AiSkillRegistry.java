@@ -862,7 +862,9 @@ public final class AiSkillRegistry {
 
     private static void copyAssetDir(Context context, String assetPath, File target) {
         try {
-            if (target.exists()) return; // never overwrite user-visible state
+            // No early return on existing dirs: a previous run may have died
+            // mid-copy, and files below are still skipped individually, so
+            // user-visible state is never overwritten — partial seeds resume.
             String[] children = context.getAssets().list(assetPath);
             if (children == null) return;
             if (children.length == 0) return;
@@ -879,6 +881,7 @@ public final class AiSkillRegistry {
 
     private static void copyAssetFile(Context context, String assetPath, File target) {
         try {
+            if (target.exists()) return; // never overwrite user-visible state
             target.getParentFile().mkdirs();
             try (InputStream in = context.getAssets().open(assetPath);
                  FileOutputStream out = new FileOutputStream(target)) {
