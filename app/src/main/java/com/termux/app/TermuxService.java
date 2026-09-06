@@ -817,7 +817,6 @@ public final class TermuxService extends Service implements AppShell.AppShellCli
 
         // Set notification icon
         builder.setSmallIcon(R.drawable.ic_khabeer_notification);
-        builder.setLargeIcon(android.graphics.BitmapFactory.decodeResource(res, R.mipmap.ic_khabeer));
 
         // Set background color for small notification icon
         builder.setColor(0xFF607D8B);

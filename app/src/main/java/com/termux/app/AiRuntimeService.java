@@ -517,7 +517,6 @@ private void restoreLatestActiveRun() {
                 ? new Notification.Builder(this, CHANNEL_APPROVAL)
                 : new Notification.Builder(this);
             builder.setSmallIcon(R.drawable.ic_khabeer_notification)
-                .setLargeIcon(android.graphics.BitmapFactory.decodeResource(getResources(), R.mipmap.ic_khabeer))
                 .setContentTitle("Approval needed")
                 .setContentText(cmd.isEmpty() ? "The model wants to run a command." : cmd)
                 .setStyle(new Notification.BigTextStyle().bigText(
@@ -556,7 +555,6 @@ private void restoreLatestActiveRun() {
                 ? new Notification.Builder(this, CHANNEL_DONE)
                 : new Notification.Builder(this);
             builder.setSmallIcon(R.drawable.ic_khabeer_notification)
-                .setLargeIcon(android.graphics.BitmapFactory.decodeResource(getResources(), R.mipmap.ic_khabeer))
                 .setContentTitle(title)
                 .setContentText(shortBody)
                 .setStyle(new Notification.BigTextStyle().bigText(body))
@@ -4421,7 +4419,6 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
             : new Notification.Builder(this);
         return builder
             .setSmallIcon(R.drawable.ic_khabeer_notification)
-            .setLargeIcon(android.graphics.BitmapFactory.decodeResource(getResources(), R.mipmap.ic_khabeer))
             .setContentTitle(getString(R.string.ai_app_title))
             .setContentText(getString(R.string.ai_runtime_active))
             .setContentIntent(pendingIntent)
