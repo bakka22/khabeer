@@ -2260,16 +2260,33 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
 
         Set<String> disabled = AiSkillRegistry.readDisabled();
         List<AiSkillRegistry.Skill> skills = AiSkillRegistry.listSkills();
+        // Badge sets computed once: per-card curator/registry reads were
+        // O(n^2) file I/O on the UI thread (ANR with 80+ skills).
+        Set<String> staleSet = new HashSet<>();
+        try { staleSet.addAll(AiSkillCurator.staleSkills(mProviderConfig)); } catch (Exception ignored) {}
+        Set<String> pinnedSet = new HashSet<>();
+        Set<String> managedSet = new HashSet<>();
+        Set<String> seededSet = new HashSet<>();
+        for (AiSkillRegistry.Skill skill : skills) {
+            if (skill == null || skill.name == null) continue;
+            if (AiSkillRegistry.isPinned(skill.name)) pinnedSet.add(skill.name);
+            if (AiSkillRegistry.isReviewManaged(skill.name)) managedSet.add(skill.name);
+            if (AiSkillRegistry.isSeeded(skill.name)) seededSet.add(skill.name);
+        }
         boolean anyVisible = false;
         for (AiSkillRegistry.Skill skill : skills) {
             if (!skill.platformSupported) continue;
             anyVisible = true;
-            mExtensionsList.addView(createSkillCard(skill, disabled.contains(skill.name)));
+            mExtensionsList.addView(createSkillCard(skill, disabled.contains(skill.name),
+                staleSet.contains(skill.name), pinnedSet.contains(skill.name),
+                managedSet.contains(skill.name), seededSet.contains(skill.name)));
         }
         for (AiSkillRegistry.Skill skill : skills) {
             if (skill.platformSupported) continue;
             anyVisible = true;
-            mExtensionsList.addView(createSkillCard(skill, true));
+            mExtensionsList.addView(createSkillCard(skill, true,
+                staleSet.contains(skill.name), pinnedSet.contains(skill.name),
+                managedSet.contains(skill.name), seededSet.contains(skill.name)));
         }
         if (!anyVisible) {
             TextView empty = new TextView(this);
@@ -3470,7 +3487,8 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         for (int i = 0; i < names.length(); i++) text.append("· ").append(names.optString(i)).append("\n");
     }
 
-    private View createSkillCard(AiSkillRegistry.Skill skill, boolean disabled) {
+    private View createSkillCard(AiSkillRegistry.Skill skill, boolean disabled,
+                                   boolean stale, boolean pinned, boolean managed, boolean isSeeded) {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
         card.setPadding(dp(14), dp(14), dp(14), dp(14));
@@ -3502,12 +3520,6 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         if (!TextUtils.isEmpty(skill.version)) metaText.append(" · v").append(skill.version);
         if (!skill.platformSupported) metaText.append(" · not available on Android");
         else if (disabled) metaText.append(" · disabled");
-        boolean pinned = AiSkillRegistry.isPinned(skill.name);
-        boolean managed = AiSkillRegistry.isReviewManaged(skill.name);
-        boolean stale = false;
-        try {
-            stale = AiSkillCurator.staleSkills(mProviderConfig).contains(skill.name);
-        } catch (Exception ignored) {}
         if (pinned) metaText.append(" · pinned");
         if (managed) metaText.append(" · auto-learned");
         if (stale) metaText.append(" · stale");
@@ -3537,7 +3549,6 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             card.addView(desc);
         }
 
-        boolean isSeeded = AiSkillRegistry.isSeeded(skill.name);
         if (isSeeded) {
             card.setOnClickListener(v -> showSkillViewer(skill));
             toggle.setOnClickListener(v -> {
@@ -3550,8 +3561,8 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         actionsLp.setMargins(0, dp(8), 0, 0);
         actions.setLayoutParams(actionsLp);
-        boolean isManaged = AiSkillRegistry.isReviewManaged(skill.name);
-        boolean isPinned = AiSkillRegistry.isPinned(skill.name);
+        boolean isManaged = managed;
+        boolean isPinned = pinned;
         MaterialButton pinBtn = smallMemoryButton(isPinned ? "Unpin" : "Pin");
         pinBtn.setOnClickListener(v -> {
             AiSkillRegistry.setPinned(skill.name, !isPinned);
