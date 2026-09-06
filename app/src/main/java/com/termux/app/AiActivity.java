@@ -109,7 +109,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     private View mSuggestionStrip;
     private View mTerminalCard;
     private LinearLayout mProviderGrid;
-    private LinearLayout mDrawerProviderList;
+
     private LinearLayout mChatMessages;
     private LinearLayout mAttachmentList;
     private EditText mWorkspaceInput;
@@ -164,13 +164,10 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     private String mExtensionsTab = "skills";
     private MaterialButton mExtensionsButton;
     private LinearLayout mArchivedRuns;
-    private View mProvidersHeader;
     private View mSessionsHeader;
     private View mArchivedHeader;
-    private TextView mProvidersChevron;
     private TextView mSessionsChevron;
     private TextView mArchivedChevron;
-    private boolean mProvidersExpanded;
     private boolean mSessionsExpanded;
     private boolean mArchivedExpanded;
     private String mCurrentRunId;
@@ -445,7 +442,6 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mSuggestionStrip = findViewById(R.id.ai_suggestion_strip);
         mTerminalCard = findViewById(R.id.ai_terminal_card);
         mProviderGrid = findViewById(R.id.ai_harness_grid);
-        mDrawerProviderList = findViewById(R.id.ai_drawer_harness_list);
         mChatMessages = findViewById(R.id.ai_chat_messages);
         mAttachmentList = findViewById(R.id.ai_attachment_list);
         mWorkspaceInput = findViewById(R.id.ai_workspace_input);
@@ -486,10 +482,8 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mExtensionsList = findViewById(R.id.ai_extensions_list);
         mExtensionsButton = findViewById(R.id.ai_extensions_button);
         mArchivedRuns = findViewById(R.id.ai_archived_runs);
-        mProvidersHeader = findViewById(R.id.ai_providers_header);
         mSessionsHeader = findViewById(R.id.ai_sessions_header);
         mArchivedHeader = findViewById(R.id.ai_archived_header);
-        mProvidersChevron = findViewById(R.id.ai_providers_chevron);
         mSessionsChevron = findViewById(R.id.ai_sessions_chevron);
         mArchivedChevron = findViewById(R.id.ai_archived_chevron);
         mTerminalTitle = findViewById(R.id.ai_terminal_title);
@@ -547,10 +541,6 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     }
 
     private void setupDrawerSections() {
-        if (mProvidersHeader != null) mProvidersHeader.setOnClickListener(v -> {
-            mProvidersExpanded = !mProvidersExpanded;
-            applySectionState();
-        });
         if (mSessionsHeader != null) mSessionsHeader.setOnClickListener(v -> {
             mSessionsExpanded = !mSessionsExpanded;
             applySectionState();
@@ -563,7 +553,6 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     }
 
     private void applySectionState() {
-        setSectionExpanded(mDrawerProviderList, mProvidersChevron, mProvidersExpanded);
         setSectionExpanded(mRecentRuns, mSessionsChevron, mSessionsExpanded);
         boolean hasArchived = mArchivedRuns != null && mArchivedRuns.getChildCount() > 0;
         if (mArchivedHeader != null) mArchivedHeader.setVisibility(hasArchived ? View.VISIBLE : View.GONE);
@@ -588,7 +577,11 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mBrowseButton.setOnClickListener(view -> pickWorkspace());
         mStorageButton.setOnClickListener(view -> ensureStorageAccess());
         mOpenShellButton.setOnClickListener(view -> {
-            openShell();
+            try {
+                startActivity(TermuxActivity.newInstance(AiActivity.this));
+            } catch (Exception e) {
+                showError("Unable to open the Termux shell.");
+            }
             if (mDrawer != null) mDrawer.closeDrawer(findViewById(R.id.ai_drawer_panel));
         });
         if (mExtensionsButton != null) mExtensionsButton.setOnClickListener(view -> {
@@ -617,10 +610,6 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
 
     private void setupProviderTiles() {
         showFeaturedProviders();
-        mDrawerProviderList.removeAllViews();
-        for (AiProviderProfile profile : AiProviderProfile.all()) {
-            mDrawerProviderList.addView(createProviderRow(profile));
-        }
     }
 
     private void showSessionsPage() {
@@ -4362,39 +4351,6 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         body.setTextSize(11);
         text.addView(body);
         return card;
-    }
-
-    private View createProviderRow(AiProviderProfile profile) {
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(dp(10), dp(10), dp(10), dp(10));
-        row.setClickable(true);
-        row.setFocusable(true);
-        row.setBackgroundResource(R.drawable.bg_provider_card);
-        LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        rowLp.setMargins(0, 0, 0, dp(6));
-        row.setLayoutParams(rowLp);
-
-        android.widget.ImageView icon = new android.widget.ImageView(this);
-        icon.setImageResource(iconForProvider(profile.id));
-        LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(dp(26), dp(26));
-        iconLp.setMargins(0, 0, dp(10), 0);
-        icon.setLayoutParams(iconLp);
-        row.addView(icon);
-
-        TextView label = new TextView(this);
-        label.setText(profile.name);
-        label.setTextColor(color(R.color.ai_text));
-        label.setTextSize(14);
-        row.addView(label);
-
-        row.setOnClickListener(view -> {
-            openProviderConfig(profile);
-            if (mDrawer != null) mDrawer.closeDrawer(findViewById(R.id.ai_drawer_panel));
-        });
-        return row;
     }
 
     /** Home-level configuration entry: opens a provider's config surface
