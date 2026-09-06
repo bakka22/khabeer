@@ -1,19 +1,16 @@
-name: "Feature request"
-description: "Suggest a new feature for Termux application"
-title: "[Feature]: "
-labels: ["feature request"]
+name: Feature request
+description: Suggest an improvement to Khabeer
+title: '[Feature]: '
 body:
   - type: textarea
+    id: problem
     attributes:
-      label: Feature description
-      description: Describe the feature and why you want it.
+      label: What problem should this solve?
     validations:
       required: true
   - type: textarea
+    id: proposal
     attributes:
-      label: Additional information
-      description: |
-        Does another app/terminal emulator have this feature?
-        Provide links to more background information.
+      label: Suggested behavior and alternatives
     validations:
       required: true

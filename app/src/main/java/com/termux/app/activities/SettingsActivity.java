@@ -59,6 +59,14 @@ public class SettingsActivity extends AppCompatActivity {
 
             setPreferencesFromResource(R.xml.root_preferences, rootKey);
 
+            Preference licenses = findPreference("khabeer_licenses");
+            if (licenses != null) {
+                licenses.setOnPreferenceClickListener(preference -> {
+                    if (getActivity() != null) com.termux.app.KhabeerLegalNotices.show(getActivity());
+                    return true;
+                });
+            }
+
             Preference appearance = findPreference("ai_theme_mode");
             if (appearance != null) {
                 appearance.setOnPreferenceChangeListener((preference, newValue) -> {
