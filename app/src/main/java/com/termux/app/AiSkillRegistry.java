@@ -648,6 +648,14 @@ public final class AiSkillRegistry {
             for (Skill s : listSkills()) {
                 if (!seeded.contains(s.name) && assetSkillExists(context, s.relPath)) seeded.add(s.name);
             }
+            // Retire: seeded skills dropped from the APK (replaced bundles)
+            // are removed from disk. User-added skills are never touched.
+            invalidate();
+            for (Skill s : listSkills()) {
+                if (seeded.contains(s.name) && !assetSkillExists(context, s.relPath)) {
+                    if (deleteRecursive(s.dir)) seeded.remove(s.name);
+                }
+            }
             writeSeededManifest(new java.util.ArrayList<>(seeded));
         } catch (Exception ignored) {}
         return renamed;

@@ -47,6 +47,11 @@
         app:key="about"
         app:title="@string/about_preference_title"
         app:persistent="false"/>
+    <Preference
+        app:key="khabeer_licenses"
+        app:title="Licenses &amp; acknowledgements"
+        app:summary="Termux, Hermes Agent, source code and offline license texts"
+        app:persistent="false"/>
     <!-- app:layout="@layout/preference_markdown_text" -->
 
     <Preference

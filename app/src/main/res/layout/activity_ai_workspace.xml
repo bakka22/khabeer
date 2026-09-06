@@ -45,7 +45,7 @@
                     android:layout_height="wrap_content" />
 
                 <TextView
-                    android:text="Your AI coding agent on Android"
+                    android:text="Your AI agent on Android"
                     android:textColor="@color/ai_text_muted"
                     android:textSize="11sp"
                     android:layout_width="wrap_content"

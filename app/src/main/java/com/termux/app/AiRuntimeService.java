@@ -377,8 +377,12 @@ public final class AiRuntimeService extends Service {
         mDatabase.rewriteMcpServerDataRoot(".katheer", ".khabeer");
         createNotificationChannel();
         startForeground(NOTIFICATION_ID, buildNotification());
-        // Seed bundled skills into $HOME/.khabeer/skills (existing files win).
-        Thread seeder = new Thread(() -> AiSkillRegistry.seedFromAssets(this), "skill-seeder");
+        // Seed bundled skills into $HOME/.khabeer/skills (existing files win)
+        // plus the hermes MCP catalog (missing servers only, disabled).
+        Thread seeder = new Thread(() -> {
+            AiSkillRegistry.seedFromAssets(this);
+            AiMcpRegistry.seedBundled(mDatabase, this);
+        }, "skill-seeder");
         seeder.setDaemon(true);
         seeder.start();
         // Late-binding MCP discovery (khabeer mcp_startup): never blocks a

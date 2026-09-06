@@ -984,6 +984,11 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             "Model search + page fetch. SearXNG when configured, else keyless DuckDuckGo; private hosts always refused.",
             "🌐",
             v -> showWebPage()));
+        morePage.addView(createMoreEntry(
+            "Licenses & acknowledgements",
+            "Termux, Hermes Agent, copyright notices, source code and license texts.",
+            "ⓘ",
+            v -> KhabeerLegalNotices.show(this)));
     }
 
     /** Web access settings (Hermes web backend ladder, mobile trim):
@@ -2097,8 +2102,6 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
                 AiThemeMode.set(this, which == 1 ? AiThemeMode.LIGHT : AiThemeMode.DARK);
                 dialog.dismiss();
             })
-            .setNeutralButton("Skills & extensions", (dialog, which) -> showExtensionsPage())
-            .setNegativeButton("Sessions", (dialog, which) -> showSessionsPage())
             .show();
     }
 
@@ -2184,21 +2187,6 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             setStatus("Skills refreshed.", false);
         });
         toolbar.addView(refresh);
-
-        MaterialButton check = new MaterialButton(this);
-        check.setText("Check library");
-        check.setTextSize(12);
-        check.setAllCaps(false);
-        check.setStrokeColor(android.content.res.ColorStateList.valueOf(color(R.color.ai_border)));
-        check.setBackgroundTintList(android.content.res.ColorStateList.valueOf(color(R.color.ai_surface)));
-        check.setTextColor(color(R.color.ai_text));
-        check.setCornerRadius(dp(10));
-        LinearLayout.LayoutParams checkLp = new LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        checkLp.setMargins(dp(8), 0, 0, 0);
-        check.setLayoutParams(checkLp);
-        check.setOnClickListener(v -> showCuratorDryRun());
-        toolbar.addView(check);
         mExtensionsList.addView(toolbar);
 
         TextView curatorStatus = new TextView(this);
@@ -2215,6 +2203,40 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         curatorStatus.setTextSize(11);
         curatorStatus.setPadding(0, 0, 0, dp(10));
         mExtensionsList.addView(curatorStatus);
+
+        LinearLayout checkRow = new LinearLayout(this);
+        checkRow.setOrientation(LinearLayout.HORIZONTAL);
+        checkRow.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams checkRowLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        checkRowLp.setMargins(0, 0, 0, dp(12));
+        checkRow.setLayoutParams(checkRowLp);
+
+        TextView checkHint = new TextView(this);
+        checkHint.setText("Check library scans every skill and proposes archiving ones unused for "
+            + (mProviderConfig == null ? 90 : mProviderConfig.getCuratorArchiveDays())
+            + " days. Bundled and pinned skills are never touched — you confirm before anything is archived.");
+        checkHint.setTextColor(color(R.color.ai_text_muted));
+        checkHint.setTextSize(11);
+        LinearLayout.LayoutParams checkHintLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        checkHint.setLayoutParams(checkHintLp);
+        checkRow.addView(checkHint);
+
+        MaterialButton check = new MaterialButton(this);
+        check.setText("Check library");
+        check.setTextSize(12);
+        check.setAllCaps(false);
+        check.setStrokeColor(android.content.res.ColorStateList.valueOf(color(R.color.ai_border)));
+        check.setBackgroundTintList(android.content.res.ColorStateList.valueOf(color(R.color.ai_surface)));
+        check.setTextColor(color(R.color.ai_text));
+        check.setCornerRadius(dp(10));
+        LinearLayout.LayoutParams checkLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        checkLp.setMargins(dp(8), 0, 0, 0);
+        check.setLayoutParams(checkLp);
+        check.setOnClickListener(v -> showCuratorDryRun());
+        checkRow.addView(check);
+        mExtensionsList.addView(checkRow);
 
         Set<String> disabled = AiSkillRegistry.readDisabled();
         List<AiSkillRegistry.Skill> skills = AiSkillRegistry.listSkills();

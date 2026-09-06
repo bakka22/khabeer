@@ -143,6 +143,46 @@ public final class AiMcpRegistry {
         return raw == null ? "" : raw.replaceAll("[^A-Za-z0-9_]", "_");
     }
 
+    /** Seeds the hermes MCP catalog (assets/mcp_catalog.json) into the DB.
+     * Only missing servers are inserted, disabled by default — the user
+     * enables what they want on the Skills·MCP page. Existing rows
+     * (user-added or user-configured) are never touched. */
+    public static void seedBundled(AiDatabase db, android.content.Context context) {
+        if (db == null || context == null) return;
+        try {
+            InputStream in = context.getAssets().open("mcp_catalog.json");
+            StringBuilder raw = new StringBuilder();
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) raw.append(line).append('\n');
+            }
+            JSONArray catalog = new JSONArray(raw.toString());
+            for (int i = 0; i < catalog.length(); i++) {
+                JSONObject entry = catalog.optJSONObject(i);
+                if (entry == null) continue;
+                String name = entry.optString("name", "").trim();
+                if (TextUtils.isEmpty(name) || db.getMcpServer(name) != null) continue;
+                AiDatabase.McpServerRecord r = new AiDatabase.McpServerRecord();
+                r.name = name;
+                r.transport = "stdio".equals(entry.optString("transport")) ? "stdio" : "http";
+                if ("stdio".equals(r.transport)) {
+                    r.command = entry.optString("command", "");
+                    JSONArray args = entry.optJSONArray("args");
+                    r.argsJson = args == null ? null : args.toString();
+                } else {
+                    r.url = entry.optString("url", "");
+                    if (TextUtils.isEmpty(r.url)) continue;
+                }
+                String auth = entry.optString("auth", "none");
+                r.authType = ("oauth".equals(auth) || "header".equals(auth)) ? auth : "none";
+                r.timeoutSeconds = 60;
+                r.enabled = false;
+                r.trust = "untrusted";
+                db.saveMcpServer(r);
+            }
+        } catch (Exception ignored) {}
+    }
+
     public void dropServer(String name) {
         McpTransport transport;
         synchronized (mLock) {
