@@ -5753,8 +5753,8 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         addUserMessage(text, null);
     }
 
-    /** User bubble with attached image thumbnails (vision port). Text goes
-     * first, photos beneath it; textless sends show the label plus photos. */
+    /** User bubble with attached image thumbnails (vision port). Photos go
+     * first, prompt text beneath them; textless sends show label plus photos. */
     private void addUserMessage(String text, @Nullable JSONArray images) {
         TextView bubble = addBubble("You", text, true, R.drawable.bg_ai_user_bubble, R.color.ai_text);
         if (images == null || images.length() == 0) return;
@@ -5767,7 +5767,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         thumbs.setGravity(Gravity.END);
         LinearLayout.LayoutParams thumbsLp = new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        thumbsLp.setMargins(0, dp(6), 0, 0);
+        thumbsLp.setMargins(0, dp(6), 0, dp(6));
         for (int i = 0; i < images.length(); i++) {
             JSONObject img = images.optJSONObject(i);
             if (img == null) continue;
@@ -5781,7 +5781,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             thumbLp.setMargins(dp(6), 0, 0, 0);
             thumbs.addView(thumb, thumbLp);
         }
-        if (thumbs.getChildCount() > 0) wrapper.addView(thumbs, thumbsLp);
+        if (thumbs.getChildCount() > 0) wrapper.addView(thumbs, 1, thumbsLp);
     }
 
     private void appendAgentDelta(String text) {
