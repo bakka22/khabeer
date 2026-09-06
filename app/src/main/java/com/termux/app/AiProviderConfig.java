@@ -233,6 +233,7 @@ public final class AiProviderConfig {
     private static final String KEY_OC_ROUTE_KEY = "oc_route_key_";
     private static final String KEY_OC_ROUTE_MODEL = "oc_route_model_";
     private static final String KEY_OC_SELECTED_ROUTE = "oc_selected_route";
+    private static final String KEY_ENDPOINT_PREF = "endpoint_pref_";
 
     public static String ocRouteUrl(String route) {
         return OC_ROUTE_GO.equals(route) ? "https://opencode.ai/zen/go/v1" : "https://opencode.ai/zen/v1";
@@ -275,6 +276,19 @@ public final class AiProviderConfig {
     public String getOpenCodeRouteModel(String route) {
         return mPrefs.getString(KEY_OC_ROUTE_MODEL + (route == null ? OC_ROUTE_FREE : route),
             ocRouteDefaultModel(route));
+    }
+
+    /** Remembers which endpoint actually serves a model ("chat" or
+     * "responses"), so auto-discovery runs once per model, not per turn. */
+    public String getEndpointPreference(String providerId, String model) {
+        if (TextUtils.isEmpty(providerId) || TextUtils.isEmpty(model)) return "";
+        return mPrefs.getString(KEY_ENDPOINT_PREF + providerId + ":" + model, "");
+    }
+
+    public void setEndpointPreference(String providerId, String model, String endpoint) {
+        if (TextUtils.isEmpty(providerId) || TextUtils.isEmpty(model)) return;
+        if (TextUtils.isEmpty(endpoint)) mPrefs.edit().remove(KEY_ENDPOINT_PREF + providerId + ":" + model).apply();
+        else mPrefs.edit().putString(KEY_ENDPOINT_PREF + providerId + ":" + model, endpoint).apply();
     }
 
     // ---- New-session flow: last used + readiness ----

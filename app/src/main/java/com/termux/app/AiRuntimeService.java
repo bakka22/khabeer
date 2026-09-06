@@ -2484,14 +2484,27 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
     /** Retried chat-completions call (429 + 5xx, like the other dialects).
      * If 5xx persists with tools attached, one final attempt goes out as a
      * plain completion: a reply without tool use beats a dead turn on
-     * models whose function-calling path is broken. */
+     * models whose function-calling path is broken. If the plain shape
+     * still 5xx on an OpenCode route, the model may be Responses-only
+     * (Zen answers 500 on /chat/completions for those) — discover the
+     * working endpoint automatically and remember it per model. */
     private JSONObject callChatCompletionsApiWithRetry(String providerId, String baseUrl, String apiKey, String model,
                                                        JSONArray messages) throws Exception {
+        if ("responses".equals(endpointPreference(providerId, model))) {
+            try {
+                return chatViaResponses(providerId, baseUrl, apiKey, model, messages);
+            } catch (Exception rememberedFailed) {
+                // Cached endpoint went stale — fall through to chat and
+                // re-discover below.
+            }
+        }
         int maxRetries = 3;
         Exception last = null;
         for (int attempt = 0; attempt <= maxRetries; attempt++) {
             try {
-                return callChatCompletionsApi(providerId, baseUrl, apiKey, model, messages, true);
+                JSONObject ok = callChatCompletionsApi(providerId, baseUrl, apiKey, model, messages, true);
+                saveEndpointPreference(providerId, model, "chat");
+                return ok;
             } catch (Exception e) {
                 last = e;
                 String msg = e.getMessage() == null ? "" : e.getMessage();
@@ -2508,13 +2521,82 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         if (lastMsg.contains("HTTP 5") && ctx() != null && !ctx().stopRequested) {
             emit("turn/toolsDegraded", json("reason", "function-calling rejected; retrying as plain completion"));
             try {
-                return callChatCompletionsApi(providerId, baseUrl, apiKey, model, messages, false);
+                JSONObject ok = callChatCompletionsApi(providerId, baseUrl, apiKey, model, messages, false);
+                saveEndpointPreference(providerId, model, "chat");
+                return ok;
             } catch (Exception plainFailed) {
-                throw last;
+                last = plainFailed;
+            }
+            if ("opencode".equals(providerId)) {
+                emit("turn/toolsDegraded", json("reason", "chat endpoint failing; trying Responses API"));
+                try {
+                    JSONObject ok = chatViaResponses(providerId, baseUrl, apiKey, model, messages);
+                    saveEndpointPreference(providerId, model, "responses");
+                    return ok;
+                } catch (Exception responsesFailed) {
+                    saveEndpointPreference(providerId, model, null);
+                }
             }
         }
         if (last != null) throw last;
         throw new IllegalStateException("chat completions retry exhausted");
+    }
+
+    private String endpointPreference(String providerId, String model) {
+        try {
+            if (mProviderConfig == null) return "";
+            return mProviderConfig.getEndpointPreference(providerId, model);
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
+    private void saveEndpointPreference(String providerId, String model, @Nullable String endpoint) {
+        try {
+            if (mProviderConfig == null) return;
+            mProviderConfig.setEndpointPreference(providerId, model, endpoint);
+        } catch (Exception ignored) {
+        }
+    }
+
+    /** Runs one Responses-API step and converts the result into the
+     * chat-completions shape the tool loop expects, so endpoint fallback
+     * stays invisible to the rest of the turn. */
+    private JSONObject chatViaResponses(String providerId, String baseUrl, String apiKey, String model,
+                                        JSONArray messages) throws Exception {
+        JSONArray source = messages;
+        if (ctx() != null && ctx().chatMessages != null) source = ctx().chatMessages;
+        JSONArray input = toResponsesInput(source);
+        String effort = ctx() == null ? null : ctx().effort;
+        JSONObject response = callResponsesApiWithRetry(providerId, responsesUrl(baseUrl), apiKey, model, effort, input);
+        JSONObject message = new JSONObject().put("role", "assistant");
+        StringBuilder content = new StringBuilder();
+        JSONArray toolCalls = new JSONArray();
+        JSONArray outputs = response.optJSONArray("output");
+        if (outputs != null) {
+            for (int i = 0; i < outputs.length(); i++) {
+                JSONObject item = outputs.optJSONObject(i);
+                if (item == null) continue;
+                String type = item.optString("type");
+                if ("message".equals(type)) content.append(extractMessageText(item));
+                else if ("function_call".equals(type)) {
+                    toolCalls.put(new JSONObject()
+                        .put("id", item.optString("call_id", item.optString("id")))
+                        .put("type", "function")
+                        .put("function", new JSONObject()
+                            .put("name", item.optString("name"))
+                            .put("arguments", item.optString("arguments", "{}"))));
+                }
+            }
+        } else {
+            content.append(response.optString("output_text", ""));
+        }
+        if (content.length() > 0) message.put("content", content.toString());
+        if (toolCalls.length() > 0) message.put("tool_calls", toolCalls);
+        return new JSONObject()
+            .put("choices", new JSONArray().put(new JSONObject()
+                .put("finish_reason", toolCalls.length() > 0 ? "tool_calls" : "stop")
+                .put("message", message)));
     }
 
     private JSONObject callChatCompletionsApi(String providerId, String baseUrl, String apiKey, String model,
@@ -2750,6 +2832,13 @@ private void runTurn(RunContext ctx, String providerId, String baseUrl, String a
         if (clean.endsWith("/chat/completions")) return clean;
         if (clean.endsWith("/")) clean = clean.substring(0, clean.length() - 1);
         return clean + "/chat/completions";
+    }
+
+    private String responsesUrl(String baseUrl) {
+        String clean = baseUrl == null ? "" : baseUrl.trim();
+        if (clean.endsWith("/responses")) return clean;
+        if (clean.endsWith("/")) clean = clean.substring(0, clean.length() - 1);
+        return clean + "/responses";
     }
 
     /** OpenCode Go (and Zen, same infra) requires x-opencode-session: one
