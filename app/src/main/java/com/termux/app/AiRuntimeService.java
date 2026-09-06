@@ -19,6 +19,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
@@ -488,6 +489,35 @@ public void archiveRun(String runId, boolean archived) {
             }
         }
         mDatabase.setRunArchived(runId, archived);
+    }
+
+    /** Permanently deletes a session: stops any live turn, drops it as the
+     * current session, removes its attachments dir, and wipes its database
+     * rows. Irreversible — callers must confirm first. */
+    public void deleteRun(String runId) {
+        if (runId == null) return;
+        RunContext live = mRuns.get(runId);
+        if (live != null) {
+            stopRun(live);
+            mRuns.remove(runId);
+            if (mViewed == live) {
+                mViewed = null;
+                for (Listener listener : new ArrayList<>(mListeners)) listener.onRunChanged(null);
+            }
+        }
+        mDatabase.deleteRun(runId);
+        try {
+            File attachments = AiAttachments.sessionDir(runId);
+            if (attachments.isDirectory()) deleteRecursive(attachments);
+        } catch (Exception ignored) {}
+    }
+
+    private static void deleteRecursive(File file) {
+        if (file == null || !file.exists()) return;
+        File[] children = file.isDirectory() ? file.listFiles() : null;
+        if (children != null) for (File child : children) deleteRecursive(child);
+        //noinspection ResultOfMethodCallIgnored
+        file.delete();
     }
 
     /** Resume a persisted session: restore its transcript into the runtime so

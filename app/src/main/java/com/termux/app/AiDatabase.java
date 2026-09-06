@@ -1253,6 +1253,18 @@ public final class AiDatabase extends SQLiteOpenHelper {
         getWritableDatabase().update("runs", v, "id=?", new String[]{runId});
     }
 
+    /** Permanently deletes a session and everything attached to it:
+     * messages (FTS rows cascade via the delete triggers), events,
+     * token ledger, and the run row itself. Irreversible. */
+    public synchronized void deleteRun(String runId) {
+        if (runId == null) return;
+        SQLiteDatabase db = getWritableDatabase();
+        db.delete("turn_usage", "session_id=?", new String[]{runId});
+        db.delete("events", "run_id=?", new String[]{runId});
+        db.delete("messages", "session_id=?", new String[]{runId});
+        db.delete("runs", "id=?", new String[]{runId});
+    }
+
     public synchronized JSONArray getTranscript(String sessionId, int limit) {
         JSONArray out = new JSONArray();
         Cursor c;

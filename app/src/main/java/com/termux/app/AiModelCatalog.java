@@ -67,6 +67,61 @@ public final class AiModelCatalog {
         return clean + "/models";
     }
 
+    /** Raw catalog entries keyed by model id (or Codex slug), for capability
+     * probes like reasoning support. Same endpoints and auth as fetch(). */
+    public static java.util.Map<String, JSONObject> fetchCapabilities(AiProviderProfile profile,
+                                                                     String baseUrl, String apiKey) throws Exception {
+        return fetchCapabilities(profile, baseUrl, apiKey, null);
+    }
+
+    public static java.util.Map<String, JSONObject> fetchCapabilities(AiProviderProfile profile,
+                                                                     String baseUrl, String apiKey,
+                                                                     @Nullable String codexAccountId) throws Exception {
+        java.util.Map<String, JSONObject> out = new java.util.LinkedHashMap<>();
+        if (profile != null && "openai-codex".equals(profile.id)) {
+            JSONObject catalog = ProviderLogin.fetchCodexModels(apiKey, codexAccountId);
+            JSONArray entries = catalog.optJSONArray("models");
+            if (entries != null) {
+                for (int i = 0; i < entries.length(); i++) {
+                    JSONObject entry = entries.optJSONObject(i);
+                    if (entry == null) continue;
+                    String slug = entry.optString("slug", "");
+                    if (!TextUtils.isEmpty(slug)) out.put(slug, entry);
+                }
+            }
+            return out;
+        }
+        String url = modelsUrl(baseUrl);
+        if (TextUtils.isEmpty(url)) throw new IllegalArgumentException("Provider has no model catalog URL.");
+
+        HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
+        connection.setRequestMethod("GET");
+        connection.setConnectTimeout(15000);
+        connection.setReadTimeout(45000);
+        connection.setRequestProperty("Accept", "application/json");
+        if (!TextUtils.isEmpty(apiKey)) connection.setRequestProperty("Authorization", "Bearer " + apiKey);
+        if (profile != null && "anthropic".equals(profile.id))
+            connection.setRequestProperty("anthropic-version", "2023-06-01");
+
+        int code = connection.getResponseCode();
+        InputStream stream = code >= 200 && code < 300 ? connection.getInputStream() : connection.getErrorStream();
+        String text = readFully(stream);
+        if (code < 200 || code >= 300)
+            throw new IllegalStateException("Model catalog request failed with HTTP " + code + ": " + text);
+        JSONObject root = new JSONObject(text);
+        JSONArray data = root.optJSONArray("data");
+        if (data == null) data = root.optJSONArray("models");
+        if (data != null) {
+            for (int i = 0; i < data.length(); i++) {
+                JSONObject item = data.optJSONObject(i);
+                if (item == null) continue;
+                String id = item.optString("id", "");
+                if (!TextUtils.isEmpty(id)) out.put(id, item);
+            }
+        }
+        return out;
+    }
+
     private static List<String> parseCodexModels(JSONObject catalog) {
         List<String> models = new ArrayList<>();
         List<long[]> priorities = new ArrayList<>();

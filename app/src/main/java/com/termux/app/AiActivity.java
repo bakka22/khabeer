@@ -64,6 +64,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -5275,16 +5276,93 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         setStatus("Model selected: " + cleanModel, false);
     }
 
+    /** Reasoning picker with live per-model levels: the catalog is checked
+     * in the background (1h cache) and the dialog reflects what the
+     * endpoint actually advertises — explicit lists where published
+     * (Copilot), hidden ladder when reasoning is omitted
+     * (OpenRouter-style supported_parameters), default ladder otherwise.
+     * Failures fall back to the default ladder silently. */
     private void showReasoningDialog() {
-        final String[] labels = new String[]{"Auto", "Low", "Medium", "High", "XHigh", "Ultra"};
-        final String[] values = new String[]{"", "low", "medium", "high", "xhigh", "ultra"};
+        if (mSelectedProfile == null) return;
+        final AiProviderProfile profile = mSelectedProfile;
+        final String model = TextUtils.isEmpty(mSelectedModel) ? profile.defaultModel : mSelectedModel;
+        String resolvedBaseUrl = mProviderConfig.getBaseUrl(profile);
+        String resolvedApiKey = mProviderConfig.resolveCredential(profile);
+        if (mHasNativeSession && mRuntimeService != null && "opencode".equals(profile.id)) {
+            AiDatabase.RunRecord viewed = mRuntimeService.getActiveRun();
+            if (viewed != null && !TextUtils.isEmpty(viewed.route)) {
+                resolvedBaseUrl = AiProviderConfig.ocRouteUrl(viewed.route);
+                resolvedApiKey = mProviderConfig.getOpenCodeRouteKey(viewed.route);
+            }
+        }
+        final String baseUrl = resolvedBaseUrl;
+        final String apiKey = resolvedApiKey;
+        mReasoningButton.setEnabled(false);
+        new Thread(() -> {
+            AiReasoningLevels.Result result;
+            try {
+                result = AiReasoningLevels.resolve(profile, model, baseUrl, apiKey);
+            } catch (Exception e) {
+                result = new AiReasoningLevels.Result(AiReasoningLevels.Status.DEFAULT, null);
+            }
+            final AiReasoningLevels.Result resolved = result;
+            runOnUiThread(() -> {
+                mReasoningButton.setEnabled(true);
+                showReasoningLevelsDialog(profile, model, resolved);
+            });
+        }, "khabeer-reasoning-levels").start();
+    }
+
+    private void showReasoningLevelsDialog(AiProviderProfile profile, String model,
+                                           AiReasoningLevels.Result result) {
+        if (result.status == AiReasoningLevels.Status.UNSUPPORTED) {
+            mSelectedEffort = EFFORT_AUTO;
+            syncControlLabels();
+            new MaterialAlertDialogBuilder(this)
+                .setTitle(R.string.ai_select_reasoning_title)
+                .setMessage("The live catalog for " + model + " omits reasoning support, so effort selection is off and Auto is used.")
+                .setPositiveButton(android.R.string.ok, null)
+                .show();
+            return;
+        }
+        final String[] values;
+        final String[] labels;
+        if (result.status == AiReasoningLevels.Status.EXPLICIT && !result.levels.isEmpty()) {
+            values = new String[result.levels.size() + 1];
+            labels = new String[result.levels.size() + 1];
+            values[0] = "";
+            labels[0] = "Auto";
+            for (int i = 0; i < result.levels.size(); i++) {
+                values[i + 1] = result.levels.get(i);
+                labels[i + 1] = capitalize(result.levels.get(i)) + " (live)";
+            }
+        } else {
+            labels = new String[]{"Auto", "Low", "Medium", "High", "XHigh", "Ultra"};
+            values = new String[]{"", "low", "medium", "high", "xhigh", "ultra"};
+        }
+        String current = clean(mSelectedEffort);
+        int checked = 0;
+        for (int i = 0; i < values.length; i++) {
+            if (values[i].equals(current)) {
+                checked = i;
+                break;
+            }
+        }
         new MaterialAlertDialogBuilder(this)
             .setTitle(R.string.ai_select_reasoning_title)
-            .setItems(labels, (dialog, which) -> {
-                mSelectedEffort = values[which];
+            .setSingleChoiceItems(labels, checked, (dialog, which) -> {
+                mSelectedEffort = AiReasoningLevels.clamp(values[which], Arrays.asList(values).subList(1, values.length));
+                if (TextUtils.isEmpty(mSelectedEffort)) mSelectedEffort = "";
                 syncControlLabels();
+                dialog.dismiss();
             })
+            .setNegativeButton(android.R.string.cancel, null)
             .show();
+    }
+
+    private static String capitalize(String value) {
+        if (TextUtils.isEmpty(value)) return value;
+        return value.substring(0, 1).toUpperCase() + value.substring(1);
     }
 
     private void showApprovalDialog() {
@@ -6044,18 +6122,49 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
 
         row.setOnClickListener(v -> resumeSession(run, archived));
         if (!archived) row.setOnLongClickListener(v -> { showSessionActions(run); return true; });
+        else row.setOnLongClickListener(v -> { showArchivedSessionActions(run); return true; });
         return row;
     }
 
     private void showSessionActions(AiDatabase.RunRecord run) {
         new MaterialAlertDialogBuilder(this)
             .setTitle(run.title == null ? "Session" : run.title)
-            .setItems(new String[]{"Branch session", "Compact session", "Share as markdown", "Save .md file", "Archive session"}, (dialog, which) -> {
+            .setItems(new String[]{"Branch session", "Compact session", "Share as markdown", "Save .md file", "Archive session", "Delete permanently"}, (dialog, which) -> {
                 if (which == 0) promptBranchSession(run);
                 else if (which == 1) confirmCompactSession(run);
                 else if (which == 2) shareSessionMarkdown(run);
                 else if (which == 3) saveSessionMarkdown(run);
-                else confirmArchive(run);
+                else if (which == 4) confirmArchive(run);
+                else confirmDeleteSession(run);
+            })
+            .show();
+    }
+
+    private void showArchivedSessionActions(AiDatabase.RunRecord run) {
+        new MaterialAlertDialogBuilder(this)
+            .setTitle(run.title == null ? "Session" : run.title)
+            .setItems(new String[]{"Restore", "Delete permanently"}, (dialog, which) -> {
+                if (which == 0) resumeSession(run, true);
+                else confirmDeleteSession(run);
+            })
+            .show();
+    }
+
+    private void confirmDeleteSession(AiDatabase.RunRecord run) {
+        if (mRuntimeService == null || run == null || run.id == null) return;
+        boolean isActive = run.id.equals(mCurrentRunId);
+        new MaterialAlertDialogBuilder(this)
+            .setTitle("Delete session?")
+            .setMessage(isActive
+                ? "Permanently delete this session and its full history? This cannot be undone."
+                : "Permanently delete '" + (run.title == null ? "this session" : run.title) + "' and its full history? This cannot be undone.")
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton("Delete", (dialog, which) -> {
+                mRuntimeService.deleteRun(run.id);
+                refreshRecentRuns();
+                if (mSessionsPage != null && mSessionsPage.getVisibility() == View.VISIBLE) refreshSessionsPage();
+                if (isActive) startNewSession();
+                else setStatus("Session deleted.", false);
             })
             .show();
     }
