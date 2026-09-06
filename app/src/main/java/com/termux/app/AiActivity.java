@@ -192,12 +192,14 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     private String mSelectedApproval = APPROVAL_ON_REQUEST;
     private TextView mStreamingAgentBubble;
     private TextView mThinkingBubble;
+    private TextView mTurnStatus;
     private ToolBubble mReasoningBubble;
     private ToolBubble mCurrentToolBubble;
     private boolean mShowThinkingDetails;
     private int mThinkingFrame;
     private boolean mUserScrolledUp;
     private final StringBuilder mPendingReasoning = new StringBuilder();
+    private boolean mReasoningFlushScheduled;
 
     private final Handler mUiHandler = new Handler(Looper.getMainLooper());
     private final Runnable mThinkingAnimator = new Runnable() {
@@ -246,7 +248,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         public void onServiceConnected(ComponentName name, IBinder service) {
             mTermuxBound = true;
             mTermuxService = ((TermuxService.LocalBinder) service).service;
-            mShellStatus.setText("Shell available as an optional tool view.");
+            mShellStatus.setText("Terminal environment ready for agent commands.");
             mShellStatus.setTextColor(color(R.color.ai_success));
         }
 
@@ -272,12 +274,24 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         setupActions();
         selectProvider(AiProviderProfile.find(mProviderConfig.getSelectedProviderId()), false);
         mChatTitle.setText("khabeer");
-        bindRuntime();
-        bindTermux();
+        initializeTerminalEnvironment();
         ensureNotificationPermission();
     }
 
     private static final int REQUEST_POST_NOTIFICATIONS = 9001;
+    private static final int REQUEST_STORAGE_ACCESS = 9002;
+
+    private void initializeTerminalEnvironment() {
+        mChatSendButton.setEnabled(false);
+        mShellStatus.setText("Preparing terminal environment…");
+        TermuxInstaller.setupBootstrapIfNeeded(this, () -> {
+            if (isFinishing() || isDestroyed()) return;
+            bindTermux();
+            bindRuntime();
+            mChatSendButton.setEnabled(true);
+            mShellStatus.setText("Terminal environment ready for agent commands.");
+        });
+    }
 
     /** Android 13+ needs an explicit grant before background approval and
      * finish alerts can appear. Asked once per install; a denial just
@@ -294,6 +308,10 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQUEST_STORAGE_ACCESS) {
+            finishStorageAccessRequest(true);
+            return;
+        }
         if (requestCode != REQUEST_POST_NOTIFICATIONS) return;
         boolean granted = grantResults != null && grantResults.length > 0
             && grantResults[0] == android.content.pm.PackageManager.PERMISSION_GRANTED;
@@ -443,6 +461,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mTerminalCard = findViewById(R.id.ai_terminal_card);
         mProviderGrid = findViewById(R.id.ai_harness_grid);
         mChatMessages = findViewById(R.id.ai_chat_messages);
+        mTurnStatus = findViewById(R.id.ai_turn_status);
         mAttachmentList = findViewById(R.id.ai_attachment_list);
         mWorkspaceInput = findViewById(R.id.ai_workspace_input);
         mWorkspaceInputLayout = findViewById(R.id.ai_workspace_input_layout);
@@ -4153,15 +4172,28 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         // resolved choice and open an empty chat. The send path resolves
         // route credentials and passes the route to startAgent (F1).
         mNsActive = false;
+        resetChatSession();
+        mSuggestionStrip.setVisibility(View.VISIBLE);
+        setStatus(profile.name + " · " + model + " ready. Type your first message.", false);
+        showChatPage();
+    }
+
+    /** Detach the viewed run before clearing its UI; background turns remain live. */
+    private void resetChatSession() {
+        if (mRuntimeService != null) mRuntimeService.newSession();
+        mCurrentRunId = null;
+        mRunActive = false;
+        mHasNativeSession = false;
+        updateTurnStatus(null);
         mChatMessages.removeAllViews();
         mStreamingAgentBubble = null;
         hideThinkingBubble();
         clearReasoningBuffer();
+        mReasoningBubble = null;
+        mCurrentToolBubble = null;
         mStopButton.setVisibility(View.GONE);
         mEmptyChatHint.setVisibility(View.VISIBLE);
-        mSuggestionStrip.setVisibility(View.VISIBLE);
-        setStatus(profile.name + " · " + model + " ready. Type your first message.", false);
-        showChatPage();
+        mChatTitle.setText("khabeer");
     }
 
     /** Fully resolved endpoint + credential for a flow choice. Never falls
@@ -4510,19 +4542,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     }
 
     private void startNewSession() {
-        if (mRuntimeService != null) mRuntimeService.newSession();
-        mCurrentRunId = null;
-        mRunActive = false;
-        mHasNativeSession = false;
-        mChatMessages.removeAllViews();
-        mStreamingAgentBubble = null;
-        hideThinkingBubble();
-        clearReasoningBuffer();
-        mReasoningBubble = null;
-        mCurrentToolBubble = null;
-        mStopButton.setVisibility(View.GONE);
-        mEmptyChatHint.setVisibility(View.VISIBLE);
-        mChatTitle.setText("khabeer");
+        resetChatSession();
         mChatPage.setVisibility(View.GONE);
         mSetupPanel.setVisibility(View.GONE);
         mHomePanel.setVisibility(View.VISIBLE);
@@ -4603,6 +4623,9 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             }
             mRuntimeService.startAgent(profile.id, creds[0], creds[1], workspace, prompt, model,
                 clean(mSelectedEffort), mSelectedApproval, route);
+            // Creation is synchronous; do not wait for posted state callbacks
+            // before treating a second message as part of this conversation.
+            onRunChanged(mRuntimeService.getActiveRun());
         }
     }
 
@@ -5703,6 +5726,10 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     @Override
     protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_STORAGE_ACCESS) {
+            finishStorageAccessRequest(false);
+            return;
+        }
         if ((requestCode == REQUEST_PICK_IMAGE || requestCode == REQUEST_PICK_FILE)
             && resultCode == RESULT_OK && data != null && data.getData() != null) {
             importAttachmentUri(data.getData());
@@ -5741,9 +5768,30 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     }
 
     private void ensureStorageAccess() {
-        if (PermissionUtils.checkAndRequestLegacyOrManageExternalStoragePermission(this, -1, true)) {
+        if (PermissionUtils.checkAndRequestLegacyOrManageExternalStoragePermission(this, REQUEST_STORAGE_ACCESS, false)) {
             TermuxInstaller.setupStorageSymlinks(this);
             setStatus(getString(R.string.ai_phone_storage_ready), false);
+        }
+    }
+
+    private void finishStorageAccessRequest(boolean offerSettings) {
+        if (PermissionUtils.checkAndRequestLegacyOrManageExternalStoragePermission(this, -1, false)) {
+            TermuxInstaller.setupStorageSymlinks(this);
+            setStatus(getString(R.string.ai_phone_storage_ready), false);
+            return;
+        }
+        setStatus("Storage access was not granted. You can enable it from the drawer when needed.", true);
+        if (offerSettings && android.os.Build.VERSION.SDK_INT >= 23
+            && PermissionUtils.isLegacyExternalStoragePossible(this)
+            && !shouldShowRequestPermissionRationale(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)) {
+            new MaterialAlertDialogBuilder(this)
+                .setTitle("Allow storage access")
+                .setMessage("Android is no longer showing the permission prompt. Open app settings, choose Permissions, and allow storage access.")
+                .setNegativeButton(android.R.string.cancel, null)
+                .setPositiveButton("Open settings", (dialog, which) -> startActivityForResult(
+                    new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.parse("package:" + getPackageName())), REQUEST_STORAGE_ACCESS))
+                .show();
         }
     }
 
@@ -5751,9 +5799,9 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
     public void onRunChanged(AiDatabase.RunRecord run) {
         // Background sessions stream updates too — only the run the service
         // currently has in view may drive the chat UI state.
-        if (run != null && mRuntimeBound && mRuntimeService != null) {
+        if (mRuntimeBound && mRuntimeService != null) {
             AiDatabase.RunRecord viewed = mRuntimeService.getActiveRun();
-            if (viewed == null || !viewed.id.equals(run.id)) {
+            if (run == null ? viewed != null : viewed == null || !viewed.id.equals(run.id)) {
                 refreshRecentRuns();
                 if (mSessionsPage != null && mSessionsPage.getVisibility() == View.VISIBLE) refreshSessionsPage();
                 return;
@@ -5767,10 +5815,9 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             && run.state != AiRunStateMachine.State.FAILED
             && run.state != AiRunStateMachine.State.CANCELED;
         mStopButton.setVisibility(mRunActive ? View.VISIBLE : View.GONE);
+        updateTurnStatus(run);
         if (!mRunActive) {
-            hideThinkingBubble();
-            clearReasoningBuffer();
-            mReasoningBubble = null;
+            endThinkingSegment();
             mCurrentToolBubble = null;
         }
         if (run != null) setStatus(run.state.name().toLowerCase(), run.state == AiRunStateMachine.State.FAILED);
@@ -5787,9 +5834,14 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
 
     @Override
     public void onProtocolEvent(String runId, String method, JSONObject payload) {
-        if (runId != null && mCurrentRunId != null && !runId.equals(mCurrentRunId)
-            && !method.contains("requestApproval") && !method.startsWith("session/") && !method.startsWith("memory/")) return;
+        if (runId != null && !isViewedRun(runId)
+            && !method.contains("requestApproval")
+            && !(method.startsWith("memory/compaction") && runId.equals(mCompactingRunId))) return;
         if ("turn/started".equals(method)) {
+            mRunActive = true;
+            mStopButton.setVisibility(View.VISIBLE);
+            updateTurnStatus(null);
+            setStatus("Running", false);
             mStreamingAgentBubble = null;
             clearReasoningBuffer();
             mReasoningBubble = null;
@@ -5864,12 +5916,24 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
 
     @Override
     public void onRuntimeError(String runId, String message) {
-        if (runId != null && mCurrentRunId != null && !runId.equals(mCurrentRunId)) {
-            setStatus(message, true);
-            return;
-        }
+        if (runId != null && !isViewedRun(runId)) return;
         showError(message);
         addSystemMessage(message);
+    }
+
+    private boolean isViewedRun(String runId) {
+        if (mRuntimeBound && mRuntimeService != null) {
+            AiDatabase.RunRecord viewed = mRuntimeService.getActiveRun();
+            return viewed != null && runId.equals(viewed.id);
+        }
+        return runId.equals(mCurrentRunId);
+    }
+
+    private void updateTurnStatus(@Nullable AiDatabase.RunRecord run) {
+        if (mTurnStatus == null) return;
+        mTurnStatus.setVisibility(mRunActive ? View.VISIBLE : View.GONE);
+        mTurnStatus.setText(run != null && run.state == AiRunStateMachine.State.WAITING_APPROVAL
+            ? "Waiting for approval…" : "Running…");
     }
 
     private void addUserMessage(String text) {
@@ -5934,19 +5998,17 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
 
     private void toggleThinkingDetails() {
         mShowThinkingDetails = !mShowThinkingDetails;
-        if (mShowThinkingDetails) hideThinkingBubble();
+        flushReasoningUi();
+        if (mReasoningBubble != null) {
+            mReasoningBubble.expanded = mShowThinkingDetails;
+            mReasoningBubble.detail.setVisibility(mShowThinkingDetails ? View.VISIBLE : View.GONE);
+        }
         syncControlLabels();
     }
 
     private void showThinkingBubble() {
-        if (mShowThinkingDetails) {
-            mReasoningBubble = startExpandableBubble("Reasoning", "Thinking details · live", false);
-            mReasoningBubble.expanded = true;
-            mReasoningBubble.detail.setVisibility(View.VISIBLE);
-            mReasoningBubble.details.append("Waiting for provider response…\n");
-            mReasoningBubble.detail.setText(mReasoningBubble.details.toString());
-            return;
-        }
+        // Waiting is an activity indicator, not fabricated provider reasoning.
+        if (mThinkingBubble != null || mReasoningBubble != null) return;
         hideThinkingBubble();
         mThinkingFrame = 0;
         mThinkingBubble = addBubble(mSelectedProfile == null ? "Agent" : mSelectedProfile.name,
@@ -5963,26 +6025,14 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         mThinkingBubble = null;
     }
 
-    /** Retire the live reasoning bubble so the next thinking segment starts fresh. */
-    private void retireReasoningBubble() {
-        if (mReasoningBubble == null) return;
-        View wrapper = (View) mReasoningBubble.summary.getParent();
-        if (wrapper != null && wrapper.getParent() instanceof ViewGroup)
-            ((ViewGroup) wrapper.getParent()).removeView(wrapper);
-        mReasoningBubble = null;
-    }
-
     private void appendReasoningDelta(String text) {
         if (TextUtils.isEmpty(text)) return;
-        if (mShowThinkingDetails) {
-            mPendingReasoning.append(text);
-            mUiHandler.removeCallbacks(mReasoningFlusher);
+        mPendingReasoning.append(text);
+        // Throttle instead of debounce: continuous tokens must not postpone
+        // the scheduled render. Keep compact-mode text available for expansion.
+        if (!mReasoningFlushScheduled) {
+            mReasoningFlushScheduled = true;
             mUiHandler.postDelayed(mReasoningFlusher, REASONING_FLUSH_DELAY_MS);
-        } else {
-            // Reasoning resumed after a tool call or message: start the next
-            // thinking segment bubble instead of staying silent.
-            if (mThinkingBubble == null) showThinkingBubble();
-            appendEvent("reasoning", oneLine(text, 220));
         }
     }
 
@@ -5991,23 +6041,19 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
      * both bubble states. The next reasoning delta starts a fresh segment. */
     private void endThinkingSegment() {
         flushReasoningUi();
-        // A segment that never received reasoning keeps only its "Waiting…"
-        // placeholder — remove that stub instead of leaving it in the transcript.
-        if (mReasoningBubble != null
-            && "Waiting for provider response…\n".contentEquals(mReasoningBubble.details)) {
-            retireReasoningBubble();
-        }
+        if (mReasoningBubble != null) mReasoningBubble.summary.setText("Thinking details");
         mReasoningBubble = null;
         hideThinkingBubble();
     }
 
     private void flushReasoningUi() {
-        if (mPendingReasoning.length() == 0 || !mShowThinkingDetails) return;
+        mUiHandler.removeCallbacks(mReasoningFlusher);
+        mReasoningFlushScheduled = false;
+        if (mPendingReasoning.length() == 0) return;
         hideThinkingBubble();
         if (mReasoningBubble == null) {
             mReasoningBubble = startExpandableBubble("Reasoning", "Thinking details · live", false);
-            mReasoningBubble.expanded = true;
-            mReasoningBubble.detail.setVisibility(View.VISIBLE);
+            mReasoningBubble.expanded = mShowThinkingDetails;
         }
         mReasoningBubble.details.append(mPendingReasoning);
         mPendingReasoning.setLength(0);
@@ -6027,6 +6073,7 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
 
     private void clearReasoningBuffer() {
         mUiHandler.removeCallbacks(mReasoningFlusher);
+        mReasoningFlushScheduled = false;
         mPendingReasoning.setLength(0);
     }
 
@@ -6427,8 +6474,10 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         dismissCompactionDialog();
         int archived = payload.optInt("archived_messages", 0);
         int kept = payload.optInt("protected_tail", 0);
-        addSystemMessage("Compaction complete: " + archived + " older messages archived into a checkpoint, "
-            + kept + " recent kept. Memory files stay authoritative — ask with session_search if you need pre-compaction detail.");
+        if (runId != null && isViewedRun(runId)) {
+            addSystemMessage("Compaction complete: " + archived + " older messages archived into a checkpoint, "
+                + kept + " recent kept. Memory files stay authoritative — ask with session_search if you need pre-compaction detail.");
+        }
         setStatus("Session compacted.", false);
         if (mCurrentRunId != null && mCurrentRunId.equals(runId)) rebuildTranscript(runId);
         refreshRecentRuns();

@@ -12,7 +12,7 @@ This is an independent community project. The agent runtime is implemented in Ja
 
 ## Status and installation compatibility
 
-Khabeer is under active development. This repository publishes source; APK releases are a separate step. Build locally using the instructions below. Provider integrations and background behavior need testing on your device and account.
+Khabeer is under active development. This repository publishes source and APK releases. Build locally using the instructions below. Provider integrations and background behavior need testing on your device and account.
 
 The app currently retains the **`com.termux` application identity and shared user ID**. It cannot coexist with another installation using the same package name. Builds signed by different keys cannot update each other. Back up existing Termux data before changing installations; uninstalling removes app-private files. Khabeer is not an official Termux update, and official Termux plugin APKs are not automatically signature-compatible with it.
 
