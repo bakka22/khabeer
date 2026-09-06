@@ -23,4 +23,4 @@ jobs:
     - name: Install pinned Android components
       run: sdkmanager 'platforms;android-36' 'build-tools;35.0.0' 'ndk;27.0.12077973'
     - name: Generate and submit dependency graph
-      uses: gradle/actions/dependency-submission@v5
+      uses: gradle/actions/dependency-submission@v6
