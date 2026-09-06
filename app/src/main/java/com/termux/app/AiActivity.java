@@ -4414,7 +4414,8 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
             return;
         }
         String prompt = mPromptInput.getText() == null ? "" : mPromptInput.getText().toString().trim();
-        if (prompt.isEmpty()) {
+        boolean hasAttachments = mAttachments.length() > 0;
+        if (prompt.isEmpty() && !hasAttachments) {
             mPromptInput.setError(getString(R.string.ai_prompt_required));
             return;
         }
@@ -5752,13 +5753,15 @@ public final class AiActivity extends AppCompatActivity implements AiRuntimeServ
         addUserMessage(text, null);
     }
 
-    /** User bubble with attached image thumbnails (vision port). */
+    /** User bubble with attached image thumbnails (vision port). Text goes
+     * first, photos beneath it; textless sends show the label plus photos. */
     private void addUserMessage(String text, @Nullable JSONArray images) {
         TextView bubble = addBubble("You", text, true, R.drawable.bg_ai_user_bubble, R.color.ai_text);
         if (images == null || images.length() == 0) return;
         ViewParent parent = bubble.getParent();
         if (!(parent instanceof LinearLayout)) return;
         LinearLayout wrapper = (LinearLayout) parent;
+        if (TextUtils.isEmpty(text)) wrapper.removeView(bubble);
         LinearLayout thumbs = new LinearLayout(this);
         thumbs.setOrientation(LinearLayout.HORIZONTAL);
         thumbs.setGravity(Gravity.END);
